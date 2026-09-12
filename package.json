@@ -4,8 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lint": "bun run lint:biome && bun run lint:oxlint",
+    "lint:biome": "biome ci .",
+    "lint:oxlint": "oxlint",
+    "format": "biome check --write .",
     "test": "vitest run",
     "test:integration": "vitest run test/messages.test.ts",
+    "test:skills": "vitest run test/skills.test.ts",
     "lint:effect": "effect-language-service diagnostics --project tsconfig.json --strict",
     "typecheck": "tsc --noEmit",
     "check": "bun run lint:effect && bun run typecheck",
@@ -18,9 +23,12 @@
     "spectrum-ts": "^12.8.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.12",
     "@effect/language-service": "^0.87.2",
     "@effect/vitest": "^0.30.0",
+    "@oxlint/plugins": "1.82.0",
     "@types/bun": "latest",
+    "oxlint": "1.82.0",
     "typescript": "^5",
     "vitest": "^3.2.0",
     "zod": "4.5.4"
