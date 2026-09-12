@@ -1,0 +1,28 @@
+{
+  "name": "satchel",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:integration": "vitest run test/messages.test.ts",
+    "lint:effect": "effect-language-service diagnostics --project tsconfig.json --strict",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run lint:effect && bun run typecheck",
+    "start": "bun test/imessage.ts",
+    "dev": "bun --watch test/imessage.ts",
+    "test:imessage": "bun test/imessage.ts"
+  },
+  "dependencies": {
+    "effect": "3.22.1",
+    "spectrum-ts": "^12.8.0"
+  },
+  "devDependencies": {
+    "@effect/language-service": "^0.87.2",
+    "@effect/vitest": "^0.30.0",
+    "@types/bun": "latest",
+    "typescript": "^5",
+    "vitest": "^3.2.0",
+    "zod": "4.5.4"
+  }
+}
