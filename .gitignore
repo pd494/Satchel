@@ -1,0 +1,12 @@
+node_modules
+.cache
+.env
+.env.local
+dist
+coverage
+*.log
+.DS_Store
+docs
+AGENTS.md
+agent-patterns
+.zed
