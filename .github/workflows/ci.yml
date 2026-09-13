@@ -42,9 +42,6 @@ jobs:
           - suite: Spectrum integration
             command: bun run test:integration
             required_file: test/messages.test.ts
-          - suite: Skills
-            command: bun run test:skills
-            required_file: test/skills.test.ts
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-project

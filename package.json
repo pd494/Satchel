@@ -12,7 +12,6 @@
     "format": "biome check --write .",
     "test": "vitest run",
     "test:integration": "vitest run test/messages.test.ts",
-    "test:skills": "vitest run test/skills.test.ts",
     "test:coverage": "vitest run --coverage",
     "lint:effect": "effect-language-service diagnostics --project tsconfig.json --strict",
     "typecheck": "tsc --noEmit",
