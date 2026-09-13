@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "coding-standards": {
+      "source": "dmmulroy/skills",
+      "sourceType": "github",
+      "skillPath": "coding-standards/SKILL.md",
+      "computedHash": "4e740075d71028a0d0ee59e2ec28721d8e021be93726dcf9e19b76eff1fd9293"
+    },
+    "effect-service-design": {
+      "source": "dmmulroy/skills",
+      "sourceType": "github",
+      "skillPath": "effect-service-design/SKILL.md",
+      "computedHash": "307d3af97e0343c761d56c260310c75b7e754aec2e64c3dee8c0946570d310ee"
+    },
+    "effect-ts": {
+      "source": "Effect-TS/skills",
+      "sourceType": "github",
+      "skillPath": "skills/effect-ts/SKILL.md",
+      "computedHash": "6bdb9b95aa83071eca2f67ae947b7d398a22e9e6e08f6cfa35de9516b03efa6e"
+    },
+    "spectrum": {
+      "source": "photon-hq/skills",
+      "sourceType": "github",
+      "skillPath": "skills/spectrum/SKILL.md",
+      "computedHash": "8793eb5e52a863f66ed0b7f271dbc1084263e265af65972d51d0acaa44142caa"
+    }
+  }
+}
