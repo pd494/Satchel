@@ -1,15 +1,6 @@
-import { Effect, Schema, Stream } from "effect";
+import { Effect, Stream } from "effect";
 import type { Message, Space } from "spectrum-ts";
-
-/** Failure while consuming the Spectrum application message stream. */
-export class MessageStreamReadError extends Schema.TaggedError<MessageStreamReadError>()(
-  "MessageStreamReadError",
-  {
-    operation: Schema.Literal("app.messages"),
-    message: Schema.String,
-    cause: Schema.String,
-  },
-) {}
+import { MessageSendError, MessageStreamReadError } from "./errors";
 
 /** One conversation-and-message pair emitted by Spectrum. */
 export type MessageEntry = readonly [Space, Message];
@@ -26,16 +17,6 @@ export type MessageHandler<E, R> = (
 
 const causeName = (cause: unknown): string =>
   cause instanceof Error ? cause.name : "Unknown rejection";
-
-/** Failure while sending a response through a Spectrum space. */
-export class MessageSendError extends Schema.TaggedError<MessageSendError>()(
-  "MessageSendError",
-  {
-    operation: Schema.Literal("space.send"),
-    message: Schema.String,
-    cause: Schema.String,
-  },
-) {}
 
 /** Send the current test response for one inbound Spectrum message. */
 export const sendMessage = Effect.fn("Connection.sendMessage")(function* ([

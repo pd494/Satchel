@@ -7,12 +7,8 @@ import {
   UnsupportedError,
 } from "spectrum-ts";
 import z from "zod";
-import {
-  MessageSendError,
-  MessageStreamReadError,
-  recvMessage,
-  sendMessage,
-} from "../src/connection";
+import { recvMessage, sendMessage } from "../src/connection";
+import { MessageSendError, MessageStreamReadError } from "../src/errors";
 
 type Input = {
   readonly id: string;
