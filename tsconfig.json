@@ -1,0 +1,58 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "types": ["bun", "node"],
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "diagnostics": true,
+        "quickinfo": true,
+        "refactors": true,
+        "diagnosticSeverity": {
+          "floatingEffect": "error",
+          "anyUnknownInErrorContext": "error",
+          "unsafeEffectTypeAssertion": "error",
+          "runEffectInsideEffect": "error",
+          "returnEffectInGen": "error",
+          "tryCatchInEffectGen": "error",
+          "globalErrorInEffectFailure": "error",
+          "globalErrorInEffectCatch": "error",
+          "unknownInEffectCatch": "error",
+          "extendsNativeError": "error",
+          "missingEffectServiceDependency": "error",
+          "multipleEffectProvide": "error",
+          "layerMergeAllWithDependencies": "error",
+          "schemaSyncInEffect": "error",
+          "preferSchemaOverJson": "warning",
+          "globalConsole": "error",
+          "globalConsoleInEffect": "error",
+          "processEnv": "error",
+          "processEnvInEffect": "error",
+          "globalTimers": "error",
+          "globalTimersInEffect": "error",
+          "globalDate": "warning",
+          "globalDateInEffect": "warning",
+          "globalRandom": "warning",
+          "globalRandomInEffect": "warning"
+        }
+      }
+    ]
+  },
+  "include": ["src/**/*", "test/**/*", "vitest.config.ts"]
+}

@@ -1,0 +1,40 @@
+{
+  "name": "satchel",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./test/imessage.ts --outdir ./dist --target bun --packages external",
+    "lint": "bun run lint:biome && bun run lint:oxlint",
+    "lint:biome": "biome ci .",
+    "lint:oxlint": "bun run prepare:anti-slop && oxlint",
+    "prepare:anti-slop": "bun build node_modules/oxlint-plugin-anti-slop/src/index.ts --outfile .cache/anti-slop.mjs --target node --format esm --external @oxlint/plugins && bun build node_modules/oxlint-plugin-anti-slop/src/effect/index.ts --outfile .cache/anti-slop-effect.mjs --target node --format esm --external @oxlint/plugins",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "test:integration": "vitest run test/messages.test.ts",
+    "test:skills": "vitest run test/skills.test.ts",
+    "test:coverage": "vitest run --coverage",
+    "lint:effect": "effect-language-service diagnostics --project tsconfig.json --strict",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run lint:effect && bun run typecheck",
+    "start": "bun test/imessage.ts",
+    "dev": "bun --watch test/imessage.ts",
+    "test:imessage": "bun test/imessage.ts"
+  },
+  "dependencies": {
+    "effect": "^3.22.1",
+    "spectrum-ts": "^12.8.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.12",
+    "@effect/language-service": "^0.87.2",
+    "@effect/vitest": "^0.30.0",
+    "@types/bun": "latest",
+    "@vitest/coverage-v8": "3.2.7",
+    "oxlint": "1.78.0",
+    "oxlint-plugin-anti-slop": "github:dmmulroy/anti-slop#c44ef22ca116d0ba62a3ff663a0bd13a3f3fa40b",
+    "typescript": "^5",
+    "vitest": "^3.2.0",
+    "zod": "4.5.4"
+  }
+}
