@@ -5,9 +5,9 @@ import type { Message, Space } from "spectrum-ts";
 export class MessageStreamReadError extends Schema.TaggedError<MessageStreamReadError>()(
   "MessageStreamReadError",
   {
-    operation: Schema.String,
+    operation: Schema.Literal("app.messages"),
     message: Schema.String,
-    cause: Schema.optional(Schema.String),
+    cause: Schema.String,
   },
 ) {}
 
@@ -31,9 +31,9 @@ const causeName = (cause: unknown): string =>
 export class MessageSendError extends Schema.TaggedError<MessageSendError>()(
   "MessageSendError",
   {
-    operation: Schema.String,
+    operation: Schema.Literal("space.send"),
     message: Schema.String,
-    cause: Schema.optional(Schema.String),
+    cause: Schema.String,
   },
 ) {}
 
