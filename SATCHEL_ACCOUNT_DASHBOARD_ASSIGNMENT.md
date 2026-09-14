@@ -73,11 +73,17 @@ Before `Active`, send fixed onboarding messages only—no inference or tools.
 ### Your work
 
 1. Add the Photon webhook Worker endpoint.
+   - Relevant docs: [Photon webhook events](https://photon.codes/docs/webhooks/events) · [Cloudflare Workers `fetch` handler](https://developers.cloudflare.com/workers/runtime-apis/handlers/fetch/)
 2. Read the raw body once; verify signature and timestamp before decoding JSON.
+   - Relevant docs: [Photon webhook verification contract](https://photon.codes/docs/webhooks/events) · [Web Crypto in Workers](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)
 3. Reject stale, malformed, or incorrectly signed events.
+   - Relevant docs: [Effect expected errors](https://effect.website/docs/error-management/expected-errors/) · [Effect Schema decoding](https://effect.website/docs/schema/introduction/)
 4. Deduplicate using webhook ID plus message ID.
+   - Relevant docs: [Durable Object storage API](https://developers.cloudflare.com/durable-objects/api/storage-api/)
 5. Decode with Effect Schema and accept only inbound iMessage text DMs with a sender.
+   - Relevant docs: [Effect Schema](https://effect.website/docs/schema/introduction/) · [Spectrum message shape and direction](https://photon.codes/docs/spectrum-ts/messages) · [project message notes](.agents/skills/spectrum/messages.md)
 6. Produce a provider-neutral verified inbound message.
+   - Relevant docs: [Effect branded types](https://effect.website/docs/code-style/branded-types/) · [Effect Schema](https://effect.website/docs/schema/introduction/)
 
 Use redacted configuration for secrets, distinct tagged errors for each expected failure, and Web Crypto inside the HTTP adapter. Run the Effect only at the Worker entry point.
 
@@ -90,12 +96,19 @@ Use redacted configuration for secrets, distinct tagged errors for each expected
 ### Your work
 
 1. Compute the Account ID with a separate identity secret; never reuse the Photon secret.
+   - Relevant docs: [Web Crypto in Workers](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/) · [Effect branded types](https://effect.website/docs/code-style/branded-types/)
 2. Route the Account ID to one Durable Object and persist state in its storage.
+   - Relevant docs: [Durable Object namespaces](https://developers.cloudflare.com/durable-objects/api/namespace/) · [Durable Object storage](https://developers.cloudflare.com/durable-objects/api/storage-api/)
 3. Parse usernames with a pure domain operation.
+   - Relevant docs: [Effect Schema filters and transformations](https://effect.website/docs/schema/introduction/) · [Effect branded types](https://effect.website/docs/code-style/branded-types/)
 4. Claim a username by attempting a D1 insert protected by a unique constraint. “Check, wait, then claim” is not authoritative.
+   - Relevant docs: [D1 prepared statements](https://developers.cloudflare.com/d1/worker-api/prepared-statements/) · [D1 indexes](https://developers.cloudflare.com/d1/best-practices/use-indexes/)
 5. Ask the user to choose `PUBLIC` or `PRIVATE`.
+   - Relevant docs: [Spectrum text content](https://photon.codes/docs/spectrum-ts/messages) · [project content builders](.agents/skills/spectrum/content.md)
 6. Permit basic agent handling only after activation.
+   - Relevant docs: [Effect services](https://effect.website/docs/requirements-management/services/) · [Effect Layers](https://effect.website/docs/requirements-management/layers/)
 7. Bind replies to the verified inbound Spectrum Space. The user and future model output never choose the recipient.
+   - Relevant docs: [Spectrum spaces and users](https://photon.codes/docs/spectrum-ts/spaces-and-users) · [project reply-vs-outreach notes](.agents/skills/spectrum/spaces-and-users.md)
 
 **Pass when:** the same phone always reaches the same object; different phones never share one; simultaneous username claims have one winner; retries are idempotent; incomplete accounts cannot reach agent handling.
 
@@ -106,17 +119,23 @@ Use redacted configuration for secrets, distinct tagged errors for each expected
 ### Your work
 
 1. Route wildcard subdomains to a dashboard Worker and parse exactly one valid username label.
+   - Relevant docs: [Cloudflare custom domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/) · [Effect Schema](https://effect.website/docs/schema/introduction/)
 2. Resolve the username through D1, then ask the Account Durable Object for a dashboard view.
+   - Relevant docs: [D1 prepared statements](https://developers.cloudflare.com/d1/worker-api/prepared-statements/) · [Durable Object namespaces](https://developers.cloudflare.com/durable-objects/api/namespace/)
 3. Allow everyone when public; when private, require Alice’s valid owner session or return `404`.
+   - Relevant docs: [HTTP cookies](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie) · [Workers headers API](https://developers.cloudflare.com/workers/runtime-apis/headers/)
 4. When Alice texts `DASHBOARD`, send a random one-time link. Store only its hash, expire it quickly, and exchange it for a revocable secure cookie.
+   - Relevant docs: [Web Crypto in Workers](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/) · [`Set-Cookie` security attributes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie) · [Durable Object storage](https://developers.cloudflare.com/durable-objects/api/storage-api/)
 5. Accept only `GET` and `HEAD`, escape displayed text, expose only the dashboard projection, and do not cache pages initially.
+   - Relevant docs: [OWASP output encoding rules](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html) · [Cloudflare cache control](https://developers.cloudflare.com/cache/concepts/cache-control/)
 6. Make public/private switching immediate without changing the account, username, or URL.
+   - Relevant docs: [Durable Object storage](https://developers.cloudflare.com/durable-objects/api/storage-api/)
 
 **Pass when:** Alice’s session cannot open Bob’s dashboard; expired and reused links fail; anonymous private requests return `404`; public pages are readable; mutation methods return `405`.
 
 ## Engineering workflow and grading rubric
 
-For each PR: write behavioral tests first, implement pure domain decisions, add Effect services for application policy, keep Photon/Cloudflare mechanics in adapters, wire Layers at the entry point, then run lint, Effect diagnostics, typechecking, tests, and build.
+For each PR: write behavioral tests first, implement pure domain decisions, add Effect services for application policy, keep Photon/Cloudflare mechanics in adapters, wire Layers at the entry point, then run lint, Effect diagnostics, typechecking, tests, and build. Relevant docs: [Cloudflare Workers Vitest integration](https://developers.cloudflare.com/workers/testing/vitest-integration/) · [Effect services](https://effect.website/docs/requirements-management/services/) · [Effect Layers](https://effect.website/docs/requirements-management/layers/)
 
 Your submission must demonstrate:
 
@@ -130,12 +149,9 @@ Your submission must demonstrate:
 - Never trust an account ID supplied by a browser or message.
 - Fail closed: uncertainty produces private state, `404`, or no send.
 
-## References
+## General references
 
-- [Photon webhook contract](https://photon.codes/docs/webhooks/events)
-- [Cloudflare Durable Object storage](https://developers.cloudflare.com/durable-objects/best-practices/access-durable-objects-storage/)
-- [Cloudflare D1 unique indexes](https://developers.cloudflare.com/d1/best-practices/use-indexes/)
-- `.agents/skills/spectrum/`
-- `agent-patterns/effect.md`
+- [Project Spectrum guidance](.agents/skills/spectrum/SKILL.md)
+- [Project Effect patterns](agent-patterns/effect.md)
 
 **Final security note:** Phone possession is the account authority here. It cannot defeat SIM swaps or recycled numbers. Before storing sensitive memory, treat passkey or recovery design as a separate prerequisite assignment.
