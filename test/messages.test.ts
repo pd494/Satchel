@@ -9,6 +9,7 @@ import {
 import z from "zod";
 import { recvMessage, sendMessage } from "../src/connection";
 import { MessageSendError, MessageStreamReadError } from "../src/errors";
+import { runAppWith } from "../src/index";
 
 type Input = {
   readonly id: string;
@@ -29,7 +30,7 @@ const makeHarness = async (
   failure: Failure = "none",
 ) => {
   const sent: Array<string> = [];
-  const state = { sent, closed: false, stopped: false };
+  const state = { sent, closed: false, sendAttempts: 0, stopped: false };
 
   const provider = definePlatform("test_harness", {
     config: z.object({}),
@@ -61,7 +62,9 @@ const makeHarness = async (
       }
     },
     send: ({ client, content, space }) => {
-      if (failure === "send") {
+      client.sendAttempts += 1;
+
+      if (failure === "send" && client.sendAttempts === 1) {
         return Promise.reject(new TypeError("private provider details"));
       }
 
@@ -118,7 +121,7 @@ describe("Spectrum message flow", () => {
       }),
   );
 
-  it.effect("preserves a typed send failure and closes Spectrum", () =>
+  it.effect("preserves a typed send failure", () =>
     Effect.gen(function* () {
       const { app, state } = yield* Effect.promise(() =>
         makeHarness(
@@ -127,7 +130,17 @@ describe("Spectrum message flow", () => {
         ),
       );
 
-      const error = yield* recvMessage(app, sendMessage).pipe(
+      const result = yield* Effect.promise(() =>
+        app.messages[Symbol.asyncIterator]().next(),
+      );
+
+      expect(result.done).toBe(false);
+
+      if (result.done) {
+        return;
+      }
+
+      const error = yield* sendMessage(result.value).pipe(
         Effect.ensuring(stop(app)),
         Effect.flip,
       );
@@ -140,14 +153,34 @@ describe("Spectrum message flow", () => {
     }),
   );
 
-  it.effect("maps a real provider-stream failure and closes Spectrum", () =>
+  it.effect("continues receiving after a send failure", () =>
+    Effect.gen(function* () {
+      const { app, state } = yield* Effect.promise(() =>
+        makeHarness(
+          [
+            input("first", "inbound", { type: "text", text: "first" }),
+            input("second", "inbound", { type: "text", text: "second" }),
+          ],
+          "send",
+        ),
+      );
+
+      yield* recvMessage(app, sendMessage).pipe(Effect.ensuring(stop(app)));
+
+      expect(state.sendAttempts).toBe(2);
+      expect(state.sent).toEqual(["echo: second"]);
+      expect(state.closed).toBe(true);
+      expect(state.stopped).toBe(true);
+    }),
+  );
+
+  it.effect("maps a stream failure and releases Spectrum", () =>
     Effect.gen(function* () {
       const { app, state } = yield* Effect.promise(() =>
         makeHarness([], "read"),
       );
 
-      const error = yield* recvMessage(app, sendMessage).pipe(
-        Effect.ensuring(stop(app)),
+      const error = yield* runAppWith(Effect.succeed(app), sendMessage).pipe(
         Effect.flip,
       );
 

@@ -29,11 +29,6 @@ export const sendMessage = Effect.fn("Connection.sendMessage")(function* ([
 
   const text = message.content.text;
 
-  if (text.startsWith("/test-delay")) {
-    yield* Effect.sleep(10000);
-    yield* Effect.logInfo("Received a test delay message");
-  }
-
   yield* Effect.logInfo("Received an inbound message");
   yield* Effect.tryPromise({
     try: () => space.send(`echo: ${text}`),
@@ -61,6 +56,19 @@ export const recvMessage = Effect.fn("Connection.recvMessage")(function* <E, R>(
       }),
   ).pipe(
     Stream.filter(([, message]) => message.direction === "inbound"),
-    Stream.runForEach(sendMessage),
+    Stream.runForEach((entry) =>
+      sendMessage(entry).pipe(
+        Effect.tapError((cause) =>
+          Effect.logError("Could not process inbound message").pipe(
+            Effect.annotateLogs({
+              cause: causeName(cause),
+              messageId: entry[1].id,
+              platform: entry[1].platform,
+            }),
+          ),
+        ),
+        Effect.ignore,
+      ),
+    ),
   );
 });
