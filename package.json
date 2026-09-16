@@ -13,7 +13,6 @@
     "prepare:anti-slop": "bun build node_modules/oxlint-plugin-anti-slop/src/index.ts --outfile .cache/anti-slop.mjs --target node --format esm --external @oxlint/plugins && bun build node_modules/oxlint-plugin-anti-slop/src/effect/index.ts --outfile .cache/anti-slop-effect.mjs --target node --format esm --external @oxlint/plugins",
     "format": "biome check --write .",
     "test": "vitest run",
-    "test:integration": "vitest run test/messages.test.ts",
     "test:coverage": "vitest run --coverage",
     "lint:effect": "effect-language-service diagnostics --project tsconfig.json --strict",
     "typecheck": "tsc --noEmit",

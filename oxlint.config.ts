@@ -15,6 +15,7 @@ export default defineConfig({
     ".pi/**",
     ".roo/**",
     ".windsurf/**",
+    ".wrangler/**",
   ],
   jsPlugins: [
     {

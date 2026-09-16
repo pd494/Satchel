@@ -1,28 +1,45 @@
 import { HttpServerRequest, HttpServerResponse } from "@effect/platform";
-import { Clock, Config, Effect, Option, Redacted, Schema } from "effect";
+import {
+  Chunk,
+  Clock,
+  Config,
+  Effect,
+  Option,
+  Redacted,
+  Schema,
+  Stream,
+} from "effect";
 import {
   InvalidWebhookBodyError,
   InvalidWebhookHeadersError,
   InvalidWebhookSignatureError,
   InvalidWebhookTimestampError,
   StaleWebhookTimestampError,
+  WebhookBodyTooLargeError,
   WebhookCryptoError,
 } from "./errors";
 
 const TIMESTAMP_TOLERANCE_SECONDS = 5 * 60;
+
+const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
 const SIGNATURE_PATTERN = /^v0=[0-9a-f]{64}$/;
 
 const webhookSecretConfig = Config.redacted("WEBHOOK_SECRET");
 
 const PhotonWebhookHeaders = Schema.Struct({
+  "x-spectrum-event": Schema.optional(Schema.String.pipe(Schema.minLength(1))),
   "x-spectrum-signature": Schema.String.pipe(Schema.minLength(1)),
   "x-spectrum-timestamp": Schema.String.pipe(Schema.minLength(1)),
   "x-spectrum-webhook-id": Schema.String.pipe(Schema.minLength(1)),
 });
 
-const PhotonWebhookBody = Schema.Struct({
+const PhotonWebhookEnvelope = Schema.Struct({
   event: Schema.String,
+});
+
+const PhotonWebhookBody = Schema.Struct({
+  event: Schema.Literal("messages"),
   space: Schema.Struct({
     id: Schema.String,
     type: Schema.optional(Schema.String),
@@ -139,7 +156,19 @@ const verifySignature = Effect.fn("PhotonWebhook.verifySignature")(
 );
 
 const decodeBody = Effect.fn("PhotonWebhook.decodeBody")((rawBody: string) =>
-  Schema.decodeUnknown(Schema.parseJson(PhotonWebhookBody))(rawBody).pipe(
+  Effect.gen(function* () {
+    const parsed = yield* Schema.decodeUnknown(
+      Schema.parseJson(Schema.Unknown),
+    )(rawBody);
+
+    const envelope = yield* Schema.decodeUnknown(PhotonWebhookEnvelope)(parsed);
+
+    if (envelope.event !== "messages") return Option.none();
+
+    const body = yield* Schema.decodeUnknown(PhotonWebhookBody)(parsed);
+
+    return Option.some(body);
+  }).pipe(
     Effect.mapError(
       () =>
         new InvalidWebhookBodyError({
@@ -149,14 +178,40 @@ const decodeBody = Effect.fn("PhotonWebhook.decodeBody")((rawBody: string) =>
   ),
 );
 
-export const toVerifiedInboundMessage = (
+const readBody = Effect.fn("PhotonWebhook.readBody")(
+  (request: HttpServerRequest.HttpServerRequest) =>
+    request.stream.pipe(
+      Stream.mapError(
+        () =>
+          new InvalidWebhookBodyError({
+            message: "Could not read webhook body",
+          }),
+      ),
+      Stream.mapAccumEffect(0, (size, bytes) => {
+        const nextSize = size + bytes.byteLength;
+
+        if (nextSize > MAX_WEBHOOK_BODY_BYTES)
+          return Effect.fail(
+            new WebhookBodyTooLargeError({
+              message: "Webhook body exceeds the allowed size",
+            }),
+          );
+
+        return Effect.succeed([nextSize, bytes] as const);
+      }),
+      Stream.decodeText(),
+      Stream.runCollect,
+      Effect.map(Chunk.join("")),
+    ),
+);
+
+const toVerifiedInboundMessage = (
   webhookId: string,
   body: PhotonWebhookBody,
 ): Option.Option<VerifiedInboundMessage> => {
   const { message, space } = body;
 
   if (
-    body.event !== "messages" ||
     message.platform !== "iMessage" ||
     message.direction !== "inbound" ||
     space.type !== "dm" ||
@@ -180,8 +235,8 @@ export const toVerifiedInboundMessage = (
   return Option.some({ ...verified, servingLine: space.phone });
 };
 
-/** Authenticate and translate one Photon webhook request. */
-export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
+/** Authenticate, decode, and narrow the current Photon request. */
+export const verifyPhotonWebhook = Effect.fn("PhotonWebhook.verify")(
   function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
 
@@ -202,14 +257,7 @@ export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
 
     yield* validateTimestamp(timestamp);
 
-    const rawBody = yield* request.text.pipe(
-      Effect.mapError(
-        () =>
-          new InvalidWebhookBodyError({
-            message: "Could not read webhook body",
-          }),
-      ),
-    );
+    const rawBody = yield* readBody(request);
 
     const webhookSecret = yield* webhookSecretConfig;
 
@@ -220,8 +268,25 @@ export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
       timestamp,
     });
 
+    const event = headers["x-spectrum-event"];
+
+    if (event !== undefined && event !== "messages") return Option.none();
+
     const body = yield* decodeBody(rawBody);
-    const verified = toVerifiedInboundMessage(webhookId, body);
+
+    return Option.flatMap(body, (value) =>
+      toVerifiedInboundMessage(webhookId, value),
+    );
+  },
+);
+
+const respond = (status: number, body: string) =>
+  Effect.succeed(HttpServerResponse.text(body, { status }));
+
+/** Authenticate and translate one Photon webhook request. */
+export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
+  function* () {
+    const verified = yield* verifyPhotonWebhook();
 
     if (Option.isNone(verified))
       return HttpServerResponse.text("ignored", { status: 200 });
@@ -240,32 +305,12 @@ export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
   },
   Effect.catchTags({
     InvalidWebhookHeadersError: () =>
-      Effect.succeed(
-        HttpServerResponse.text("missing or malformed headers", {
-          status: 400,
-        }),
-      ),
-    InvalidWebhookTimestampError: () =>
-      Effect.succeed(
-        HttpServerResponse.text("invalid timestamp", { status: 400 }),
-      ),
-    StaleWebhookTimestampError: () =>
-      Effect.succeed(
-        HttpServerResponse.text("stale timestamp", { status: 400 }),
-      ),
-    InvalidWebhookSignatureError: () =>
-      Effect.succeed(
-        HttpServerResponse.text("invalid signature", { status: 401 }),
-      ),
-    WebhookCryptoError: () =>
-      Effect.succeed(
-        HttpServerResponse.text("signature verification failed", {
-          status: 500,
-        }),
-      ),
-    InvalidWebhookBodyError: () =>
-      Effect.succeed(
-        HttpServerResponse.text("invalid webhook body", { status: 400 }),
-      ),
+      respond(400, "missing or malformed headers"),
+    InvalidWebhookTimestampError: () => respond(400, "invalid timestamp"),
+    StaleWebhookTimestampError: () => respond(400, "stale timestamp"),
+    InvalidWebhookSignatureError: () => respond(401, "invalid signature"),
+    WebhookCryptoError: () => respond(500, "signature verification failed"),
+    InvalidWebhookBodyError: () => respond(400, "invalid webhook body"),
+    WebhookBodyTooLargeError: () => respond(413, "webhook body too large"),
   }),
 );

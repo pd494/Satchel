@@ -68,3 +68,11 @@ export class InvalidWebhookBodyError extends Schema.TaggedError<InvalidWebhookBo
     message: Schema.String,
   },
 ) {}
+
+/** Photon webhook body exceeded the ingress limit. */
+export class WebhookBodyTooLargeError extends Schema.TaggedError<WebhookBodyTooLargeError>()(
+  "WebhookBodyTooLargeError",
+  {
+    message: Schema.String,
+  },
+) {}
