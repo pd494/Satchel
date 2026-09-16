@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "bun build ./test/imessage.ts --outdir ./dist --target bun --packages external",
+    "build:worker": "wrangler deploy --dry-run --outdir ./dist/worker",
+    "dev:worker": "wrangler dev",
     "lint": "bun run lint:biome && bun run lint:oxlint",
     "lint:biome": "biome ci .",
     "lint:oxlint": "bun run prepare:anti-slop && oxlint",
@@ -21,11 +23,13 @@
     "test:imessage": "bun test/imessage.ts"
   },
   "dependencies": {
+    "@effect/platform": "0.97.1",
     "effect": "^3.22.1",
     "spectrum-ts": "^12.8.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
+    "@cloudflare/workers-types": "5.20260911.1",
     "@effect/language-service": "^0.87.2",
     "@effect/vitest": "^0.30.0",
     "@types/bun": "latest",
@@ -34,6 +38,7 @@
     "oxlint-plugin-anti-slop": "github:dmmulroy/anti-slop#c44ef22ca116d0ba62a3ff663a0bd13a3f3fa40b",
     "typescript": "^5",
     "vitest": "^3.2.0",
+    "wrangler": "4.131.2",
     "zod": "4.5.4"
   }
 }
