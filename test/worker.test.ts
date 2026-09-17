@@ -61,6 +61,7 @@ describe("Cloudflare Worker runtime", () => {
     const response = await server.fetch("/webhooks/photon", {
       method: "POST",
       headers: {
+        "x-spectrum-event": "messages",
         "x-spectrum-signature": `v0=${"0".repeat(64)}`,
         "x-spectrum-timestamp": timestamp,
         "x-spectrum-webhook-id": "test-webhook",

@@ -1,16 +1,18 @@
 import { HttpServerRequest } from "@effect/platform";
 import { describe, expect, it } from "@effect/vitest";
 import { ConfigProvider, Effect, Option, Schema } from "effect";
-import { afterEach, beforeEach, vi } from "vitest";
-import { verifyPhotonWebhook } from "../src/photon-webhook";
+import { verifyPhotonWebhook } from "../src/webhook";
 import worker from "../src/worker";
 import {
   signedWebhookHeaders,
+  signWebhookBytes,
   TEST_WEBHOOK_SECRET,
   VALID_PAYLOAD,
 } from "./photon-webhook-fixture";
 
 const WEBHOOK_URL = "https://satchel.test/webhooks/photon";
+
+const WORKER_BINDINGS = { WEBHOOK_SECRET: TEST_WEBHOOK_SECRET } as const;
 
 const testConfig = ConfigProvider.fromMap(
   new Map([["WEBHOOK_SECRET", TEST_WEBHOOK_SECRET]]),
@@ -28,6 +30,25 @@ const signedRequest = async (
     body,
   });
 
+const signedByteRequest = async (body: Uint8Array) => {
+  const { signature, timestamp } = await signWebhookBytes(body);
+
+  return new Request(WEBHOOK_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-spectrum-event": "messages",
+      "x-spectrum-signature": signature,
+      "x-spectrum-timestamp": timestamp,
+      "x-spectrum-webhook-id": "test-webhook",
+    },
+    body,
+  });
+};
+
+const fetchWorker = (request: Request) =>
+  worker.fetch(request, WORKER_BINDINGS);
+
 const verify = (rawBody: string) =>
   Effect.gen(function* () {
     const request = HttpServerRequest.fromWeb(
@@ -40,14 +61,6 @@ const verify = (rawBody: string) =>
   }).pipe(Effect.withConfigProvider(testConfig));
 
 describe("Photon webhook contract", () => {
-  beforeEach(() => {
-    vi.stubEnv("WEBHOOK_SECRET", TEST_WEBHOOK_SECRET);
-  });
-
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
   it("rejects malformed or replay-prone authentication metadata", async () => {
     const cases = [
       {
@@ -62,6 +75,7 @@ describe("Photon webhook contract", () => {
           new Request(WEBHOOK_URL, {
             method: "POST",
             headers: {
+              "x-spectrum-event": "messages",
               "x-spectrum-signature": "v0=placeholder",
               "x-spectrum-timestamp": "not-a-timestamp",
               "x-spectrum-webhook-id": "test-webhook",
@@ -76,6 +90,7 @@ describe("Photon webhook contract", () => {
           new Request(WEBHOOK_URL, {
             method: "POST",
             headers: {
+              "x-spectrum-event": "messages",
               "x-spectrum-signature": "v0=placeholder",
               "x-spectrum-timestamp": "0",
               "x-spectrum-webhook-id": "test-webhook",
@@ -87,7 +102,7 @@ describe("Photon webhook contract", () => {
     ];
 
     for (const { name, request, status, body } of cases) {
-      const response = await worker.fetch(request());
+      const response = await fetchWorker(request());
 
       expect(response.status, name).toBe(status);
       expect(await response.text(), name).toBe(body);
@@ -97,7 +112,7 @@ describe("Photon webhook contract", () => {
   it("authenticates exact body bytes before decoding JSON", async () => {
     const invalidJson = "{";
 
-    const tamperedResponse = await worker.fetch(
+    const tamperedResponse = await fetchWorker(
       await signedRequest(invalidJson, {
         "x-spectrum-signature": `v0=${"0".repeat(64)}`,
       }),
@@ -106,12 +121,21 @@ describe("Photon webhook contract", () => {
     expect(tamperedResponse.status).toBe(401);
     expect(await tamperedResponse.text()).toBe("invalid signature");
 
-    const authenticatedResponse = await worker.fetch(
+    const authenticatedResponse = await fetchWorker(
       await signedRequest(invalidJson),
     );
 
     expect(authenticatedResponse.status).toBe(400);
     expect(await authenticatedResponse.text()).toBe("invalid webhook body");
+
+    const malformedUtf8 = Uint8Array.of(0xff);
+
+    const byteResponse = await fetchWorker(
+      await signedByteRequest(malformedUtf8),
+    );
+
+    expect(byteResponse.status).toBe(400);
+    expect(await byteResponse.text()).toBe("invalid webhook body");
   });
 
   it("acknowledges unsupported event signals for forward compatibility", async () => {
@@ -125,11 +149,21 @@ describe("Photon webhook contract", () => {
     ];
 
     for (const request of requests) {
-      const response = await worker.fetch(request);
+      const response = await fetchWorker(request);
 
       expect(response.status).toBe(200);
       expect(await response.text()).toBe("ignored");
     }
+  });
+
+  it("fails deliberately when the Worker secret binding is missing", async () => {
+    const response = await worker.fetch(
+      await signedRequest(encodeJson(VALID_PAYLOAD)),
+      {},
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("webhook is not configured");
   });
 
   it.live("returns the complete verified inbound message", () =>
@@ -155,7 +189,7 @@ describe("Photon webhook contract", () => {
       const withoutServingLine = yield* verify(
         encodeJson({
           ...VALID_PAYLOAD,
-          space: { id: "test-space", type: "dm" },
+          space: { id: "test-space", platform: "iMessage", type: "dm" },
         }),
       );
 

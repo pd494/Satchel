@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@effect/platform": "0.97.1",
+    "@spectrum-ts/core": "12.8.0",
     "effect": "^3.22.1",
     "spectrum-ts": "^12.8.0"
   },

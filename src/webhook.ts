@@ -1,4 +1,5 @@
 import { HttpServerRequest, HttpServerResponse } from "@effect/platform";
+import { verifySpectrumSignature } from "@spectrum-ts/core/webhook";
 import {
   Chunk,
   Clock,
@@ -9,26 +10,83 @@ import {
   Schema,
   Stream,
 } from "effect";
-import {
-  InvalidWebhookBodyError,
-  InvalidWebhookHeadersError,
-  InvalidWebhookSignatureError,
-  InvalidWebhookTimestampError,
-  StaleWebhookTimestampError,
-  WebhookBodyTooLargeError,
-  WebhookCryptoError,
-} from "./errors";
+
+/** Required Photon webhook authentication headers were missing or malformed. */
+class InvalidWebhookHeadersError extends Schema.TaggedError<InvalidWebhookHeadersError>()(
+  "InvalidWebhookHeadersError",
+  { message: Schema.String },
+) {}
+
+/** Photon webhook timestamp was not a valid Unix epoch second. */
+class InvalidWebhookTimestampError extends Schema.TaggedError<InvalidWebhookTimestampError>()(
+  "InvalidWebhookTimestampError",
+  { message: Schema.String },
+) {}
+
+/** Webhook delivery was rejected because its timestamp is outside the tolerance window. */
+class StaleWebhookTimestampError extends Schema.TaggedError<StaleWebhookTimestampError>()(
+  "StaleWebhookTimestampError",
+  { message: Schema.String },
+) {}
+
+/** Photon webhook signature did not authenticate the request. */
+class InvalidWebhookSignatureError extends Schema.TaggedError<InvalidWebhookSignatureError>()(
+  "InvalidWebhookSignatureError",
+  { message: Schema.String },
+) {}
+
+/** Spectrum could not perform Photon webhook signature verification. */
+class WebhookCryptoError extends Schema.TaggedError<WebhookCryptoError>()(
+  "WebhookCryptoError",
+  {
+    operation: Schema.Literal("verifySpectrumSignature"),
+    message: Schema.String,
+    cause: Schema.String,
+  },
+) {}
+
+/** The Worker could not load its required webhook secret binding. */
+class WebhookConfigError extends Schema.TaggedError<WebhookConfigError>()(
+  "WebhookConfigError",
+  {
+    operation: Schema.Literal("load WEBHOOK_SECRET"),
+    message: Schema.String,
+    cause: Schema.String,
+  },
+) {}
+
+/** The request body stream failed before the complete delivery was read. */
+class WebhookBodyReadError extends Schema.TaggedError<WebhookBodyReadError>()(
+  "WebhookBodyReadError",
+  {
+    operation: Schema.Literal("request.stream"),
+    message: Schema.String,
+    cause: Schema.String,
+  },
+) {}
+
+/** Authenticated Photon webhook body was not valid supported JSON. */
+class InvalidWebhookBodyError extends Schema.TaggedError<InvalidWebhookBodyError>()(
+  "InvalidWebhookBodyError",
+  { message: Schema.String },
+) {}
+
+/** Photon webhook body exceeded the ingress limit. */
+class WebhookBodyTooLargeError extends Schema.TaggedError<WebhookBodyTooLargeError>()(
+  "WebhookBodyTooLargeError",
+  { message: Schema.String },
+) {}
 
 const TIMESTAMP_TOLERANCE_SECONDS = 5 * 60;
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 
-const SIGNATURE_PATTERN = /^v0=[0-9a-f]{64}$/;
-
-const webhookSecretConfig = Config.redacted("WEBHOOK_SECRET");
+const webhookSecretConfig = Config.redacted(
+  Config.nonEmptyString("WEBHOOK_SECRET"),
+);
 
 const PhotonWebhookHeaders = Schema.Struct({
-  "x-spectrum-event": Schema.optional(Schema.String.pipe(Schema.minLength(1))),
+  "x-spectrum-event": Schema.String.pipe(Schema.minLength(1)),
   "x-spectrum-signature": Schema.String.pipe(Schema.minLength(1)),
   "x-spectrum-timestamp": Schema.String.pipe(Schema.minLength(1)),
   "x-spectrum-webhook-id": Schema.String.pipe(Schema.minLength(1)),
@@ -66,25 +124,15 @@ type PhotonWebhookBody = typeof PhotonWebhookBody.Type;
 export interface VerifiedInboundMessage {
   readonly deliveryId: string;
   readonly messageId: string;
-  readonly platform: string;
+  readonly platform: "iMessage";
   readonly senderId: string;
   readonly spaceId: string;
   readonly servingLine?: string;
   readonly text: string;
 }
 
-const causeName = (cause: unknown): string =>
-  cause instanceof Error ? cause.name : "Unknown rejection";
-
-const decodeHex = (hex: string): Uint8Array<ArrayBuffer> => {
-  const bytes = new Uint8Array(new ArrayBuffer(hex.length / 2));
-
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
-
-  return bytes;
-};
+const causeDescription = (cause: unknown): string =>
+  cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
 
 const validateTimestamp = Effect.fn("PhotonWebhook.validateTimestamp")(
   function* (timestamp: string) {
@@ -110,81 +158,111 @@ const validateTimestamp = Effect.fn("PhotonWebhook.validateTimestamp")(
 
 const verifySignature = Effect.fn("PhotonWebhook.verifySignature")(
   function* (input: {
-    readonly rawBody: string;
+    readonly rawBody: Uint8Array;
     readonly secret: Redacted.Redacted<string>;
     readonly signature: string;
     readonly timestamp: string;
   }) {
-    if (!SIGNATURE_PATTERN.test(input.signature))
-      return yield* new InvalidWebhookSignatureError({
-        message: "Webhook signature has an invalid format",
-      });
+    const now = yield* Clock.currentTimeMillis;
 
-    const encoder = new TextEncoder();
-    const secretBytes = encoder.encode(Redacted.value(input.secret));
-
-    const signedBytes = encoder.encode(
-      `v0:${input.timestamp}:${input.rawBody}`,
-    );
-
-    const signatureBytes = decodeHex(input.signature.slice("v0=".length));
-
-    const signatureIsValid = yield* Effect.tryPromise({
-      try: async () => {
-        const key = await crypto.subtle.importKey(
-          "raw",
-          secretBytes,
-          { name: "HMAC", hash: "SHA-256" },
-          false,
-          ["verify"],
-        );
-
-        return crypto.subtle.verify("HMAC", key, signatureBytes, signedBytes);
-      },
+    const result = yield* Effect.tryPromise({
+      try: () =>
+        verifySpectrumSignature({
+          headers: {
+            "x-spectrum-signature": input.signature,
+            "x-spectrum-timestamp": input.timestamp,
+          },
+          now,
+          rawBody: input.rawBody,
+          secret: Redacted.value(input.secret),
+        }),
       catch: (cause) =>
         new WebhookCryptoError({
+          operation: "verifySpectrumSignature",
           message: "Could not verify webhook signature",
-          cause: causeName(cause),
+          cause: causeDescription(cause),
         }),
     });
 
-    if (!signatureIsValid)
-      return yield* new InvalidWebhookSignatureError({
-        message: "Webhook signature is invalid",
+    if (result.ok) return;
+
+    if (result.reason === "expired")
+      return yield* new StaleWebhookTimestampError({
+        message: "Webhook timestamp is outside the allowed window",
       });
+
+    if (result.reason === "missing-headers")
+      return yield* new InvalidWebhookTimestampError({
+        message: "Webhook timestamp must be a Unix epoch second",
+      });
+
+    return yield* new InvalidWebhookSignatureError({
+      message: "Webhook signature is invalid",
+    });
   },
 );
 
-const decodeBody = Effect.fn("PhotonWebhook.decodeBody")((rawBody: string) =>
-  Effect.gen(function* () {
-    const parsed = yield* Schema.decodeUnknown(
-      Schema.parseJson(Schema.Unknown),
-    )(rawBody);
+const decodeBody = Effect.fn("PhotonWebhook.decodeBody")(
+  (rawBytes: Uint8Array) =>
+    Effect.gen(function* () {
+      const rawBody = yield* Effect.try({
+        try: () => new TextDecoder("utf-8", { fatal: true }).decode(rawBytes),
+        catch: () =>
+          new InvalidWebhookBodyError({
+            message: "Webhook body is not valid UTF-8",
+          }),
+      });
 
-    const envelope = yield* Schema.decodeUnknown(PhotonWebhookEnvelope)(parsed);
+      const parsed = yield* Schema.decodeUnknown(
+        Schema.parseJson(Schema.Unknown),
+      )(rawBody);
 
-    if (envelope.event !== "messages") return Option.none();
+      const envelope = yield* Schema.decodeUnknown(PhotonWebhookEnvelope)(
+        parsed,
+      );
 
-    const body = yield* Schema.decodeUnknown(PhotonWebhookBody)(parsed);
+      if (envelope.event !== "messages") return Option.none();
 
-    return Option.some(body);
-  }).pipe(
-    Effect.mapError(
-      () =>
-        new InvalidWebhookBodyError({
-          message: "Webhook body is malformed or unsupported",
-        }),
+      const body = yield* Schema.decodeUnknown(PhotonWebhookBody)(parsed);
+
+      return Option.some(body);
+    }).pipe(
+      Effect.mapError(
+        () =>
+          new InvalidWebhookBodyError({
+            message: "Webhook body is malformed or unsupported",
+          }),
+      ),
     ),
-  ),
 );
+
+const joinBytes = (chunks: Chunk.Chunk<Uint8Array>): Uint8Array => {
+  const size = Chunk.reduce(
+    chunks,
+    0,
+    (total, bytes) => total + bytes.byteLength,
+  );
+
+  const joined = new Uint8Array(size);
+  let offset = 0;
+
+  for (const bytes of chunks) {
+    joined.set(bytes, offset);
+    offset += bytes.byteLength;
+  }
+
+  return joined;
+};
 
 const readBody = Effect.fn("PhotonWebhook.readBody")(
   (request: HttpServerRequest.HttpServerRequest) =>
     request.stream.pipe(
       Stream.mapError(
-        () =>
-          new InvalidWebhookBodyError({
+        (cause) =>
+          new WebhookBodyReadError({
+            operation: "request.stream",
             message: "Could not read webhook body",
+            cause: causeDescription(cause),
           }),
       ),
       Stream.mapAccumEffect(0, (size, bytes) => {
@@ -199,9 +277,8 @@ const readBody = Effect.fn("PhotonWebhook.readBody")(
 
         return Effect.succeed([nextSize, bytes] as const);
       }),
-      Stream.decodeText(),
       Stream.runCollect,
-      Effect.map(Chunk.join("")),
+      Effect.map(joinBytes),
     ),
 );
 
@@ -221,7 +298,7 @@ const toVerifiedInboundMessage = (
   )
     return Option.none();
 
-  const verified = {
+  const verified: VerifiedInboundMessage = {
     deliveryId: `${webhookId}:${message.id}`,
     messageId: message.id,
     platform: message.platform,
@@ -259,7 +336,16 @@ export const verifyPhotonWebhook = Effect.fn("PhotonWebhook.verify")(
 
     const rawBody = yield* readBody(request);
 
-    const webhookSecret = yield* webhookSecretConfig;
+    const webhookSecret = yield* webhookSecretConfig.pipe(
+      Effect.mapError(
+        (cause) =>
+          new WebhookConfigError({
+            operation: "load WEBHOOK_SECRET",
+            message: "Required webhook secret is unavailable",
+            cause: causeDescription(cause),
+          }),
+      ),
+    );
 
     yield* verifySignature({
       rawBody,
@@ -270,7 +356,7 @@ export const verifyPhotonWebhook = Effect.fn("PhotonWebhook.verify")(
 
     const event = headers["x-spectrum-event"];
 
-    if (event !== undefined && event !== "messages") return Option.none();
+    if (event !== "messages") return Option.none();
 
     const body = yield* decodeBody(rawBody);
 
@@ -310,6 +396,8 @@ export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
     StaleWebhookTimestampError: () => respond(400, "stale timestamp"),
     InvalidWebhookSignatureError: () => respond(401, "invalid signature"),
     WebhookCryptoError: () => respond(500, "signature verification failed"),
+    WebhookConfigError: () => respond(500, "webhook is not configured"),
+    WebhookBodyReadError: () => respond(400, "invalid webhook body"),
     InvalidWebhookBodyError: () => respond(400, "invalid webhook body"),
     WebhookBodyTooLargeError: () => respond(413, "webhook body too large"),
   }),
