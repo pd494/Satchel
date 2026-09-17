@@ -1,12 +1,15 @@
 import { HttpServerRequest } from "@effect/platform";
 import { describe, expect, it } from "@effect/vitest";
-import { ConfigProvider, Effect, Option, Schema } from "effect";
+import { ConfigProvider, Effect, Option, Schema, TestClock } from "effect";
 import { verifyPhotonWebhook } from "../src/webhook";
 import worker from "../src/worker";
 import {
+  currentWebhookTimestamp,
   signedWebhookHeaders,
   signWebhookBytes,
+  TEST_WEBHOOK_NOW,
   TEST_WEBHOOK_SECRET,
+  TEST_WEBHOOK_TIMESTAMP,
   VALID_PAYLOAD,
 } from "./photon-webhook-fixture";
 
@@ -22,16 +25,26 @@ const encodeJson = Schema.encodeSync(Schema.parseJson());
 
 const signedRequest = async (
   body: string,
+  timestamp: string,
   additionalHeaders: Readonly<Record<string, string>> = {},
 ) =>
   new Request(WEBHOOK_URL, {
     method: "POST",
-    headers: { ...(await signedWebhookHeaders(body)), ...additionalHeaders },
+    headers: {
+      ...(await signedWebhookHeaders(body, timestamp)),
+      ...additionalHeaders,
+    },
     body,
   });
 
+const liveSignedRequest = async (
+  body: string,
+  additionalHeaders: Readonly<Record<string, string>> = {},
+) => signedRequest(body, await currentWebhookTimestamp(), additionalHeaders);
+
 const signedByteRequest = async (body: Uint8Array) => {
-  const { signature, timestamp } = await signWebhookBytes(body);
+  const timestamp = await currentWebhookTimestamp();
+  const signature = await signWebhookBytes(body, timestamp);
 
   return new Request(WEBHOOK_URL, {
     method: "POST",
@@ -51,8 +64,12 @@ const fetchWorker = (request: Request) =>
 
 const verify = (rawBody: string) =>
   Effect.gen(function* () {
+    yield* TestClock.setTime(TEST_WEBHOOK_NOW);
+
     const request = HttpServerRequest.fromWeb(
-      yield* Effect.promise(() => signedRequest(rawBody)),
+      yield* Effect.promise(() =>
+        signedRequest(rawBody, TEST_WEBHOOK_TIMESTAMP),
+      ),
     );
 
     return yield* verifyPhotonWebhook().pipe(
@@ -113,7 +130,7 @@ describe("Photon webhook contract", () => {
     const invalidJson = "{";
 
     const tamperedResponse = await fetchWorker(
-      await signedRequest(invalidJson, {
+      await liveSignedRequest(invalidJson, {
         "x-spectrum-signature": `v0=${"0".repeat(64)}`,
       }),
     );
@@ -122,7 +139,7 @@ describe("Photon webhook contract", () => {
     expect(await tamperedResponse.text()).toBe("invalid signature");
 
     const authenticatedResponse = await fetchWorker(
-      await signedRequest(invalidJson),
+      await liveSignedRequest(invalidJson),
     );
 
     expect(authenticatedResponse.status).toBe(400);
@@ -140,10 +157,10 @@ describe("Photon webhook contract", () => {
 
   it("acknowledges unsupported event signals for forward compatibility", async () => {
     const requests = [
-      await signedRequest(encodeJson(VALID_PAYLOAD), {
+      await liveSignedRequest(encodeJson(VALID_PAYLOAD), {
         "x-spectrum-event": "future-event",
       }),
-      await signedRequest(
+      await liveSignedRequest(
         encodeJson({ event: "future-event", data: { id: "test-event" } }),
       ),
     ];
@@ -158,7 +175,7 @@ describe("Photon webhook contract", () => {
 
   it("fails deliberately when the Worker secret binding is missing", async () => {
     const response = await worker.fetch(
-      await signedRequest(encodeJson(VALID_PAYLOAD)),
+      await liveSignedRequest(encodeJson(VALID_PAYLOAD)),
       {},
     );
 
@@ -166,7 +183,7 @@ describe("Photon webhook contract", () => {
     expect(await response.text()).toBe("webhook is not configured");
   });
 
-  it.live("returns the complete verified inbound message", () =>
+  it.effect("returns the complete verified inbound message", () =>
     Effect.gen(function* () {
       const verified = yield* verify(encodeJson(VALID_PAYLOAD));
 
@@ -197,7 +214,7 @@ describe("Photon webhook contract", () => {
     }),
   );
 
-  it.live("filters messages outside the trusted inbound text contract", () =>
+  it.effect("filters messages outside the trusted inbound text contract", () =>
     Effect.gen(function* () {
       const cases = [
         {

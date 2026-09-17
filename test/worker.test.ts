@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createTestHarness, type TestHarness } from "wrangler";
 import {
+  currentWebhookTimestamp,
   signedWebhookHeaders,
-  signWebhook,
   TEST_WEBHOOK_SECRET,
   VALID_PAYLOAD,
 } from "./photon-webhook-fixture";
@@ -25,15 +25,18 @@ describe("Cloudflare Worker runtime", () => {
   });
 
   afterAll(async () => {
-    await server.close();
-
-    vi.unstubAllEnvs();
+    try {
+      await server.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("accepts a signed webhook in workerd without logging sensitive fields", async () => {
     server.clearLogs();
     const body = JSON.stringify(VALID_PAYLOAD);
-    const headers = await signedWebhookHeaders(body);
+    const timestamp = await currentWebhookTimestamp();
+    const headers = await signedWebhookHeaders(body, timestamp);
 
     const response = await server.fetch("/webhooks/photon", {
       method: "POST",
@@ -56,7 +59,7 @@ describe("Cloudflare Worker runtime", () => {
 
   it("enforces the webhook body limit in workerd", async () => {
     const body = "x".repeat(1024 * 1024 + 1);
-    const { timestamp } = await signWebhook("");
+    const timestamp = await currentWebhookTimestamp();
 
     const response = await server.fetch("/webhooks/photon", {
       method: "POST",
