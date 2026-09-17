@@ -2,6 +2,12 @@ import { Clock, Effect } from "effect";
 
 export const TEST_WEBHOOK_SECRET = "test-webhook-secret";
 
+export const TEST_WEBHOOK_NOW = Date.parse("2026-05-14T19:06:32.000Z");
+
+export const TEST_WEBHOOK_TIMESTAMP = String(
+  Math.floor(TEST_WEBHOOK_NOW / 1000),
+);
+
 export const VALID_PAYLOAD = {
   event: "messages",
   space: {
@@ -28,16 +34,10 @@ export const VALID_PAYLOAD = {
 
 export const signWebhookBytes = async (
   bodyBytes: Uint8Array,
-  timestamp?: string,
-): Promise<{ readonly signature: string; readonly timestamp: string }> => {
-  const resolvedTimestamp =
-    timestamp ??
-    String(
-      Math.floor((await Effect.runPromise(Clock.currentTimeMillis)) / 1000),
-    );
-
+  timestamp: string,
+): Promise<string> => {
   const encoder = new TextEncoder();
-  const prefix = encoder.encode(`v0:${resolvedTimestamp}:`);
+  const prefix = encoder.encode(`v0:${timestamp}:`);
   const signedBytes = new Uint8Array(prefix.length + bodyBytes.length);
 
   signedBytes.set(prefix);
@@ -55,20 +55,27 @@ export const signWebhookBytes = async (
     await crypto.subtle.sign("HMAC", key, signedBytes),
   );
 
-  const signature = `v0=${Array.from(bytes, (byte) =>
+  return `v0=${Array.from(bytes, (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
-
-  return { signature, timestamp: resolvedTimestamp };
 };
 
-export const signWebhook = (body: string, timestamp?: string) =>
+export const signWebhook = (body: string, timestamp: string) =>
   signWebhookBytes(new TextEncoder().encode(body), timestamp);
+
+/** Explicit live-clock boundary for real Worker runtime tests. */
+export const currentWebhookTimestamp = () =>
+  Effect.runPromise(
+    Clock.currentTimeMillis.pipe(
+      Effect.map((now) => String(Math.floor(now / 1000))),
+    ),
+  );
 
 export const signedWebhookHeaders = async (
   body: string,
+  timestamp: string,
 ): Promise<Readonly<Record<string, string>>> => {
-  const { signature, timestamp } = await signWebhook(body);
+  const signature = await signWebhook(body, timestamp);
 
   return {
     "content-type": "application/json",
