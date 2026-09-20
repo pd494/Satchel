@@ -1,10 +1,7 @@
 import { Effect, Schema } from "effect";
+import { AccountIdentity } from "./accountIdentity";
 import type { Account } from "./db";
-import { Hmac } from "./hmac";
-import type { VerifiedInboundMessage } from "./types/messages";
-
-const safeCauseName = (cause: unknown): string =>
-  cause instanceof Error ? cause.name : "Unknown rejection";
+import type { VerifiedInboundMessage } from "./photonWebhook";
 
 export class InboxStorageError extends Schema.TaggedError<InboxStorageError>()(
   "InboxStorageError",
@@ -22,7 +19,7 @@ export const recvMessage = Effect.fn("Connection.recvMessage")(function* (
   _message: VerifiedInboundMessage,
   _accounts: DurableObjectNamespace<Account>,
 ) {
-  const accountId = yield* Hmac.deriveAccountId(
+  const accountId = yield* AccountIdentity.deriveAccountId(
     _message.platform,
     _message.senderId,
   );
@@ -44,7 +41,7 @@ export const recvMessage = Effect.fn("Connection.recvMessage")(function* (
       new InboxStorageError({
         operation: "receiveMessage",
         message: "Could not save the incoming message",
-        cause: safeCauseName(cause),
+        cause: String(cause),
       }),
   });
 

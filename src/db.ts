@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { DateTime, Effect, Schema } from "effect";
-import type { WorkerBindings } from "./types/bindings";
-import type { InboxMessage } from "./types/messages";
+import type { InboxMessage } from "./photonWebhook";
+import type { WorkerBindings } from "./worker";
 
 const safeCauseName = (cause: unknown): string =>
   cause instanceof Error ? cause.name : "Unknown rejection";

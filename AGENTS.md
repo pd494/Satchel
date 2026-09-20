@@ -16,13 +16,13 @@
   without implementing it for them; still perform relevant read-only checks
   autonomously.
 
-This is a [Spectrum](https://photon.codes/docs/spectrum-ts) app, pinned to `spectrum-ts@^12.8.0`. Reusable app assembly lives in `src/index.ts`. Configuration and provider setup live in `src/config.ts`; long-lived message streaming and responses live in `src/connection.ts`; verified webhook delivery routing lives in `src/acceptMessage.ts`. Keep typed errors beside the code that produces them and keep this small app's source layout flat. The current real-phone test entry point is `test/imessage.ts`.
+This is a Photon Spectrum webhook app, pinned to `@spectrum-ts/core@12.8.0`. Cloudflare HTTP routing lives in `src/worker.ts`, deployment exports in `src/workerEntry.ts`, Photon verification in `src/photonWebhook.ts`, account identity in `src/accountIdentity.ts`, verified message routing in `src/connection.ts`, and the Account Durable Object in `src/db.ts`. Keep typed errors beside the code that produces them and keep this small app's source layout flat.
 
 ## Working in this project
 
 - Run the app with `bun start`.
-- Add providers through `src/config.ts`.
-- Outgoing message content uses the builders documented in the skill (text, attachment, voice, contact, richlink, poll, group, custom).
+- Incoming messages arrive through the signed Photon webhook.
+- Outgoing replies and their provider lifecycle are not implemented yet.
 
 ## Effect architecture
 

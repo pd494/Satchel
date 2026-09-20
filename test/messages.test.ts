@@ -1,8 +1,12 @@
 import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { ConfigProvider, Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { Hmac } from "../src/hmac";
-import { DeliveryId, MessageId, SpaceId } from "../src/types/messages";
+import {
+  AccountIdentity,
+  DeliveryId,
+  MessageId,
+  SpaceId,
+} from "../src/accountIdentity";
 
 const identityConfig = ConfigProvider.fromMap(
   new Map([["ACCOUNT_ID_SECRET", "test-account-id-secret"]]),
@@ -180,10 +184,10 @@ describe("Account inbox", () => {
   it("keeps different senders in isolated account databases", async () => {
     const [firstId, secondId] = await Effect.runPromise(
       Effect.all([
-        Hmac.deriveAccountId("imessage", "first-sender"),
-        Hmac.deriveAccountId("imessage", "second-sender"),
+        AccountIdentity.deriveAccountId("imessage", "first-sender"),
+        AccountIdentity.deriveAccountId("imessage", "second-sender"),
       ]).pipe(
-        Effect.provide(Hmac.Default),
+        Effect.provide(AccountIdentity.Default),
         Effect.withConfigProvider(identityConfig),
       ),
     );

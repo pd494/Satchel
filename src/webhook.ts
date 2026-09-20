@@ -1,19 +1,22 @@
 import { HttpServerResponse } from "@effect/platform";
 import { Effect, Option } from "effect";
-import type { InboxStorageError } from "./connection";
-import { Hmac } from "./hmac";
 import type {
   AccountIdConfigError,
   AccountIdDerivationError,
-} from "./types/errors";
-import type { VerifiedInboundMessage } from "./types/messages";
+  AccountIdentity,
+} from "./accountIdentity";
+import type { InboxStorageError } from "./connection";
+import {
+  type VerifiedInboundMessage,
+  verifyPhotonWebhook,
+} from "./photonWebhook";
 
 type AcceptMessage = (
   message: VerifiedInboundMessage,
 ) => Effect.Effect<
   void,
   AccountIdConfigError | AccountIdDerivationError | InboxStorageError,
-  Hmac
+  AccountIdentity
 >;
 
 const respond = (status: number, body: string) =>
@@ -32,7 +35,7 @@ const respondWithErrorLog = Effect.fn("PhotonWebhook.respondWithErrorLog")(
 /** Authenticate and translate one Photon webhook request. */
 export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
   function* (acceptMessage: AcceptMessage) {
-    const verifiedMessage = yield* Hmac.verifyWebhook();
+    const verifiedMessage = yield* verifyPhotonWebhook();
 
     if (Option.isNone(verifiedMessage))
       return HttpServerResponse.text("ignored", { status: 200 });
