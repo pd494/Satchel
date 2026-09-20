@@ -11,7 +11,12 @@ import {
   Stream,
 } from "effect";
 import type { MessageAcceptanceError } from "./acceptMessage";
-import type { AccountIdentity } from "./accountIdentity";
+import {
+  type AccountIdentity,
+  DeliveryId,
+  MessageId,
+  SpaceId,
+} from "./accountIdentity";
 
 /** Required Photon webhook authentication headers were missing or malformed. */
 class InvalidWebhookHeadersError extends Schema.TaggedError<InvalidWebhookHeadersError>()(
@@ -124,11 +129,11 @@ const PhotonWebhookBody = Schema.Struct({
 type PhotonWebhookBody = typeof PhotonWebhookBody.Type;
 
 export interface VerifiedInboundMessage {
-  readonly deliveryId: string;
-  readonly messageId: string;
+  readonly deliveryId: DeliveryId;
+  readonly messageId: MessageId;
   readonly platform: "imessage";
   readonly senderId: string;
-  readonly spaceId: string;
+  readonly spaceId: SpaceId;
   readonly servingLine?: string;
   readonly text: string;
 }
@@ -301,11 +306,11 @@ const toVerifiedInboundMessage = (
     return Option.none();
 
   const verified: VerifiedInboundMessage = {
-    deliveryId: `${webhookId}:${message.id}`,
-    messageId: message.id,
+    deliveryId: DeliveryId.make(`${webhookId}:${message.id}`),
+    messageId: MessageId.make(message.id),
     platform: message.platform,
     senderId: message.sender.id,
-    spaceId: space.id,
+    spaceId: SpaceId.make(space.id),
     text: message.content.text,
   };
 
