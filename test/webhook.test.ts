@@ -1,17 +1,101 @@
 import { HttpServerRequest } from "@effect/platform";
 import { describe, expect, it } from "@effect/vitest";
-import { ConfigProvider, Effect, Option, Schema, TestClock } from "effect";
+import {
+  Clock,
+  ConfigProvider,
+  Effect,
+  Option,
+  Schema,
+  TestClock,
+} from "effect";
+import { afterAll, beforeAll, vi } from "vitest";
+import { createTestHarness, type TestHarness } from "wrangler";
 import { verifyPhotonWebhook } from "../src/webhook";
 import worker from "../src/worker";
-import {
-  currentWebhookTimestamp,
-  signedWebhookHeaders,
-  signWebhookBytes,
-  TEST_WEBHOOK_NOW,
-  TEST_WEBHOOK_SECRET,
-  TEST_WEBHOOK_TIMESTAMP,
-  VALID_PAYLOAD,
-} from "./photon-webhook-fixture";
+
+const TEST_WEBHOOK_SECRET = "test-webhook-secret";
+
+const TEST_WEBHOOK_NOW = Date.parse("2026-05-14T19:06:32.000Z");
+
+const TEST_WEBHOOK_TIMESTAMP = String(Math.floor(TEST_WEBHOOK_NOW / 1000));
+
+const VALID_PAYLOAD = {
+  event: "messages",
+  space: {
+    id: "test-space",
+    platform: "iMessage",
+    type: "dm",
+    phone: "private-line",
+  },
+  message: {
+    id: "test-message",
+    platform: "iMessage",
+    direction: "inbound",
+    timestamp: "2026-05-14T19:06:32.000Z",
+    sender: { id: "private-sender", platform: "iMessage" },
+    space: {
+      id: "test-space",
+      platform: "iMessage",
+      type: "dm",
+      phone: "private-line",
+    },
+    content: { type: "text", text: "private-message" },
+  },
+} as const;
+
+const signWebhookBytes = async (
+  bodyBytes: Uint8Array,
+  timestamp: string,
+): Promise<string> => {
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode(`v0:${timestamp}:`);
+  const signedBytes = new Uint8Array(prefix.length + bodyBytes.length);
+
+  signedBytes.set(prefix);
+  signedBytes.set(bodyBytes, prefix.length);
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(TEST_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const bytes = new Uint8Array(
+    await crypto.subtle.sign("HMAC", key, signedBytes),
+  );
+
+  return `v0=${Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("")}`;
+};
+
+const signWebhook = (body: string, timestamp: string) =>
+  signWebhookBytes(new TextEncoder().encode(body), timestamp);
+
+/** Explicit live-clock boundary for real Worker runtime tests. */
+const currentWebhookTimestamp = () =>
+  Effect.runPromise(
+    Clock.currentTimeMillis.pipe(
+      Effect.map((now) => String(Math.floor(now / 1000))),
+    ),
+  );
+
+const signedWebhookHeaders = async (
+  body: string,
+  timestamp: string,
+): Promise<Readonly<Record<string, string>>> => {
+  const signature = await signWebhook(body, timestamp);
+
+  return {
+    "content-type": "application/json",
+    "x-spectrum-event": "messages",
+    "x-spectrum-signature": signature,
+    "x-spectrum-timestamp": timestamp,
+    "x-spectrum-webhook-id": "test-webhook",
+  };
+};
 
 const WEBHOOK_URL = "https://satchel.test/webhooks/photon";
 
@@ -264,4 +348,74 @@ describe("Photon webhook contract", () => {
       }
     }),
   );
+});
+
+describe("Cloudflare Worker runtime", () => {
+  let server: TestHarness;
+
+  beforeAll(async () => {
+    vi.stubEnv("CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV", "false");
+    server = createTestHarness({
+      root: process.cwd(),
+      workers: [
+        {
+          configPath: "./wrangler.jsonc",
+          secrets: { WEBHOOK_SECRET: TEST_WEBHOOK_SECRET },
+        },
+      ],
+    });
+    await server.listen();
+  });
+
+  afterAll(async () => {
+    try {
+      await server.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("accepts a signed webhook in workerd without logging sensitive fields", async () => {
+    server.clearLogs();
+    const body = JSON.stringify(VALID_PAYLOAD);
+    const timestamp = await currentWebhookTimestamp();
+    const headers = await signedWebhookHeaders(body, timestamp);
+
+    const response = await server.fetch("/webhooks/photon", {
+      method: "POST",
+      headers,
+      body,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("ok");
+
+    const logs = JSON.stringify(server.getLogs());
+
+    expect(logs).toContain("Accepted verified inbound message");
+    expect(logs).toContain("deliveryId=test-webhook:test-message");
+    expect(logs).not.toContain(TEST_WEBHOOK_SECRET);
+    expect(logs).not.toContain(VALID_PAYLOAD.space.phone);
+    expect(logs).not.toContain(VALID_PAYLOAD.message.sender.id);
+    expect(logs).not.toContain(VALID_PAYLOAD.message.content.text);
+  });
+
+  it("enforces the webhook body limit in workerd", async () => {
+    const body = "x".repeat(1024 * 1024 + 1);
+    const timestamp = await currentWebhookTimestamp();
+
+    const response = await server.fetch("/webhooks/photon", {
+      method: "POST",
+      headers: {
+        "x-spectrum-event": "messages",
+        "x-spectrum-signature": `v0=${"0".repeat(64)}`,
+        "x-spectrum-timestamp": timestamp,
+        "x-spectrum-webhook-id": "test-webhook",
+      },
+      body,
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.text()).toBe("webhook body too large");
+  });
 });
