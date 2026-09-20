@@ -331,6 +331,21 @@ describe("Photon webhook contract", () => {
     expect(await response.text()).toBe("message acceptance failed");
   });
 
+  it("maps account identity crypto failure to a retryable response", async () => {
+    const request = await liveSignedRequest(encodeJson(VALID_PAYLOAD));
+
+    const sign = vi
+      .spyOn(crypto.subtle, "sign")
+      .mockRejectedValueOnce(new TypeError("private crypto details"));
+
+    const response = await fetchWorker(request);
+
+    sign.mockRestore();
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("message acceptance failed");
+  });
+
   it("maps account storage failure to a retryable response", async () => {
     const payload = {
       ...VALID_PAYLOAD,
@@ -362,6 +377,32 @@ describe("Photon webhook contract", () => {
 
     expect(response.status).toBe(500);
     expect(await response.text()).toBe("message acceptance failed");
+  });
+
+  it("maps request stream failure to an invalid-body response", async () => {
+    const timestamp = await currentWebhookTimestamp();
+
+    const body = new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError("private stream details"));
+      },
+    });
+
+    const request = new Request(WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "x-spectrum-event": "messages",
+        "x-spectrum-signature": `v0=${"0".repeat(64)}`,
+        "x-spectrum-timestamp": timestamp,
+        "x-spectrum-webhook-id": "test-webhook",
+      },
+      body,
+    });
+
+    const response = await fetchWorker(request);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toBe("invalid webhook body");
   });
 
   itEffect("returns the complete verified inbound message", () =>

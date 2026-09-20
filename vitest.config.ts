@@ -6,13 +6,6 @@ export default defineConfig({
   test: {
     projects: [
       {
-        test: {
-          name: "node",
-          include: ["test/messages.test.ts"],
-          environment: "node",
-        },
-      },
-      {
         plugins: [
           cloudflareTest({
             wrangler: { configPath: "./wrangler.jsonc" },
@@ -29,17 +22,9 @@ export default defineConfig({
           name: "worker",
           include: [
             "test/accounts.test.ts",
-            "test/inbox.test.ts",
+            "test/messages.test.ts",
             "test/webhook.test.ts",
           ],
-          deps: {
-            optimizer: {
-              ssr: {
-                enabled: true,
-                include: ["@opentelemetry/api"],
-              },
-            },
-          },
         },
       },
     ],
