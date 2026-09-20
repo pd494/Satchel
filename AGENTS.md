@@ -16,7 +16,7 @@
   without implementing it for them; still perform relevant read-only checks
   autonomously.
 
-This is a [Spectrum](https://photon.codes/docs/spectrum-ts) app, pinned to `spectrum-ts@^12.8.0`. Reusable app assembly lives in `src/index.ts`. Configuration and provider setup live in `src/config.ts`; message streaming and response handling live in `src/connection.ts`. Keep typed errors beside the code that produces them and keep this small app's source layout flat. The current real-phone test entry point is `test/imessage.ts`.
+This is a [Spectrum](https://photon.codes/docs/spectrum-ts) app, pinned to `spectrum-ts@^12.8.0`. Reusable app assembly lives in `src/index.ts`. Configuration and provider setup live in `src/config.ts`; long-lived message streaming and responses live in `src/connection.ts`; verified webhook delivery routing lives in `src/acceptMessage.ts`. Keep typed errors beside the code that produces them and keep this small app's source layout flat. The current real-phone test entry point is `test/imessage.ts`.
 
 ## Working in this project
 

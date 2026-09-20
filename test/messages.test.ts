@@ -1,4 +1,3 @@
-import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
   type Content,
@@ -6,6 +5,7 @@ import {
   Spectrum,
   UnsupportedError,
 } from "spectrum-ts";
+import { describe, expect, it } from "vitest";
 import z from "zod";
 import { recvMessage, sendMessage } from "../src/connection";
 import { MessageSendError, MessageStreamReadError } from "../src/errors";
@@ -17,7 +17,7 @@ type Input = {
   readonly direction: "inbound" | "outbound";
 };
 
-type Failure = "none" | "read" | "send";
+type Failure = "none" | "read" | "send" | "send-string";
 
 const input = (
   id: string,
@@ -68,6 +68,10 @@ const makeHarness = async (
         return Promise.reject(new TypeError("private provider details"));
       }
 
+      if (failure === "send-string" && client.sendAttempts === 1) {
+        return Promise.reject("private provider details");
+      }
+
       if (content.type !== "text") {
         return Promise.reject(
           UnsupportedError.content(content.type, "test_harness"),
@@ -96,8 +100,11 @@ const makeHarness = async (
 const stop = (app: Awaited<ReturnType<typeof makeHarness>>["app"]) =>
   Effect.promise(() => app.stop());
 
+const itEffect = <E>(name: string, test: () => Effect.Effect<void, E>) =>
+  it(name, () => Effect.runPromise(test()));
+
 describe("Spectrum message flow", () => {
-  it.effect(
+  itEffect(
     "echoes inbound text through Spectrum's real dispatch pipeline",
     () =>
       Effect.gen(function* () {
@@ -121,7 +128,7 @@ describe("Spectrum message flow", () => {
       }),
   );
 
-  it.effect("preserves a typed send failure", () =>
+  itEffect("preserves a typed send failure", () =>
     Effect.gen(function* () {
       const { app, state } = yield* Effect.promise(() =>
         makeHarness(
@@ -153,7 +160,31 @@ describe("Spectrum message flow", () => {
     }),
   );
 
-  it.effect("continues receiving after a send failure", () =>
+  itEffect("maps non-Error send rejections safely", () =>
+    Effect.gen(function* () {
+      const { app } = yield* Effect.promise(() =>
+        makeHarness(
+          [input("first", "inbound", { type: "text", text: "hello" })],
+          "send-string",
+        ),
+      );
+
+      const result = yield* Effect.promise(() =>
+        app.messages[Symbol.asyncIterator]().next(),
+      );
+
+      if (result.done) return;
+
+      const error = yield* sendMessage(result.value).pipe(
+        Effect.ensuring(stop(app)),
+        Effect.flip,
+      );
+
+      expect(error.cause).toBe("Unknown rejection");
+    }),
+  );
+
+  itEffect("continues receiving after a send failure", () =>
     Effect.gen(function* () {
       const { app, state } = yield* Effect.promise(() =>
         makeHarness(
@@ -174,7 +205,7 @@ describe("Spectrum message flow", () => {
     }),
   );
 
-  it.effect("maps a stream failure and releases Spectrum", () =>
+  itEffect("maps a stream failure and releases Spectrum", () =>
     Effect.gen(function* () {
       const { app, state } = yield* Effect.promise(() =>
         makeHarness([], "read"),

@@ -1,14 +1,52 @@
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
 /** Test configuration for finite, credential-free Effect tests. */
 export default defineConfig({
   test: {
-    include: ["test/**/*.test.ts"],
-    environment: "node",
+    projects: [
+      {
+        test: {
+          name: "node",
+          include: ["test/messages.test.ts"],
+          environment: "node",
+        },
+      },
+      {
+        plugins: [
+          cloudflareTest({
+            wrangler: { configPath: "./wrangler.jsonc" },
+            miniflare: {
+              compatibilityDate: "2026-08-27",
+              bindings: {
+                WEBHOOK_SECRET: "test-webhook-secret",
+                ACCOUNT_ID_SECRET: "test-account-id-secret",
+              },
+            },
+          }),
+        ],
+        test: {
+          name: "worker",
+          include: [
+            "test/accounts.test.ts",
+            "test/inbox.test.ts",
+            "test/webhook.test.ts",
+          ],
+          deps: {
+            optimizer: {
+              ssr: {
+                enabled: true,
+                include: ["@opentelemetry/api"],
+              },
+            },
+          },
+        },
+      },
+    ],
     coverage: {
-      provider: "v8",
+      provider: "istanbul",
       include: ["src/**/*.ts"],
-      reporter: ["text", "json-summary", "html"],
+      reporter: ["text", "json", "json-summary", "html"],
       reportsDirectory: "coverage",
       thresholds: {
         statements: 85,

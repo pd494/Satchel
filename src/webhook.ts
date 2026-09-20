@@ -10,6 +10,15 @@ import {
   Schema,
   Stream,
 } from "effect";
+import type { InboxStorageError } from "./acceptMessage";
+import {
+  type AccountIdConfigError,
+  type AccountIdDerivationError,
+  type AccountIdentity,
+  DeliveryId,
+  MessageId,
+  SpaceId,
+} from "./accountIdentity";
 
 /** Required Photon webhook authentication headers were missing or malformed. */
 class InvalidWebhookHeadersError extends Schema.TaggedError<InvalidWebhookHeadersError>()(
@@ -122,14 +131,17 @@ const PhotonWebhookBody = Schema.Struct({
 type PhotonWebhookBody = typeof PhotonWebhookBody.Type;
 
 export interface VerifiedInboundMessage {
-  readonly deliveryId: string;
-  readonly messageId: string;
-  readonly platform: "iMessage";
+  readonly deliveryId: DeliveryId;
+  readonly messageId: MessageId;
+  readonly platform: "imessage";
   readonly senderId: string;
-  readonly spaceId: string;
+  readonly spaceId: SpaceId;
   readonly servingLine?: string;
   readonly text: string;
 }
+
+/** Verified fields persisted for later processing; excludes the raw sender. */
+export type InboxMessage = Omit<VerifiedInboundMessage, "senderId">;
 
 const causeDescription = (cause: unknown): string =>
   cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
@@ -289,7 +301,7 @@ const toVerifiedInboundMessage = (
   const { message, space } = body;
 
   if (
-    message.platform !== "iMessage" ||
+    message.platform !== "imessage" ||
     message.direction !== "inbound" ||
     space.type !== "dm" ||
     message.sender === undefined ||
@@ -299,11 +311,11 @@ const toVerifiedInboundMessage = (
     return Option.none();
 
   const verified: VerifiedInboundMessage = {
-    deliveryId: `${webhookId}:${message.id}`,
-    messageId: message.id,
+    deliveryId: DeliveryId.make(`${webhookId}:${message.id}`),
+    messageId: MessageId.make(message.id),
     platform: message.platform,
     senderId: message.sender.id,
-    spaceId: space.id,
+    spaceId: SpaceId.make(space.id),
     text: message.content.text,
   };
 
@@ -369,27 +381,46 @@ export const verifyPhotonWebhook = Effect.fn("PhotonWebhook.verify")(
 const respond = (status: number, body: string) =>
   Effect.succeed(HttpServerResponse.text(body, { status }));
 
+type AcceptMessage = (
+  message: VerifiedInboundMessage,
+) => Effect.Effect<
+  void,
+  AccountIdConfigError | AccountIdDerivationError | InboxStorageError,
+  AccountIdentity
+>;
+
+const respondWithErrorLog = Effect.fn("PhotonWebhook.respondWithErrorLog")(
+  function* (body: string, errorTag: string) {
+    yield* Effect.logError("Webhook request failed").pipe(
+      Effect.annotateLogs({ errorTag }),
+    );
+
+    return HttpServerResponse.text(body, { status: 500 });
+  },
+);
+
 /** Authenticate and translate one Photon webhook request. */
 export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
-  function* () {
+  function* (acceptMessage: AcceptMessage) {
     const verified = yield* verifyPhotonWebhook();
 
     if (Option.isNone(verified))
       return HttpServerResponse.text("ignored", { status: 200 });
 
-    // PR 2 routes this value to the Account Durable Object, where deliveryId
-    // is claimed atomically with the account state transition.
-    yield* Effect.logInfo("Accepted verified inbound message").pipe(
-      Effect.annotateLogs({
-        deliveryId: verified.value.deliveryId,
-        messageId: verified.value.messageId,
-        platform: verified.value.platform,
-      }),
-    );
+    yield* acceptMessage(verified.value);
 
     return HttpServerResponse.text("ok", { status: 200 });
   },
   Effect.catchTags({
+    AccountIdConfigError: () =>
+      respondWithErrorLog("message acceptance failed", "AccountIdConfigError"),
+    AccountIdDerivationError: () =>
+      respondWithErrorLog(
+        "message acceptance failed",
+        "AccountIdDerivationError",
+      ),
+    InboxStorageError: () =>
+      respondWithErrorLog("message acceptance failed", "InboxStorageError"),
     InvalidWebhookHeadersError: () =>
       respond(400, "missing or malformed headers"),
     InvalidWebhookTimestampError: () => respond(400, "invalid timestamp"),
