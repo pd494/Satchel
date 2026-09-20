@@ -10,8 +10,10 @@ import {
   Schema,
   Stream,
 } from "effect";
-import type { MessageAcceptanceError } from "./acceptMessage";
+import type { InboxStorageError } from "./acceptMessage";
 import {
+  type AccountIdConfigError,
+  type AccountIdDerivationError,
   type AccountIdentity,
   DeliveryId,
   MessageId,
@@ -381,7 +383,11 @@ const respond = (status: number, body: string) =>
 
 type AcceptMessage = (
   message: VerifiedInboundMessage,
-) => Effect.Effect<void, MessageAcceptanceError, AccountIdentity>;
+) => Effect.Effect<
+  void,
+  AccountIdConfigError | AccountIdDerivationError | InboxStorageError,
+  AccountIdentity
+>;
 
 const respondWithErrorLog = Effect.fn("PhotonWebhook.respondWithErrorLog")(
   function* (body: string, errorTag: string) {

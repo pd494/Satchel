@@ -6,7 +6,7 @@ import {
   DeliveryId,
   MessageId,
   SpaceId,
-} from "../src/accounts/accountIdentity";
+} from "../src/accountIdentity";
 
 const identityConfig = ConfigProvider.fromMap(
   new Map([["ACCOUNT_ID_SECRET", "test-account-id-secret"]]),

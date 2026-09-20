@@ -11,7 +11,7 @@ import {
   TestContext,
 } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { AccountIdentity } from "../src/accounts/accountIdentity";
+import { AccountIdentity } from "../src/accountIdentity";
 import { verifyPhotonWebhook } from "../src/webhook";
 import worker from "../src/worker";
 

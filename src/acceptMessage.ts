@@ -1,9 +1,5 @@
 import { Effect, Schema } from "effect";
-import {
-  type AccountIdConfigError,
-  type AccountIdDerivationError,
-  AccountIdentity,
-} from "./accountIdentity";
+import { AccountIdentity } from "./accountIdentity";
 import type { Account } from "./db";
 import type { VerifiedInboundMessage } from "./webhook";
 
@@ -18,11 +14,6 @@ export class InboxStorageError extends Schema.TaggedError<InboxStorageError>()(
     cause: Schema.String,
   },
 ) {}
-
-export type MessageAcceptanceError =
-  | AccountIdConfigError
-  | AccountIdDerivationError
-  | InboxStorageError;
 
 /** Identify the private account and durably accept one verified delivery. */
 export const acceptMessage = Effect.fn("Connection.acceptMessage")(function* (
