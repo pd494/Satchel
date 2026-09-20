@@ -1,41 +1,22 @@
-import type { DurableObjectNamespace } from "@cloudflare/workers-types";
-import { describe, expect, it } from "@effect/vitest";
-import { afterAll, beforeAll, vi } from "vitest";
-import { createTestHarness, type TestHarness } from "wrangler";
-import type { Account } from "../src/db";
+import { env, runInDurableObject } from "cloudflare:test";
+import { describe, expect, it } from "vitest";
+
+/** Read account storage inside the Durable Object's own runtime context. */
+const queryInbox = <Row extends Record<string, SqlStorageValue>>(
+  account: DurableObjectStub,
+  query: string,
+): Promise<Row[]> =>
+  runInDurableObject(account, (_instance, state) =>
+    state.storage.sql.exec<Row>(query).toArray(),
+  );
 
 describe("Account inbox", () => {
-  let server: TestHarness;
-
-  beforeAll(async () => {
-    vi.stubEnv("CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV", "false");
-    server = createTestHarness({
-      root: process.cwd(),
-      workers: [{ configPath: "./wrangler.jsonc" }],
-    });
-    await server.listen();
-  });
-
-  afterAll(async () => {
-    try {
-      await server?.close();
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
   /**
    * The first accepted message should start onboarding; later messages should not.
    * Retrying a delivery must preserve its original content and create no extra work.
    */
   it("marks first contact once and ignores duplicate deliveries", async () => {
-    const worker = server.getWorker<{
-      ACCOUNTS: DurableObjectNamespace<Account>;
-    }>();
-
-    const { ACCOUNTS } = await worker.getEnv();
-
-    const account = ACCOUNTS.getByName("inbox-test");
+    const account = env.ACCOUNTS.getByName("inbox-test");
 
     const first = {
       deliveryId: "delivery-1",
@@ -56,14 +37,14 @@ describe("Account inbox", () => {
       text: "second message",
     });
 
-    const storage = await server
-      .getWorker()
-      .getDurableObjectStorage("Account", {
-        name: "inbox-test",
-      });
-
     expect(
-      await storage.exec(
+      await queryInbox<{
+        delivery_id: string;
+        text: string;
+        is_first_message: number;
+        status: string;
+      }>(
+        account,
         "SELECT delivery_id, text, is_first_message, status FROM inbox ORDER BY sequence",
       ),
     ).toEqual([
@@ -81,18 +62,13 @@ describe("Account inbox", () => {
       },
     ]);
   });
+
   /**
    * Overlapping arrivals must not trigger onboarding twice or save a retry twice.
    * Send two distinct deliveries and a duplicate concurrently to exercise both rules.
    */
   it("accepts concurrent deliveries once and marks exactly one first message", async () => {
-    const { ACCOUNTS } = await server
-      .getWorker<{
-        ACCOUNTS: DurableObjectNamespace<Account>;
-      }>()
-      .getEnv();
-
-    const account = ACCOUNTS.getByName("concurrent");
+    const account = env.ACCOUNTS.getByName("concurrent");
 
     const message = {
       deliveryId: "a",
@@ -111,12 +87,9 @@ describe("Account inbox", () => {
       }),
     ]);
 
-    const storage = await server
-      .getWorker()
-      .getDurableObjectStorage("Account", { name: "concurrent" });
-
     expect(
-      await storage.exec(
+      await queryInbox<{ total: number; first_messages: number }>(
+        account,
         "SELECT COUNT(*) AS total, SUM(is_first_message) AS first_messages FROM inbox",
       ),
     ).toEqual([{ total: 2, first_messages: 1 }]);
@@ -127,13 +100,7 @@ describe("Account inbox", () => {
    * Seed a completed row, retry it, and verify the entire saved row is unchanged.
    */
   it("does not overwrite or requeue a completed delivery", async () => {
-    const { ACCOUNTS } = await server
-      .getWorker<{
-        ACCOUNTS: DurableObjectNamespace<Account>;
-      }>()
-      .getEnv();
-
-    const account = ACCOUNTS.getByName("completed");
+    const account = env.ACCOUNTS.getByName("completed");
 
     const message = {
       deliveryId: "done",
@@ -144,23 +111,21 @@ describe("Account inbox", () => {
 
     await account.checkAndStoreMesage(message);
 
-    const storage = await server
-      .getWorker()
-      .getDurableObjectStorage("Account", { name: "completed" });
+    const before = await runInDurableObject(account, (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE inbox SET status = 'completed' WHERE delivery_id = ?",
+        message.deliveryId,
+      );
 
-    // Seed completion through Wrangler's public storage API until processing exists.
-    await storage.exec(
-      "UPDATE inbox SET status = 'completed' WHERE delivery_id = ?",
-      message.deliveryId,
-    );
-
-    const before = await storage.exec("SELECT * FROM inbox");
+      return state.storage.sql.exec("SELECT * FROM inbox").toArray();
+    });
 
     await account.checkAndStoreMesage({
       ...message,
       text: "retry",
       spaceId: "different-space",
     });
-    expect(await storage.exec("SELECT * FROM inbox")).toEqual(before);
+
+    expect(await queryInbox(account, "SELECT * FROM inbox")).toEqual(before);
   });
 });

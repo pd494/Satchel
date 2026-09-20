@@ -1,5 +1,6 @@
+import { env, SELF } from "cloudflare:test";
 import { HttpServerRequest } from "@effect/platform";
-import { describe, expect, it } from "@effect/vitest";
+import * as spectrumWebhook from "@spectrum-ts/core/webhook";
 import {
   Clock,
   ConfigProvider,
@@ -7,16 +8,13 @@ import {
   Option,
   Schema,
   TestClock,
+  TestContext,
 } from "effect";
-import { afterAll, beforeAll, vi } from "vitest";
-import { createTestHarness, type TestHarness } from "wrangler";
+import { describe, expect, it, vi } from "vitest";
 import { verifyPhotonWebhook } from "../src/webhook";
-import type { WorkerBindings } from "../src/worker";
 import worker from "../src/worker";
 
 const TEST_WEBHOOK_SECRET = "test-webhook-secret";
-
-const TEST_ACCOUNT_ID_SECRET = "test-account-id-secret";
 
 const TEST_WEBHOOK_NOW = Date.parse("2026-05-14T19:06:32.000Z");
 
@@ -102,36 +100,6 @@ const signedWebhookHeaders = async (
 
 const WEBHOOK_URL = "https://satchel.test/webhooks/photon";
 
-let server: TestHarness;
-
-let workerBindings: WorkerBindings;
-
-beforeAll(async () => {
-  vi.stubEnv("CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV", "false");
-  server = createTestHarness({
-    root: process.cwd(),
-    workers: [
-      {
-        configPath: "./wrangler.jsonc",
-        secrets: {
-          WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
-          ACCOUNT_ID_SECRET: TEST_ACCOUNT_ID_SECRET,
-        },
-      },
-    ],
-  });
-  await server.listen();
-  workerBindings = await server.getWorker<WorkerBindings>().getEnv();
-});
-
-afterAll(async () => {
-  try {
-    await server?.close();
-  } finally {
-    vi.unstubAllEnvs();
-  }
-});
-
 const testConfig = ConfigProvider.fromMap(
   new Map([["WEBHOOK_SECRET", TEST_WEBHOOK_SECRET]]),
 );
@@ -174,7 +142,7 @@ const signedByteRequest = async (body: Uint8Array) => {
   });
 };
 
-const fetchWorker = (request: Request) => worker.fetch(request, workerBindings);
+const fetchWorker = (request: Request) => worker.fetch(request, env);
 
 const verify = (rawBody: string) =>
   Effect.gen(function* () {
@@ -190,6 +158,11 @@ const verify = (rawBody: string) =>
       Effect.provideService(HttpServerRequest.HttpServerRequest, request),
     );
   }).pipe(Effect.withConfigProvider(testConfig));
+
+const itEffect = <E>(name: string, test: () => Effect.Effect<void, E>) =>
+  it(name, () =>
+    Effect.runPromise(test().pipe(Effect.provide(TestContext.TestContext))),
+  );
 
 describe("Photon webhook contract", () => {
   it("rejects malformed or replay-prone authentication metadata", async () => {
@@ -269,6 +242,50 @@ describe("Photon webhook contract", () => {
     expect(await byteResponse.text()).toBe("invalid webhook body");
   });
 
+  it("maps verifier failures to stable HTTP responses", async () => {
+    const verifier = vi.spyOn(spectrumWebhook, "verifySpectrumSignature");
+
+    const cases = [
+      {
+        result: { ok: false, reason: "expired" } as const,
+        status: 400,
+        body: "stale timestamp",
+      },
+      {
+        result: { ok: false, reason: "missing-headers" } as const,
+        status: 400,
+        body: "invalid timestamp",
+      },
+    ];
+
+    for (const testCase of cases) {
+      verifier.mockResolvedValueOnce(testCase.result);
+
+      const response = await fetchWorker(
+        await liveSignedRequest(encodeJson(VALID_PAYLOAD)),
+      );
+
+      expect(response.status).toBe(testCase.status);
+      expect(await response.text()).toBe(testCase.body);
+    }
+
+    for (const rejection of [
+      new TypeError("private verifier details"),
+      "private verifier details",
+    ]) {
+      verifier.mockRejectedValueOnce(rejection);
+
+      const response = await fetchWorker(
+        await liveSignedRequest(encodeJson(VALID_PAYLOAD)),
+      );
+
+      expect(response.status).toBe(500);
+      expect(await response.text()).toBe("signature verification failed");
+    }
+
+    verifier.mockRestore();
+  });
+
   it("acknowledges unsupported event signals for forward compatibility", async () => {
     const requests = [
       await liveSignedRequest(encodeJson(VALID_PAYLOAD), {
@@ -290,14 +307,27 @@ describe("Photon webhook contract", () => {
   it("fails deliberately when the Worker secret binding is missing", async () => {
     const response = await worker.fetch(
       await liveSignedRequest(encodeJson(VALID_PAYLOAD)),
-      { ACCOUNTS: workerBindings.ACCOUNTS },
+      { ACCOUNTS: env.ACCOUNTS },
     );
 
     expect(response.status).toBe(500);
     expect(await response.text()).toBe("webhook is not configured");
   });
 
-  it.effect("returns the complete verified inbound message", () =>
+  it("fails deliberately when the account identity secret is missing", async () => {
+    const response = await worker.fetch(
+      await liveSignedRequest(encodeJson(VALID_PAYLOAD)),
+      {
+        ACCOUNTS: env.ACCOUNTS,
+        WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
+      },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("message acceptance failed");
+  });
+
+  itEffect("returns the complete verified inbound message", () =>
     Effect.gen(function* () {
       const verified = yield* verify(encodeJson(VALID_PAYLOAD));
 
@@ -328,7 +358,7 @@ describe("Photon webhook contract", () => {
     }),
   );
 
-  it.effect("filters messages outside the trusted inbound text contract", () =>
+  itEffect("filters messages outside the trusted inbound text contract", () =>
     Effect.gen(function* () {
       const cases = [
         {
@@ -382,21 +412,25 @@ describe("Photon webhook contract", () => {
 
 describe("Cloudflare Worker runtime", () => {
   it("accepts a signed webhook in workerd without logging sensitive fields", async () => {
-    server.clearLogs();
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const body = JSON.stringify(VALID_PAYLOAD);
     const timestamp = await currentWebhookTimestamp();
     const headers = await signedWebhookHeaders(body, timestamp);
 
-    const response = await server.fetch("/webhooks/photon", {
-      method: "POST",
-      headers,
-      body,
-    });
+    const response = await SELF.fetch(
+      new Request(WEBHOOK_URL, {
+        method: "POST",
+        headers,
+        body,
+      }),
+    );
 
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("ok");
 
-    const logs = JSON.stringify(server.getLogs());
+    const logs = JSON.stringify(log.mock.calls);
+
+    log.mockRestore();
 
     expect(logs).toContain("Durably accepted inbound message");
     expect(logs).toContain("deliveryId=test-webhook:test-message");
@@ -410,16 +444,18 @@ describe("Cloudflare Worker runtime", () => {
     const body = "x".repeat(1024 * 1024 + 1);
     const timestamp = await currentWebhookTimestamp();
 
-    const response = await server.fetch("/webhooks/photon", {
-      method: "POST",
-      headers: {
-        "x-spectrum-event": "messages",
-        "x-spectrum-signature": `v0=${"0".repeat(64)}`,
-        "x-spectrum-timestamp": timestamp,
-        "x-spectrum-webhook-id": "test-webhook",
-      },
-      body,
-    });
+    const response = await SELF.fetch(
+      new Request(WEBHOOK_URL, {
+        method: "POST",
+        headers: {
+          "x-spectrum-event": "messages",
+          "x-spectrum-signature": `v0=${"0".repeat(64)}`,
+          "x-spectrum-timestamp": timestamp,
+          "x-spectrum-webhook-id": "test-webhook",
+        },
+        body,
+      }),
+    );
 
     expect(response.status).toBe(413);
     expect(await response.text()).toBe("webhook body too large");
