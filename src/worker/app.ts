@@ -1,8 +1,8 @@
 import { HttpApp, HttpRouter, HttpServerResponse } from "@effect/platform";
 import { ConfigProvider, Effect } from "effect";
-import { AccountIdentity } from "./accountIdentity";
-import { recvMessage } from "./connection";
-import type { Account } from "./db";
+import { AccountIdentity } from "../accountIdentity";
+import { recvMessage } from "../connection";
+import type { Account } from "../db/account";
 import { handlePhotonWebhook } from "./webhook";
 
 export interface WorkerBindings {

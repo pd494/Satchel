@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "satchel",
-  "main": "src/workerEntry.ts",
+  "main": "src/worker/entry.ts",
   "compatibility_date": "2026-09-14",
   "secrets": {
     "required": ["WEBHOOK_SECRET", "ACCOUNT_ID_SECRET"]

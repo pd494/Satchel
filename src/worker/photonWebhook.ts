@@ -10,7 +10,7 @@ import {
   Schema,
   Stream,
 } from "effect";
-import { DeliveryId, MessageId, SpaceId } from "./accountIdentity";
+import { DeliveryId, MessageId, SpaceId } from "../accountIdentity";
 
 /** Required Photon webhook authentication headers were missing or malformed. */
 class InvalidWebhookHeadersError extends Schema.TaggedError<InvalidWebhookHeadersError>()(

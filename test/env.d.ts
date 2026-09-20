@@ -1,4 +1,4 @@
-import type { WorkerBindings } from "../src/worker";
+import type { WorkerBindings } from "../src/worker/app";
 
 declare global {
   namespace Cloudflare {

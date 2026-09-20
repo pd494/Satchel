@@ -45,13 +45,13 @@ export default defineConfig({
           functions: 100,
           lines: 90,
         },
-        "src/webhook.ts": {
+        "src/worker/webhook.ts": {
           statements: 90,
           branches: 90,
           functions: 75,
           lines: 90,
         },
-        "src/worker.ts": {
+        "src/worker/app.ts": {
           statements: 100,
           branches: 100,
           functions: 100,

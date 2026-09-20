@@ -16,7 +16,7 @@
   without implementing it for them; still perform relevant read-only checks
   autonomously.
 
-This is a Photon Spectrum webhook app, pinned to `@spectrum-ts/core@12.8.0`. Cloudflare HTTP routing lives in `src/worker.ts`, deployment exports in `src/workerEntry.ts`, Photon verification in `src/photonWebhook.ts`, account identity in `src/accountIdentity.ts`, verified message routing in `src/connection.ts`, and the Account Durable Object in `src/db.ts`. Keep typed errors beside the code that produces them and keep this small app's source layout flat.
+This is a Photon Spectrum webhook app, pinned to `@spectrum-ts/core@12.8.0`. Cloudflare entry points, HTTP routing, Photon verification, and webhook responses live in `src/worker/`. The Account Durable Object lives in `src/db/`. Account identity and verified message routing live in `src/accountIdentity.ts` and `src/connection.ts`. Keep these two groups small and avoid speculative submodules.
 
 ## Working in this project
 

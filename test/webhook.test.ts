@@ -12,8 +12,8 @@ import {
 } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { AccountIdentity } from "../src/accountIdentity";
-import { verifyPhotonWebhook } from "../src/photonWebhook";
-import worker from "../src/worker";
+import worker from "../src/worker/app";
+import { verifyPhotonWebhook } from "../src/worker/photonWebhook";
 
 const TEST_WEBHOOK_SECRET = "test-webhook-secret";
 

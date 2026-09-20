@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect";
 import { AccountIdentity } from "./accountIdentity";
-import type { Account } from "./db";
-import type { VerifiedInboundMessage } from "./photonWebhook";
+import type { Account } from "./db/account";
+import type { VerifiedInboundMessage } from "./worker/photonWebhook";
 
 const safeStorageCauseName = (cause: unknown): string =>
   cause instanceof Error ? cause.name : "Unknown rejection";

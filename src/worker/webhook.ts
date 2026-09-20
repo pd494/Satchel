@@ -4,8 +4,8 @@ import type {
   AccountIdConfigError,
   AccountIdDerivationError,
   AccountIdentity,
-} from "./accountIdentity";
-import type { InboxStorageError } from "./connection";
+} from "../accountIdentity";
+import type { InboxStorageError } from "../connection";
 import {
   type VerifiedInboundMessage,
   verifyPhotonWebhook,
