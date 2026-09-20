@@ -3,6 +3,9 @@ import { AccountIdentity } from "./accountIdentity";
 import type { Account } from "./db";
 import type { VerifiedInboundMessage } from "./photonWebhook";
 
+const safeStorageCauseName = (cause: unknown): string =>
+  cause instanceof Error ? cause.name : "Unknown rejection";
+
 export class InboxStorageError extends Schema.TaggedError<InboxStorageError>()(
   "InboxStorageError",
   {
@@ -41,7 +44,7 @@ export const recvMessage = Effect.fn("Connection.recvMessage")(function* (
       new InboxStorageError({
         operation: "receiveMessage",
         message: "Could not save the incoming message",
-        cause: String(cause),
+        cause: safeStorageCauseName(cause),
       }),
   });
 

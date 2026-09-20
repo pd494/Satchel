@@ -22,6 +22,7 @@ export default defineConfig({
           name: "worker",
           include: [
             "test/accounts.test.ts",
+            "test/connection.test.ts",
             "test/messages.test.ts",
             "test/webhook.test.ts",
           ],
