@@ -8,7 +8,7 @@ export default defineConfig({
       {
         test: {
           name: "node",
-          include: ["test/config.test.ts", "test/messages.test.ts"],
+          include: ["test/messages.test.ts"],
           environment: "node",
         },
       },

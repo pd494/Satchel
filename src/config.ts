@@ -20,33 +20,16 @@ export class PhotonConnectionError extends Schema.TaggedError<PhotonConnectionEr
 const causeName = (cause: unknown): string =>
   cause instanceof Error ? cause.name : "Unknown rejection";
 
-interface PhotonCredentials {
-  readonly projectId: string;
-  readonly projectSecret: string;
-}
-
-export type PhotonConnector = (
-  credentials: PhotonCredentials,
-) => ReturnType<typeof Spectrum>;
-
-const connectSpectrum: PhotonConnector = ({ projectId, projectSecret }) =>
-  Spectrum({
-    projectId,
-    projectSecret,
-    providers: [imessage.config()],
-  });
-
 /** Connect to Photon using application configuration. */
-export const connectPhoton = Effect.fn("Photon.connect")(function* (
-  connect: PhotonConnector = connectSpectrum,
-) {
+export const connectPhoton = Effect.fn("Photon.connect")(function* () {
   const config = yield* photonConfig;
 
   return yield* Effect.tryPromise({
     try: () =>
-      connect({
+      Spectrum({
         projectId: config.projectId,
         projectSecret: Redacted.value(config.projectSecret),
+        providers: [imessage.config()],
       }),
     catch: (cause) =>
       new PhotonConnectionError({
