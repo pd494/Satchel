@@ -1,65 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
-import { sql } from "drizzle-orm";
-import {
-  type DrizzleSqliteDODatabase,
-  drizzle,
-} from "drizzle-orm/durable-sqlite";
-import {
-  check,
-  index,
-  integer,
-  sqliteTable,
-  text,
-} from "drizzle-orm/sqlite-core";
-import { DateTime, Effect } from "effect";
-import type {
-  DeliveryId,
-  MessageId,
-  SpaceId,
-} from "./accounts/accountIdentity";
-import { InboxStorageError, safeCauseName } from "./inboxErrors";
+import { DateTime, Effect, Schema } from "effect";
+import type { InboxMessage } from "./webhook";
 import type { WorkerBindings } from "./worker";
 
-export interface InboxMessage {
-  readonly deliveryId: DeliveryId;
-  readonly messageId: MessageId;
-  readonly text: string;
-  readonly spaceId: SpaceId;
-  readonly platform: "imessage";
-  readonly servingLine?: string;
-}
+const safeCauseName = (cause: unknown): string =>
+  cause instanceof Error ? cause.name : "Unknown rejection";
 
-const inbox = sqliteTable(
-  "inbox",
+export class InboxDatabaseError extends Schema.TaggedError<InboxDatabaseError>()(
+  "InboxDatabaseError",
   {
-    sequence: integer("sequence").primaryKey({ autoIncrement: true }),
-    deliveryId: text("delivery_id").notNull().unique(),
-    messageId: text("message_id").notNull(),
-    text: text("text").notNull(),
-    spaceId: text("space_id").notNull(),
-    platform: text("platform", { enum: ["imessage"] }).notNull(),
-    servingLine: text("serving_line"),
-    isFirstMessage: integer("is_first_message", { mode: "boolean" }).notNull(),
-    status: text("status", { enum: ["pending", "completed"] })
-      .notNull()
-      .default("pending"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    operation: Schema.Literal("storeDeliveryOnce"),
+    message: Schema.String,
+    cause: Schema.String,
   },
-  (table) => [
-    index("inbox_status_sequence_idx").on(table.status, table.sequence),
-    check("inbox_first_message_check", sql`${table.isFirstMessage} IN (0, 1)`),
-    check(
-      "inbox_status_check",
-      sql`${table.status} IN ('pending', 'completed')`,
-    ),
-  ],
-);
-
-const accountSchema = { inbox };
+) {}
 
 export class Account extends DurableObject<WorkerBindings> {
-  readonly db: DrizzleSqliteDODatabase<typeof accountSchema>;
-
   constructor(ctx: DurableObjectState, env: WorkerBindings) {
     super(ctx, env);
 
@@ -80,16 +36,11 @@ export class Account extends DurableObject<WorkerBindings> {
       CREATE INDEX IF NOT EXISTS inbox_status_sequence_idx
         ON inbox(status, sequence);
     `);
-
-    this.db = drizzle(ctx.storage, {
-      logger: false,
-      schema: accountSchema,
-    });
   }
 
   /** Store a delivery once and mark whether it began this account's inbox. */
   async storeDeliveryOnce(message: InboxMessage): Promise<void> {
-    const db = this.db;
+    const storage = this.ctx.storage;
 
     return Effect.runPromise(
       Effect.gen(function* () {
@@ -97,30 +48,38 @@ export class Account extends DurableObject<WorkerBindings> {
 
         yield* Effect.try({
           try: () =>
-            db.transaction((tx) => {
-              const existing = tx
-                .select({ sequence: accountSchema.inbox.sequence })
-                .from(accountSchema.inbox)
-                .limit(1)
-                .get();
+            storage.transactionSync(() => {
+              const existing = storage.sql
+                .exec<{ sequence: number }>(
+                  "SELECT sequence FROM inbox LIMIT 1",
+                )
+                .toArray()[0];
 
-              tx.insert(accountSchema.inbox)
-                .values({
-                  deliveryId: message.deliveryId,
-                  messageId: message.messageId,
-                  text: message.text,
-                  spaceId: message.spaceId,
-                  platform: message.platform,
-                  servingLine: message.servingLine,
-                  isFirstMessage: existing === undefined,
-                  createdAt: DateTime.toDateUtc(now),
-                })
-                .onConflictDoNothing({ target: accountSchema.inbox.deliveryId })
-                .run();
+              storage.sql.exec(
+                `INSERT INTO inbox (
+                  delivery_id,
+                  message_id,
+                  text,
+                  space_id,
+                  platform,
+                  serving_line,
+                  is_first_message,
+                  created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(delivery_id) DO NOTHING`,
+                message.deliveryId,
+                message.messageId,
+                message.text,
+                message.spaceId,
+                message.platform,
+                message.servingLine ?? null,
+                existing === undefined ? 1 : 0,
+                DateTime.toEpochMillis(now),
+              );
             }),
           catch: (cause) =>
-            new InboxStorageError({
-              operation: "receiveMessage",
+            new InboxDatabaseError({
+              operation: "storeDeliveryOnce",
               message: "Could not save the incoming message",
               cause: safeCauseName(cause),
             }),

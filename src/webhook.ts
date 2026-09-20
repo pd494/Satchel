@@ -138,6 +138,9 @@ export interface VerifiedInboundMessage {
   readonly text: string;
 }
 
+/** Verified fields persisted for later processing; excludes the raw sender. */
+export type InboxMessage = Omit<VerifiedInboundMessage, "senderId">;
+
 const causeDescription = (cause: unknown): string =>
   cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause);
 

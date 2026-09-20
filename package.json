@@ -24,7 +24,6 @@
   "dependencies": {
     "@effect/platform": "0.97.1",
     "@spectrum-ts/core": "12.8.0",
-    "drizzle-orm": "^0.45.2",
     "effect": "^3.22.1",
     "spectrum-ts": "^12.8.0"
   },

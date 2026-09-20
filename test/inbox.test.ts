@@ -7,7 +7,6 @@ import {
   MessageId,
   SpaceId,
 } from "../src/accounts/accountIdentity";
-import { safeCauseName } from "../src/inboxErrors";
 
 const identityConfig = ConfigProvider.fromMap(
   new Map([["ACCOUNT_ID_SECRET", "test-account-id-secret"]]),
@@ -23,11 +22,6 @@ const queryInbox = <Row extends Record<string, SqlStorageValue>>(
   );
 
 describe("Account inbox", () => {
-  it("records safe storage rejection categories", () => {
-    expect(safeCauseName(new TypeError("private details"))).toBe("TypeError");
-    expect(safeCauseName("private details")).toBe("Unknown rejection");
-  });
-
   /**
    * The first accepted message should start onboarding; later messages should not.
    * Retrying a delivery must preserve its original content and create no extra work.

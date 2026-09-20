@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { HttpServerRequest } from "@effect/platform";
 import * as spectrumWebhook from "@spectrum-ts/core/webhook";
 import {
@@ -11,6 +11,7 @@ import {
   TestContext,
 } from "effect";
 import { describe, expect, it, vi } from "vitest";
+import { AccountIdentity } from "../src/accounts/accountIdentity";
 import { verifyPhotonWebhook } from "../src/webhook";
 import worker from "../src/worker";
 
@@ -102,6 +103,10 @@ const WEBHOOK_URL = "https://satchel.test/webhooks/photon";
 
 const testConfig = ConfigProvider.fromMap(
   new Map([["WEBHOOK_SECRET", TEST_WEBHOOK_SECRET]]),
+);
+
+const accountTestConfig = ConfigProvider.fromMap(
+  new Map([["ACCOUNT_ID_SECRET", "test-account-id-secret"]]),
 );
 
 const encodeJson = Schema.encodeSync(Schema.parseJson());
@@ -321,6 +326,42 @@ describe("Photon webhook contract", () => {
         ACCOUNTS: env.ACCOUNTS,
         WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
       },
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("message acceptance failed");
+  });
+
+  it("maps account storage failure to a retryable response", async () => {
+    const payload = {
+      ...VALID_PAYLOAD,
+      message: {
+        ...VALID_PAYLOAD.message,
+        sender: {
+          ...VALID_PAYLOAD.message.sender,
+          id: "storage-failure-sender",
+        },
+      },
+    };
+
+    const accountId = await Effect.runPromise(
+      AccountIdentity.deriveAccountId(
+        "imessage",
+        payload.message.sender.id,
+      ).pipe(
+        Effect.provide(AccountIdentity.Default),
+        Effect.withConfigProvider(accountTestConfig),
+      ),
+    );
+
+    const account = env.ACCOUNTS.getByName(accountId);
+
+    await runInDurableObject(account, (_instance, state) => {
+      state.storage.sql.exec("DROP TABLE inbox");
+    });
+
+    const response = await fetchWorker(
+      await liveSignedRequest(encodeJson(payload)),
     );
 
     expect(response.status).toBe(500);

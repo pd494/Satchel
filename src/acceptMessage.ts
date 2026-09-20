@@ -1,12 +1,23 @@
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import {
   type AccountIdConfigError,
   type AccountIdDerivationError,
   AccountIdentity,
 } from "./accountIdentity";
 import type { Account } from "./db";
-import { InboxStorageError, safeCauseName } from "./inboxErrors";
 import type { VerifiedInboundMessage } from "./webhook";
+
+const safeCauseName = (cause: unknown): string =>
+  cause instanceof Error ? cause.name : "Unknown rejection";
+
+export class InboxStorageError extends Schema.TaggedError<InboxStorageError>()(
+  "InboxStorageError",
+  {
+    operation: Schema.Literal("receiveMessage"),
+    message: Schema.String,
+    cause: Schema.String,
+  },
+) {}
 
 export type MessageAcceptanceError =
   | AccountIdConfigError
