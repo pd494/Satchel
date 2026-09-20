@@ -4,12 +4,24 @@ export const AccountId = Schema.String.pipe(Schema.brand("AccountId"));
 
 export type AccountId = typeof AccountId.Type;
 
+export const DeliveryId = Schema.String.pipe(Schema.brand("DeliveryId"));
+
+export type DeliveryId = typeof DeliveryId.Type;
+
+export const MessageId = Schema.String.pipe(Schema.brand("MessageId"));
+
+export type MessageId = typeof MessageId.Type;
+
+export const SpaceId = Schema.String.pipe(Schema.brand("SpaceId"));
+
+export type SpaceId = typeof SpaceId.Type;
+
 const accountIdSecret = Config.redacted(
   Config.nonEmptyString("ACCOUNT_ID_SECRET"),
 );
 
 const encodeIdentity = Schema.encodeSync(
-  Schema.parseJson(Schema.Tuple(Schema.Literal("iMessage"), Schema.String)),
+  Schema.parseJson(Schema.Tuple(Schema.Literal("imessage"), Schema.String)),
 );
 
 export class AccountIdConfigError extends Schema.TaggedError<AccountIdConfigError>()(
@@ -36,7 +48,7 @@ export class AccountIdentity extends Effect.Service<AccountIdentity>()(
     accessors: true,
     succeed: {
       deriveAccountId: Effect.fn("AccountIdentity.deriveAccountId")(function* (
-        platform: "iMessage",
+        platform: "imessage",
         senderId: string,
       ) {
         const secret = yield* accountIdSecret.pipe(

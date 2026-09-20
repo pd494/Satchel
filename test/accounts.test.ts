@@ -15,12 +15,12 @@ describe("Account identity", () => {
   it.effect("derives the same account ID for the same sender", () =>
     Effect.gen(function* () {
       const first = yield* AccountIdentity.deriveAccountId(
-        "iMessage",
+        "imessage",
         "test-sender",
       );
 
       const second = yield* AccountIdentity.deriveAccountId(
-        "iMessage",
+        "imessage",
         "test-sender",
       );
 
@@ -34,12 +34,12 @@ describe("Account identity", () => {
   it.effect("derives a different account ID for a different sender", () =>
     Effect.gen(function* () {
       const first = yield* AccountIdentity.deriveAccountId(
-        "iMessage",
+        "imessage",
         "first-sender",
       );
 
       const second = yield* AccountIdentity.deriveAccountId(
-        "iMessage",
+        "imessage",
         "second-sender",
       );
 

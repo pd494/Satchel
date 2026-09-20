@@ -10,6 +10,8 @@ import {
   Schema,
   Stream,
 } from "effect";
+import type { MessageAcceptanceError } from "./acceptMessage";
+import type { AccountIdentity } from "./accountIdentity";
 
 /** Required Photon webhook authentication headers were missing or malformed. */
 class InvalidWebhookHeadersError extends Schema.TaggedError<InvalidWebhookHeadersError>()(
@@ -124,7 +126,7 @@ type PhotonWebhookBody = typeof PhotonWebhookBody.Type;
 export interface VerifiedInboundMessage {
   readonly deliveryId: string;
   readonly messageId: string;
-  readonly platform: "iMessage";
+  readonly platform: "imessage";
   readonly senderId: string;
   readonly spaceId: string;
   readonly servingLine?: string;
@@ -289,7 +291,7 @@ const toVerifiedInboundMessage = (
   const { message, space } = body;
 
   if (
-    message.platform !== "iMessage" ||
+    message.platform !== "imessage" ||
     message.direction !== "inbound" ||
     space.type !== "dm" ||
     message.sender === undefined ||
@@ -369,27 +371,42 @@ export const verifyPhotonWebhook = Effect.fn("PhotonWebhook.verify")(
 const respond = (status: number, body: string) =>
   Effect.succeed(HttpServerResponse.text(body, { status }));
 
+type AcceptMessage = (
+  message: VerifiedInboundMessage,
+) => Effect.Effect<void, MessageAcceptanceError, AccountIdentity>;
+
+const respondWithErrorLog = Effect.fn("PhotonWebhook.respondWithErrorLog")(
+  function* (body: string, errorTag: string) {
+    yield* Effect.logError("Webhook request failed").pipe(
+      Effect.annotateLogs({ errorTag }),
+    );
+
+    return HttpServerResponse.text(body, { status: 500 });
+  },
+);
+
 /** Authenticate and translate one Photon webhook request. */
 export const handlePhotonWebhook = Effect.fn("PhotonWebhook.handle")(
-  function* () {
+  function* (acceptMessage: AcceptMessage) {
     const verified = yield* verifyPhotonWebhook();
 
     if (Option.isNone(verified))
       return HttpServerResponse.text("ignored", { status: 200 });
 
-    // PR 2 routes this value to the Account Durable Object, where deliveryId
-    // is claimed atomically with the account state transition.
-    yield* Effect.logInfo("Accepted verified inbound message").pipe(
-      Effect.annotateLogs({
-        deliveryId: verified.value.deliveryId,
-        messageId: verified.value.messageId,
-        platform: verified.value.platform,
-      }),
-    );
+    yield* acceptMessage(verified.value);
 
     return HttpServerResponse.text("ok", { status: 200 });
   },
   Effect.catchTags({
+    AccountIdConfigError: () =>
+      respondWithErrorLog("message acceptance failed", "AccountIdConfigError"),
+    AccountIdDerivationError: () =>
+      respondWithErrorLog(
+        "message acceptance failed",
+        "AccountIdDerivationError",
+      ),
+    InboxStorageError: () =>
+      respondWithErrorLog("message acceptance failed", "InboxStorageError"),
     InvalidWebhookHeadersError: () =>
       respond(400, "missing or malformed headers"),
     InvalidWebhookTimestampError: () => respond(400, "invalid timestamp"),

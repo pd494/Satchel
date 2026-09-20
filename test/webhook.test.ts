@@ -11,9 +11,12 @@ import {
 import { afterAll, beforeAll, vi } from "vitest";
 import { createTestHarness, type TestHarness } from "wrangler";
 import { verifyPhotonWebhook } from "../src/webhook";
+import type { WorkerBindings } from "../src/worker";
 import worker from "../src/worker";
 
 const TEST_WEBHOOK_SECRET = "test-webhook-secret";
+
+const TEST_ACCOUNT_ID_SECRET = "test-account-id-secret";
 
 const TEST_WEBHOOK_NOW = Date.parse("2026-05-14T19:06:32.000Z");
 
@@ -23,19 +26,19 @@ const VALID_PAYLOAD = {
   event: "messages",
   space: {
     id: "test-space",
-    platform: "iMessage",
+    platform: "imessage",
     type: "dm",
     phone: "private-line",
   },
   message: {
     id: "test-message",
-    platform: "iMessage",
+    platform: "imessage",
     direction: "inbound",
     timestamp: "2026-05-14T19:06:32.000Z",
-    sender: { id: "private-sender", platform: "iMessage" },
+    sender: { id: "private-sender", platform: "imessage" },
     space: {
       id: "test-space",
-      platform: "iMessage",
+      platform: "imessage",
       type: "dm",
       phone: "private-line",
     },
@@ -99,7 +102,35 @@ const signedWebhookHeaders = async (
 
 const WEBHOOK_URL = "https://satchel.test/webhooks/photon";
 
-const WORKER_BINDINGS = { WEBHOOK_SECRET: TEST_WEBHOOK_SECRET } as const;
+let server: TestHarness;
+
+let workerBindings: WorkerBindings;
+
+beforeAll(async () => {
+  vi.stubEnv("CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV", "false");
+  server = createTestHarness({
+    root: process.cwd(),
+    workers: [
+      {
+        configPath: "./wrangler.jsonc",
+        secrets: {
+          WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
+          ACCOUNT_ID_SECRET: TEST_ACCOUNT_ID_SECRET,
+        },
+      },
+    ],
+  });
+  await server.listen();
+  workerBindings = await server.getWorker<WorkerBindings>().getEnv();
+});
+
+afterAll(async () => {
+  try {
+    await server?.close();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 
 const testConfig = ConfigProvider.fromMap(
   new Map([["WEBHOOK_SECRET", TEST_WEBHOOK_SECRET]]),
@@ -143,8 +174,7 @@ const signedByteRequest = async (body: Uint8Array) => {
   });
 };
 
-const fetchWorker = (request: Request) =>
-  worker.fetch(request, WORKER_BINDINGS);
+const fetchWorker = (request: Request) => worker.fetch(request, workerBindings);
 
 const verify = (rawBody: string) =>
   Effect.gen(function* () {
@@ -260,7 +290,7 @@ describe("Photon webhook contract", () => {
   it("fails deliberately when the Worker secret binding is missing", async () => {
     const response = await worker.fetch(
       await liveSignedRequest(encodeJson(VALID_PAYLOAD)),
-      {},
+      { ACCOUNTS: workerBindings.ACCOUNTS },
     );
 
     expect(response.status).toBe(500);
@@ -274,7 +304,7 @@ describe("Photon webhook contract", () => {
       const expected = {
         deliveryId: "test-webhook:test-message",
         messageId: "test-message",
-        platform: "iMessage",
+        platform: "imessage",
         senderId: "private-sender",
         spaceId: "test-space",
         text: "private-message",
@@ -290,7 +320,7 @@ describe("Photon webhook contract", () => {
       const withoutServingLine = yield* verify(
         encodeJson({
           ...VALID_PAYLOAD,
-          space: { id: "test-space", platform: "iMessage", type: "dm" },
+          space: { id: "test-space", platform: "imessage", type: "dm" },
         }),
       );
 
@@ -351,30 +381,6 @@ describe("Photon webhook contract", () => {
 });
 
 describe("Cloudflare Worker runtime", () => {
-  let server: TestHarness;
-
-  beforeAll(async () => {
-    vi.stubEnv("CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV", "false");
-    server = createTestHarness({
-      root: process.cwd(),
-      workers: [
-        {
-          configPath: "./wrangler.jsonc",
-          secrets: { WEBHOOK_SECRET: TEST_WEBHOOK_SECRET },
-        },
-      ],
-    });
-    await server.listen();
-  });
-
-  afterAll(async () => {
-    try {
-      await server.close();
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
   it("accepts a signed webhook in workerd without logging sensitive fields", async () => {
     server.clearLogs();
     const body = JSON.stringify(VALID_PAYLOAD);
@@ -392,7 +398,7 @@ describe("Cloudflare Worker runtime", () => {
 
     const logs = JSON.stringify(server.getLogs());
 
-    expect(logs).toContain("Accepted verified inbound message");
+    expect(logs).toContain("Durably accepted inbound message");
     expect(logs).toContain("deliveryId=test-webhook:test-message");
     expect(logs).not.toContain(TEST_WEBHOOK_SECRET);
     expect(logs).not.toContain(VALID_PAYLOAD.space.phone);

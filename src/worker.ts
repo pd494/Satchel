@@ -1,16 +1,27 @@
 import { HttpApp, HttpRouter, HttpServerResponse } from "@effect/platform";
 import { ConfigProvider, Effect } from "effect";
+import { acceptMessage } from "./acceptMessage";
+import { AccountIdentity } from "./accountIdentity";
+import type { Account } from "./db";
 import { handlePhotonWebhook } from "./webhook";
 
 export interface WorkerBindings {
+  readonly ACCOUNTS: DurableObjectNamespace<Account>;
   readonly WEBHOOK_SECRET?: string;
+  readonly ACCOUNT_ID_SECRET?: string;
 }
 
 /** Shared Cloudflare Worker routes. */
-export const router = HttpRouter.empty.pipe(
-  HttpRouter.post("/webhooks/photon", handlePhotonWebhook()),
-  HttpRouter.get("/", HttpServerResponse.text("satchel.ok")),
-);
+export const router = (bindings: WorkerBindings) =>
+  HttpRouter.empty.pipe(
+    HttpRouter.post(
+      "/webhooks/photon",
+      handlePhotonWebhook((message) =>
+        acceptMessage(message, bindings.ACCOUNTS),
+      ),
+    ),
+    HttpRouter.get("/", HttpServerResponse.text("satchel.ok")),
+  );
 
 const configProviderFromBindings = (bindings: WorkerBindings) => {
   const values = new Map<string, string>();
@@ -18,13 +29,17 @@ const configProviderFromBindings = (bindings: WorkerBindings) => {
   if (bindings.WEBHOOK_SECRET !== undefined)
     values.set("WEBHOOK_SECRET", bindings.WEBHOOK_SECRET);
 
+  if (bindings.ACCOUNT_ID_SECRET !== undefined)
+    values.set("ACCOUNT_ID_SECRET", bindings.ACCOUNT_ID_SECRET);
+
   return ConfigProvider.fromMap(values);
 };
 
 /** Cloudflare's Web-standard entry point; Effect runs inside handleRequest. */
 export default {
-  fetch(request: Request, bindings: WorkerBindings = {}): Promise<Response> {
-    const app = router.pipe(
+  fetch(request: Request, bindings: WorkerBindings): Promise<Response> {
+    const app = router(bindings).pipe(
+      Effect.provide(AccountIdentity.Default),
       Effect.withConfigProvider(configProviderFromBindings(bindings)),
     );
 
