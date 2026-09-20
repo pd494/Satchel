@@ -1,21 +1,12 @@
-import { Config, Effect, Redacted, Schema } from "effect";
+import { Config, Effect, Redacted } from "effect";
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
+import { PhotonConnectionError } from "./types/errors";
 
 const photonConfig = Config.all({
   projectId: Config.string("PROJECT_ID"),
   projectSecret: Config.redacted("PROJECT_SECRET"),
 });
-
-/** Failure to create the configured Spectrum application connection. */
-export class PhotonConnectionError extends Schema.TaggedError<PhotonConnectionError>()(
-  "PhotonConnectionError",
-  {
-    operation: Schema.Literal("Spectrum"),
-    message: Schema.String,
-    cause: Schema.String,
-  },
-) {}
 
 const causeName = (cause: unknown): string =>
   cause instanceof Error ? cause.name : "Unknown rejection";

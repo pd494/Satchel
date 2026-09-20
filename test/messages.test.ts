@@ -1,225 +1,216 @@
-import { Effect } from "effect";
-import {
-  type Content,
-  definePlatform,
-  Spectrum,
-  UnsupportedError,
-} from "spectrum-ts";
+import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { ConfigProvider, Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import z from "zod";
-import { recvMessage, sendMessage } from "../src/connection";
-import { MessageSendError, MessageStreamReadError } from "../src/errors";
-import { runAppWith } from "../src/index";
+import { Hmac } from "../src/hmac";
+import { DeliveryId, MessageId, SpaceId } from "../src/types/messages";
 
-type Input = {
-  readonly id: string;
-  readonly content: Content;
-  readonly direction: "inbound" | "outbound";
-};
+const identityConfig = ConfigProvider.fromMap(
+  new Map([["ACCOUNT_ID_SECRET", "test-account-id-secret"]]),
+);
 
-type Failure = "none" | "read" | "send" | "send-string";
+/** Read account storage inside the Durable Object's own runtime context. */
+const queryInbox = <Row extends Record<string, SqlStorageValue>>(
+  account: DurableObjectStub,
+  query: string,
+): Promise<Row[]> =>
+  runInDurableObject(account, (_instance, state) =>
+    state.storage.sql.exec<Row>(query).toArray(),
+  );
 
-const input = (
-  id: string,
-  direction: Input["direction"],
-  content: Content,
-): Input => ({ id, direction, content });
+describe("Account inbox", () => {
+  /**
+   * The first accepted message should start onboarding; later messages should not.
+   * Retrying a delivery must preserve its original content and create no extra work.
+   */
+  it("marks first contact once and ignores duplicate deliveries", async () => {
+    const account = env.ACCOUNTS.getByName("inbox-test");
 
-const makeHarness = async (
-  inbound: ReadonlyArray<Input>,
-  failure: Failure = "none",
-) => {
-  const sent: Array<string> = [];
-  const state = { sent, closed: false, sendAttempts: 0, stopped: false };
+    const first = {
+      deliveryId: DeliveryId.make("delivery-1"),
+      messageId: MessageId.make("message-1"),
+      text: "hello",
+      spaceId: SpaceId.make("space-1"),
+      platform: "imessage" as const,
+      servingLine: "line-1",
+    };
 
-  const provider = definePlatform("test_harness", {
-    config: z.object({}),
-    lifecycle: {
-      createClient: () => Promise.resolve(state),
-      destroyClient: ({ client }) => {
-        client.stopped = true;
+    await account.storeDeliveryOnce(first);
+    await account.storeDeliveryOnce({
+      ...first,
+      text: "retry must not overwrite",
+      servingLine: "retry must not overwrite",
+    });
+    await account.storeDeliveryOnce({
+      ...first,
+      deliveryId: DeliveryId.make("delivery-2"),
+      messageId: MessageId.make("message-2"),
+      text: "second message",
+      servingLine: undefined,
+    });
 
-        return Promise.resolve();
+    expect(
+      await queryInbox<{
+        delivery_id: string;
+        text: string;
+        platform: string;
+        serving_line: string | null;
+        is_first_message: number;
+        status: string;
+      }>(
+        account,
+        "SELECT delivery_id, text, platform, serving_line, is_first_message, status FROM inbox ORDER BY sequence",
+      ),
+    ).toEqual([
+      {
+        delivery_id: "delivery-1",
+        text: "hello",
+        platform: "imessage",
+        serving_line: "line-1",
+        is_first_message: 1,
+        status: "pending",
       },
-    },
-    user: {
-      resolve: ({ input }) => Promise.resolve({ id: input.userID }),
-    },
-    space: {
-      create: () => Promise.resolve({ id: "test-space" }),
-    },
-    messages: async function* ({ client }) {
-      try {
-        for (const message of inbound) {
-          yield { ...message, space: { id: "test-space" } };
-        }
-
-        if (failure === "read") {
-          throw new TypeError("private provider details");
-        }
-      } finally {
-        client.closed = true;
-      }
-    },
-    send: ({ client, content, space }) => {
-      client.sendAttempts += 1;
-
-      if (failure === "send" && client.sendAttempts === 1) {
-        return Promise.reject(new TypeError("private provider details"));
-      }
-
-      if (failure === "send-string" && client.sendAttempts === 1) {
-        return Promise.reject("private provider details");
-      }
-
-      if (content.type !== "text") {
-        return Promise.reject(
-          UnsupportedError.content(content.type, "test_harness"),
-        );
-      }
-
-      client.sent.push(content.text);
-
-      return Promise.resolve({
-        id: `sent-${client.sent.length}`,
-        content,
-        direction: "outbound" as const,
-        space,
-      });
-    },
+      {
+        delivery_id: "delivery-2",
+        text: "second message",
+        platform: "imessage",
+        serving_line: null,
+        is_first_message: 0,
+        status: "pending",
+      },
+    ]);
   });
 
-  const app = await Spectrum({
-    providers: [provider.config()],
-    options: { logLevel: "silent" },
-  });
+  /**
+   * Overlapping arrivals must not trigger onboarding twice or save a retry twice.
+   * Send two distinct deliveries and a duplicate concurrently to exercise both rules.
+   */
+  it("accepts concurrent deliveries once and marks exactly one first message", async () => {
+    const account = env.ACCOUNTS.getByName("concurrent");
 
-  return { app, state };
-};
+    const message = {
+      deliveryId: DeliveryId.make("a"),
+      messageId: MessageId.make("a"),
+      text: "hello",
+      spaceId: SpaceId.make("space"),
+      platform: "imessage" as const,
+    };
 
-const stop = (app: Awaited<ReturnType<typeof makeHarness>>["app"]) =>
-  Effect.promise(() => app.stop());
-
-const itEffect = <E>(name: string, test: () => Effect.Effect<void, E>) =>
-  it(name, () => Effect.runPromise(test()));
-
-describe("Spectrum message flow", () => {
-  itEffect(
-    "echoes inbound text through Spectrum's real dispatch pipeline",
-    () =>
-      Effect.gen(function* () {
-        const { app, state } = yield* Effect.promise(() =>
-          makeHarness([
-            input("own-message", "outbound", {
-              type: "text",
-              text: "ignore",
-            }),
-            input("first", "inbound", { type: "text", text: "first" }),
-            input("typing", "inbound", { type: "typing", state: "start" }),
-            input("second", "inbound", { type: "text", text: "second" }),
-          ]),
-        );
-
-        yield* recvMessage(app, sendMessage).pipe(Effect.ensuring(stop(app)));
-
-        expect(state.sent).toEqual(["echo: first", "echo: second"]);
-        expect(state.closed).toBe(true);
-        expect(state.stopped).toBe(true);
+    await Promise.all([
+      account.storeDeliveryOnce(message),
+      account.storeDeliveryOnce(message),
+      account.storeDeliveryOnce({
+        ...message,
+        deliveryId: DeliveryId.make("b"),
+        messageId: MessageId.make("b"),
       }),
-  );
+    ]);
 
-  itEffect("preserves a typed send failure", () =>
-    Effect.gen(function* () {
-      const { app, state } = yield* Effect.promise(() =>
-        makeHarness(
-          [input("first", "inbound", { type: "text", text: "hello" })],
-          "send",
-        ),
+    expect(
+      await queryInbox<{ total: number; first_messages: number }>(
+        account,
+        "SELECT COUNT(*) AS total, SUM(is_first_message) AS first_messages FROM inbox",
+      ),
+    ).toEqual([{ total: 2, first_messages: 1 }]);
+  });
+
+  /**
+   * A late retry must not reopen finished work or change its text or reply route.
+   * Seed a completed row, retry it, and verify the entire saved row is unchanged.
+   */
+  it("does not overwrite or requeue a completed delivery", async () => {
+    const account = env.ACCOUNTS.getByName("completed");
+
+    const message = {
+      deliveryId: DeliveryId.make("done"),
+      messageId: MessageId.make("original"),
+      text: "hello",
+      spaceId: SpaceId.make("space"),
+      platform: "imessage" as const,
+    };
+
+    await account.storeDeliveryOnce(message);
+
+    const before = await runInDurableObject(account, (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE inbox SET status = 'completed' WHERE delivery_id = ?",
+        message.deliveryId,
       );
 
-      const result = yield* Effect.promise(() =>
-        app.messages[Symbol.asyncIterator]().next(),
-      );
+      return state.storage.sql.exec("SELECT * FROM inbox").toArray();
+    });
 
-      expect(result.done).toBe(false);
+    await account.storeDeliveryOnce({
+      ...message,
+      text: "retry",
+      spaceId: SpaceId.make("different-space"),
+    });
 
-      if (result.done) {
-        return;
-      }
+    expect(await queryInbox(account, "SELECT * FROM inbox")).toEqual(before);
+  });
 
-      const error = yield* sendMessage(result.value).pipe(
-        Effect.ensuring(stop(app)),
-        Effect.flip,
-      );
+  it("preserves accepted work across object eviction", async () => {
+    const account = env.ACCOUNTS.getByName("restart");
 
-      expect(error).toBeInstanceOf(MessageSendError);
-      expect(error.operation).toBe("space.send");
-      expect(error.cause).toBe("TypeError");
-      expect(state.closed).toBe(true);
-      expect(state.stopped).toBe(true);
-    }),
-  );
+    await account.storeDeliveryOnce({
+      deliveryId: DeliveryId.make("before-restart"),
+      messageId: MessageId.make("before-restart"),
+      text: "before",
+      spaceId: SpaceId.make("space"),
+      platform: "imessage",
+    });
 
-  itEffect("maps non-Error send rejections safely", () =>
-    Effect.gen(function* () {
-      const { app } = yield* Effect.promise(() =>
-        makeHarness(
-          [input("first", "inbound", { type: "text", text: "hello" })],
-          "send-string",
-        ),
-      );
+    await evictDurableObject(account);
 
-      const result = yield* Effect.promise(() =>
-        app.messages[Symbol.asyncIterator]().next(),
-      );
+    await account.storeDeliveryOnce({
+      deliveryId: DeliveryId.make("after-restart"),
+      messageId: MessageId.make("after-restart"),
+      text: "after",
+      spaceId: SpaceId.make("space"),
+      platform: "imessage",
+    });
 
-      if (result.done) return;
+    expect(
+      await queryInbox<{ total: number; first_messages: number }>(
+        account,
+        "SELECT COUNT(*) AS total, SUM(is_first_message) AS first_messages FROM inbox",
+      ),
+    ).toEqual([{ total: 2, first_messages: 1 }]);
+  });
 
-      const error = yield* sendMessage(result.value).pipe(
-        Effect.ensuring(stop(app)),
-        Effect.flip,
-      );
+  it("keeps different senders in isolated account databases", async () => {
+    const [firstId, secondId] = await Effect.runPromise(
+      Effect.all([
+        Hmac.deriveAccountId("imessage", "first-sender"),
+        Hmac.deriveAccountId("imessage", "second-sender"),
+      ]).pipe(
+        Effect.provide(Hmac.Default),
+        Effect.withConfigProvider(identityConfig),
+      ),
+    );
 
-      expect(error.cause).toBe("Unknown rejection");
-    }),
-  );
+    const first = env.ACCOUNTS.getByName(firstId);
+    const second = env.ACCOUNTS.getByName(secondId);
 
-  itEffect("continues receiving after a send failure", () =>
-    Effect.gen(function* () {
-      const { app, state } = yield* Effect.promise(() =>
-        makeHarness(
-          [
-            input("first", "inbound", { type: "text", text: "first" }),
-            input("second", "inbound", { type: "text", text: "second" }),
-          ],
-          "send",
-        ),
-      );
+    await first.storeDeliveryOnce({
+      deliveryId: DeliveryId.make("first-delivery"),
+      messageId: MessageId.make("first-message"),
+      text: "first",
+      spaceId: SpaceId.make("first-space"),
+      platform: "imessage",
+    });
+    await second.storeDeliveryOnce({
+      deliveryId: DeliveryId.make("second-delivery"),
+      messageId: MessageId.make("second-message"),
+      text: "second",
+      spaceId: SpaceId.make("second-space"),
+      platform: "imessage",
+    });
 
-      yield* recvMessage(app, sendMessage).pipe(Effect.ensuring(stop(app)));
-
-      expect(state.sendAttempts).toBe(2);
-      expect(state.sent).toEqual(["echo: second"]);
-      expect(state.closed).toBe(true);
-      expect(state.stopped).toBe(true);
-    }),
-  );
-
-  itEffect("maps a stream failure and releases Spectrum", () =>
-    Effect.gen(function* () {
-      const { app, state } = yield* Effect.promise(() =>
-        makeHarness([], "read"),
-      );
-
-      const error = yield* runAppWith(Effect.succeed(app), sendMessage).pipe(
-        Effect.flip,
-      );
-
-      expect(error).toBeInstanceOf(MessageStreamReadError);
-      expect(error.operation).toBe("app.messages");
-      expect(error.cause).toBe("TypeError");
-      expect(state.closed).toBe(true);
-      expect(state.stopped).toBe(true);
-    }),
-  );
+    expect(
+      await queryInbox<{ text: string }>(first, "SELECT text FROM inbox"),
+    ).toEqual([{ text: "first" }]);
+    expect(
+      await queryInbox<{ text: string }>(second, "SELECT text FROM inbox"),
+    ).toEqual([{ text: "second" }]);
+  });
 });

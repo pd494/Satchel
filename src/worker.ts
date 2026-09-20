@@ -1,24 +1,16 @@
 import { HttpApp, HttpRouter, HttpServerResponse } from "@effect/platform";
 import { ConfigProvider, Effect } from "effect";
-import { acceptMessage } from "./acceptMessage";
-import { AccountIdentity } from "./accountIdentity";
-import type { Account } from "./db";
+import { recvMessage } from "./connection";
+import { Hmac } from "./hmac";
+import type { WorkerBindings } from "./types/bindings";
 import { handlePhotonWebhook } from "./webhook";
-
-export interface WorkerBindings {
-  readonly ACCOUNTS: DurableObjectNamespace<Account>;
-  readonly WEBHOOK_SECRET?: string;
-  readonly ACCOUNT_ID_SECRET?: string;
-}
 
 /** Shared Cloudflare Worker routes. */
 export const router = (bindings: WorkerBindings) =>
   HttpRouter.empty.pipe(
     HttpRouter.post(
       "/webhooks/photon",
-      handlePhotonWebhook((message) =>
-        acceptMessage(message, bindings.ACCOUNTS),
-      ),
+      handlePhotonWebhook((message) => recvMessage(message, bindings.ACCOUNTS)),
     ),
     HttpRouter.get("/", HttpServerResponse.text("satchel.ok")),
   );
@@ -39,7 +31,7 @@ const configProviderFromBindings = (bindings: WorkerBindings) => {
 export default {
   fetch(request: Request, bindings: WorkerBindings): Promise<Response> {
     const app = router(bindings).pipe(
-      Effect.provide(AccountIdentity.Default),
+      Effect.provide(Hmac.Default),
       Effect.withConfigProvider(configProviderFromBindings(bindings)),
     );
 

@@ -11,8 +11,7 @@ import {
   TestContext,
 } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { AccountIdentity } from "../src/accountIdentity";
-import { verifyPhotonWebhook } from "../src/webhook";
+import { Hmac } from "../src/hmac";
 import worker from "../src/worker";
 
 const TEST_WEBHOOK_SECRET = "test-webhook-secret";
@@ -159,10 +158,10 @@ const verify = (rawBody: string) =>
       ),
     );
 
-    return yield* verifyPhotonWebhook().pipe(
+    return yield* Hmac.verifyWebhook().pipe(
       Effect.provideService(HttpServerRequest.HttpServerRequest, request),
     );
-  }).pipe(Effect.withConfigProvider(testConfig));
+  }).pipe(Effect.provide(Hmac.Default), Effect.withConfigProvider(testConfig));
 
 const itEffect = <E>(name: string, test: () => Effect.Effect<void, E>) =>
   it(name, () =>
@@ -345,11 +344,8 @@ describe("Photon webhook contract", () => {
     };
 
     const accountId = await Effect.runPromise(
-      AccountIdentity.deriveAccountId(
-        "imessage",
-        payload.message.sender.id,
-      ).pipe(
-        Effect.provide(AccountIdentity.Default),
+      Hmac.deriveAccountId("imessage", payload.message.sender.id).pipe(
+        Effect.provide(Hmac.Default),
         Effect.withConfigProvider(accountTestConfig),
       ),
     );

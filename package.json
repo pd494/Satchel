@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build ./test/imessage.ts --outdir ./dist --target bun --packages external",
+    "build": "bun run build:worker",
     "build:worker": "wrangler deploy --dry-run --outdir ./dist/worker",
     "dev:worker": "wrangler dev",
     "lint": "bun run lint:biome && bun run lint:oxlint",
@@ -17,9 +17,8 @@
     "lint:effect": "effect-language-service diagnostics --project tsconfig.json --strict",
     "typecheck": "tsc --noEmit",
     "check": "bun run lint:effect && bun run typecheck",
-    "start": "bun test/imessage.ts",
-    "dev": "bun --watch test/imessage.ts",
-    "test:imessage": "bun test/imessage.ts"
+    "start": "wrangler dev",
+    "dev": "wrangler dev"
   },
   "dependencies": {
     "@effect/platform": "0.97.1",

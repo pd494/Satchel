@@ -1,74 +1,58 @@
-import { Effect, Stream } from "effect";
-import type { Message, Space } from "spectrum-ts";
-import { MessageSendError, MessageStreamReadError } from "./errors";
+import { Effect, Schema } from "effect";
+import type { Account } from "./db";
+import { Hmac } from "./hmac";
+import type { VerifiedInboundMessage } from "./types/messages";
 
-/** One conversation-and-message pair emitted by Spectrum. */
-export type MessageEntry = readonly [Space, Message];
-
-/** The narrow Spectrum capability required by the receive loop. */
-export interface MessageSource {
-  readonly messages: AsyncIterable<MessageEntry>;
-}
-
-/** Effectful behavior applied to each inbound Spectrum message. */
-export type MessageHandler<E, R> = (
-  entry: MessageEntry,
-) => Effect.Effect<void, E, R>;
-
-const causeName = (cause: unknown): string =>
+const safeCauseName = (cause: unknown): string =>
   cause instanceof Error ? cause.name : "Unknown rejection";
 
-/** Send the current test response for one inbound Spectrum message. */
-export const sendMessage = Effect.fn("Connection.sendMessage")(function* ([
-  space,
-  message,
-]: MessageEntry) {
-  if (message.content.type !== "text") {
-    return;
-  }
+export class InboxStorageError extends Schema.TaggedError<InboxStorageError>()(
+  "InboxStorageError",
+  {
+    operation: Schema.Literal("receiveMessage"),
+    message: Schema.String,
+    cause: Schema.String,
+  },
+) {}
 
-  const text = message.content.text;
+/**
+ * Accept a verified message into its sender's account.
+ */
+export const recvMessage = Effect.fn("Connection.recvMessage")(function* (
+  _message: VerifiedInboundMessage,
+  _accounts: DurableObjectNamespace<Account>,
+) {
+  const accountId = yield* Hmac.deriveAccountId(
+    _message.platform,
+    _message.senderId,
+  );
 
-  yield* Effect.logInfo("Received an inbound message");
+  const objectId = _accounts.idFromName(accountId);
+  const account = _accounts.get(objectId);
+
   yield* Effect.tryPromise({
-    try: () => space.send(`echo: ${text}`),
+    try: () =>
+      account.storeDeliveryOnce({
+        deliveryId: _message.deliveryId,
+        messageId: _message.messageId,
+        text: _message.text,
+        spaceId: _message.spaceId,
+        platform: _message.platform,
+        servingLine: _message.servingLine,
+      }),
     catch: (cause) =>
-      new MessageSendError({
-        operation: "space.send",
-        message: "Could not send the test reply",
-        cause: causeName(cause),
+      new InboxStorageError({
+        operation: "receiveMessage",
+        message: "Could not save the incoming message",
+        cause: safeCauseName(cause),
       }),
   });
-});
 
-/** Consume inbound Spectrum messages in order with the supplied handler. */
-export const recvMessage = Effect.fn("Connection.recvMessage")(function* <E, R>(
-  app: MessageSource,
-  sendMessage: MessageHandler<E, R>,
-) {
-  yield* Stream.fromAsyncIterable(
-    app.messages,
-    (cause) =>
-      new MessageStreamReadError({
-        operation: "app.messages",
-        message: "The Spectrum message stream failed",
-        cause: causeName(cause),
-      }),
-  ).pipe(
-    Stream.filter(([, message]) => message.direction === "inbound"),
-    Stream.runForEach((entry) =>
-      sendMessage(entry).pipe(
-        Effect.tapError((cause) =>
-          Effect.logError("Could not process inbound message").pipe(
-            Effect.annotateLogs({
-              cause: causeName(cause),
-              messageId: entry[1].id,
-              platform: entry[1].platform,
-            }),
-          ),
-        ),
-        Effect.ignore,
-      ),
-    ),
+  yield* Effect.logInfo("Durably accepted inbound message").pipe(
+    Effect.annotateLogs({
+      deliveryId: _message.deliveryId,
+      messageId: _message.messageId,
+      platform: _message.platform,
+    }),
   );
 });
