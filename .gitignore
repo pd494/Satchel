@@ -1,0 +1,14 @@
+target
+build
+node_modules
+.env
+.env.local
+.dev.vars
+*.log
+.DS_Store
+docs
+AGENTS.md
+agent-patterns
+.zed
+.wrangler/
+.agents/skills/effective-design-doc/
