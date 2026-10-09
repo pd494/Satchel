@@ -1,0 +1,8 @@
+// Link preview artwork for the demo.
+window.satchelArt = {
+  apartment: `<svg viewBox="0 0 262 150"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4e6d3"/><stop offset="1" stop-color="#e9cfae"/></linearGradient></defs><rect width="262" height="150" fill="url(#sky)"/><circle cx="214" cy="38" r="16" fill="#f7d9a8"/><rect x="62" y="34" width="112" height="116" rx="3" fill="#b4835c"/><rect x="62" y="34" width="112" height="9" fill="#9b6c47"/>${[0, 1, 2]
+    .map((r) => [0, 1, 2, 3].map((c) => `<rect x="${72 + c * 25}" y="${52 + r * 30}" width="17" height="21" rx="2" fill="#f6e7cf" opacity="${0.75 + ((r + c) % 2) * 0.25}"/>`).join(""))
+    .join("")}<rect x="104" y="128" width="28" height="22" rx="2" fill="#7c5132"/><circle cx="40" cy="120" r="26" fill="#93a37c"/><circle cx="210" cy="124" r="22" fill="#a2b08a"/><circle cx="232" cy="132" r="16" fill="#8a9a73"/><rect x="0" y="142" width="262" height="8" fill="#c9a983"/></svg>`,
+  // Video thumbnail: a figure in a low lunge on a mat.
+  stretch: `<svg viewBox="0 0 262 147"><defs><linearGradient id="room" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e3e6dc"/><stop offset="1" stop-color="#cfd5c6"/></linearGradient></defs><rect width="262" height="147" fill="url(#room)"/><rect x="0" y="112" width="262" height="35" fill="#b9c1ad"/><rect x="58" y="114" width="150" height="7" rx="3.5" fill="#7f8f74"/><g fill="none" stroke="#4d4038" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"><path d="M122 66 116 92"/><path d="M116 92 146 92 150 113"/><path d="M116 92 92 104 76 113"/><path d="M122 70 136 84"/></g><circle cx="125" cy="54" r="9" fill="#4d4038"/></svg>`,
+};

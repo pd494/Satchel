@@ -1,0 +1,6 @@
+worker.js
+turnstile.js
+wrangler.jsonc
+.dev.vars*
+tests/**
+.wrangler/**
