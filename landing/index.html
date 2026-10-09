@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>satchel</title>
+  <meta property="og:title" content="satchel">
+  <meta property="og:site_name" content="satchel">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://textsatchel.com/">
+  <meta property="og:description" content="Your satchel for everything worth keeping. Text it links, notes, and ideas, then ask for them back in your own words.">
+  <meta property="og:image" content="https://textsatchel.com/assets/social.jpg">
+  <meta property="og:image:width" content="1733">
+  <meta property="og:image:height" content="907">
+  <meta property="og:image:alt" content="A blue satchel with a Mac Return-key smile.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="description" content="Text links, notes, and ideas to TextSatchel, and ask for them back in your own words. Coming soon.">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="icon" href="assets/favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="preconnect" href="https://api.fontshare.com" crossorigin>
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
+  <link rel="preload" href="assets/iphone-17-pro-silver.png" as="image">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <div class="top">
+      <section class="hero">
+        <p class="soon">Coming soon to iMessage</p>
+        <h1><span class="l-save">Save anything.</span> <span class="l-find">Find it later.</span> <span class="l-text">Just text.</span></h1>
+        <p class="lede">Your satchel for everything worth keeping. Text it links, notes, and ideas, then ask for them back in your own words.</p>
+        <div class="actions">
+          <form class="waitlist" id="waitlist" action="/api/waitlist" method="post">
+            <label for="email">Be first to know when Satchel launches.</label>
+            <div class="waitlist-fields">
+              <input id="email" name="email" type="email" placeholder="Your email address" autocomplete="email" maxlength="254" required>
+              <button class="waitlist-send" type="submit" aria-label="Join the waitlist">
+                <svg width="18" height="20" viewBox="0 0 14 16" aria-hidden="true"><path d="M7 14V2.5M2 7l5-5 5 5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <div id="signup-turnstile"></div>
+            <p class="fineprint" id="waitlist-status" role="status" aria-live="polite"></p>
+          </form>
+          <span class="fineprint">Works in iMessage · No app required</span>
+        </div>
+      </section>
+
+      <figure class="demo">
+        <div class="phone" id="phone">
+          <div class="phone-screen">
+            <div class="ui" id="ui" aria-hidden="true">
+              <div class="sb">
+                <span class="sb-time">9:41</span>
+                <span class="sb-icons">
+                  <svg width="19" height="12" viewBox="0 0 19 12"><rect x="0" y="8" width="3.2" height="4" rx="1"/><rect x="5" y="5.5" width="3.2" height="6.5" rx="1"/><rect x="10" y="3" width="3.2" height="9" rx="1"/><rect x="15" y="0" width="3.2" height="12" rx="1"/></svg>
+                  <svg width="17" height="12" viewBox="0 0 17 12"><path d="M8.5 2.3c2.4 0 4.6.9 6.2 2.5l1.2-1.2A10.4 10.4 0 0 0 8.5.6 10.4 10.4 0 0 0 1.1 3.6l1.2 1.2a8.7 8.7 0 0 1 6.2-2.5Zm0 3.4c1.5 0 2.8.6 3.8 1.5l1.2-1.2a7 7 0 0 0-10 0l1.2 1.2c1-.9 2.3-1.5 3.8-1.5Zm0 3.4c.6 0 1.1.2 1.5.6L8.5 11.2 7 9.7c.4-.4.9-.6 1.5-.6Z"/></svg>
+                  <svg width="27" height="13" viewBox="0 0 27 13"><rect x=".5" y=".5" width="23" height="12" rx="3.8" fill="none" stroke="currentColor" opacity=".4"/><rect x="2.2" y="2.2" width="19.6" height="8.6" rx="2.4"/><path d="M25 4.5v4c.8-.3 1.4-1.1 1.4-2s-.6-1.7-1.4-2Z" opacity=".45"/></svg>
+                </span>
+              </div>
+              <div class="thread"><div class="thread-inner" id="threadInner"></div></div>
+
+              <div class="hd">
+                <span class="glass hd-back"><svg width="12" height="20" viewBox="0 0 12 20"><path d="M10 2 2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                <div class="hd-center">
+                  <span class="hd-avatar"><img src="assets/satchel-avatar.png" alt=""></span>
+                  <span class="glass hd-name">Satchel <svg width="6" height="10" viewBox="0 0 6 10"><path d="m1 1 4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+                </div>
+                <span class="glass hd-video"><svg width="22" height="14" viewBox="0 0 22 14"><rect x="1" y="1" width="14" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15 5.5 5.2-3v9L15 8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span>
+              </div>
+
+              <div class="composer">
+                <span class="glass cmp-plus"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
+                <div class="glass cmp-field">
+                  <span class="cmp-text" id="cmpText"></span><span class="cmp-caret"></span>
+                  <span class="cmp-ph">iMessage</span>
+                  <span class="cmp-mic"><svg width="14" height="20" viewBox="0 0 14 20"><rect x="3.5" y="1" width="7" height="11.5" rx="3.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M1 9.5a6 6 0 0 0 12 0M7 15.5V19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+                  <span class="cmp-send"><svg width="14" height="16" viewBox="0 0 14 16"><path d="M7 14V2.5M2 7l5-5 5 5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                </div>
+              </div>
+
+              <div class="kbd" id="kbd"></div>
+              <span class="home-ind"></span>
+            </div>
+          </div>
+          <img class="phone-frame" src="assets/iphone-17-pro-silver.png" alt="" draggable="false">
+        </div>
+      </figure>
+    </div>
+
+    <section class="section" id="features">
+      <h2>What’s in the satchel</h2>
+      <div class="rows">
+        <div class="row">
+          <h3>Find by meaning</h3>
+          <p>Reach in and ask the way you’d ask a friend. You don’t need the title or the exact words.</p>
+          <div class="mini" aria-label="Example: you text “that ramen place from last month?” and TextSatchel replies “Menya Kou on 5th St. You saved it Sep 2.”">
+            <div class="msg sent first"><div class="b tail">that ramen place from last month?</div></div>
+            <div class="rcpt"><b>Read</b> 12:04 PM</div>
+            <div class="msg recv first"><div class="b tail">Menya Kou on 5th St. You saved it Sep 2.</div></div>
+          </div>
+        </div>
+        <div class="row">
+          <h3>Save anything</h3>
+          <p>Toss in links, notes, and ideas the moment you think of them. No folders, nothing to file.</p>
+          <div class="mini" aria-label="Example: you text “wifi at mom’s is Lakehouse_5G, pw sunflower22” and TextSatchel replies “In the satchel. Ask for “mom’s wifi” anytime.”">
+            <div class="msg sent first"><div class="b tail">wifi at mom’s is Lakehouse_5G, pw sunflower22</div></div>
+            <div class="rcpt"><b>Read</b> 8:17 PM</div>
+            <div class="msg recv first"><div class="b tail">In the satchel. Ask for “mom’s wifi” anytime.</div></div>
+            <div class="save-example" aria-label="Example: saving a link">
+              <div class="msg sent first"><div class="b tail">https://example.com/stretch-routine</div></div>
+              <div class="rcpt"><b>Read</b> 8:19 PM</div>
+              <div class="msg recv first"><div class="b tail">Saved the stretch routine. Ask for it whenever you need it.</div></div>
+            </div>
+            <div class="save-example" aria-label="Example: saving a file">
+              <div class="msg sent first"><div class="b tail file-example"><svg width="24" height="28" viewBox="0 0 24 28" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M5 1h9l7 7v18H3V1h2Z"/><path d="M14 1v7h7M7 14h10M7 19h7"/></svg><span>apartment-lease.pdf<small>PDF document · 240 KB</small></span></div></div>
+              <div class="rcpt"><b>Read</b> 8:22 PM</div>
+              <div class="msg recv first"><div class="b tail">Lease saved. Ask for “my apartment lease” anytime.</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <h3>Remember what matters</h3>
+          <p>Tell it what you need once. It keeps that in mind, and when something changes, it keeps the newer answer.</p>
+          <div class="mini" aria-label="Example: you text “i’m allergic to shellfish btw” and TextSatchel replies “Got it. I’ll keep that in mind when you ask about restaurants.”">
+            <div class="msg sent first"><div class="b tail">i’m allergic to shellfish btw</div></div>
+            <div class="rcpt"><b>Read</b> 7:52 PM</div>
+            <div class="msg recv first"><div class="b tail">Got it. I’ll keep that in mind when you ask about restaurants.</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">© 2026 TextSatchel · <a href="mailto:prasanth@textsatchel.com">prasanth@textsatchel.com</a></footer>
+  <div class="signup-toast" id="signup-toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="art.js"></script>
+  <script src="demo.js"></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer></script>
+  <script type="module" src="waitlist.js"></script>
+</body>
+</html>

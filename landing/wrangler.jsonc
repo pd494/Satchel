@@ -1,0 +1,32 @@
+{
+  "name": "textsatchel-landing",
+  "account_id": "75646cd038d25b1b0e4b4545e4c09ef1",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "textsatchel.com", "custom_domain": true }],
+  "main": "worker.js",
+  "compatibility_date": "2026-10-08",
+  "vars": {
+    "TURNSTILE_SITE_KEY": "0x4AAAAAAFQzepXiF2i3SKbY",
+    "TURNSTILE_HOSTNAMES": "textsatchel.com",
+    "TURNSTILE_ACTION": "signup"
+  },
+  "ratelimits": [
+    { "name": "SIGNUP_IP_LIMIT", "namespace_id": "867530101", "simple": { "limit": 5, "period": 60 } },
+    { "name": "SIGNUP_TOTAL_LIMIT", "namespace_id": "867530102", "simple": { "limit": 100, "period": 60 } }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  },
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "WAITLIST", "class_name": "Waitlist" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Waitlist"] }]
+}
