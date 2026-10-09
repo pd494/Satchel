@@ -11,4 +11,8 @@ AGENTS.md
 agent-patterns
 .zed
 .wrangler/
-.agents/skills/effective-design-doc/
+.agents/
+.claude/
+landing/assets/
+/assets/
+plugin/
