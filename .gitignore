@@ -1,8 +1,8 @@
 target
 build
 node_modules
-.env
-.dev.vars
+.env*
+.dev.vars*
 *.log
 .DS_Store
 docs
