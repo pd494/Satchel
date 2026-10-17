@@ -99,23 +99,19 @@ impl PhotonClient {
         }
     }
 
-    /// Echoes each inbound Photon text back into the same conversation.
-    ///
-    /// 1. Read the `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers.
-    /// 2. Verify the raw body before parsing; reject with 401 on mismatch.
-    /// 3. Parse the echo target with [`parse_inbound`]; ignore anything else.
-    /// 4. Send the echo, using `webhook-id` as the idempotency key so retries don't duplicate.
-    /// 5. Return 200 after a valid signature even if the send fails.
-    ///    - A non-2xx makes Photon retry; send failures are logged instead.
-    ///
-    /// # Errors
-    ///
-    /// Fails only if the request body or headers can't be read.
     pub async fn handle_webhook(&self, mut req: Request) -> worker::Result<Response> {
         let header = |name| req.headers().get(name).map(Option::unwrap_or_default);
         let id = header("webhook-id")?;
         let timestamp = header("webhook-timestamp")?;
         let signature = header("webhook-signature")?;
+        if signature.is_empty() {
+            return Response::error("bad signature", 401);
+        }
+        // Refuse oversized bodies before buffering them.
+        let length = header("content-length")?.parse::<u64>().unwrap_or(0);
+        if length > 1_000_000 {
+            return Response::error("payload too large", 413);
+        }
         let body = req.text().await?;
         let now = Date::now().as_millis().cast_signed() / 1000;
         if !self.verify_webhook(&body, &id, &timestamp, &signature, now) {
@@ -144,7 +140,7 @@ impl PhotonClient {
         let Ok(ts) = timestamp.parse::<i64>() else {
             return false;
         };
-        if (now - ts).abs() > 300 {
+        if now.abs_diff(ts) > 300 {
             return false;
         }
         // The secret is `whsec_` (a "webhook secret" label) + base64 of the key bytes.
