@@ -1,4 +1,4 @@
-name: CI
+name: Lint
 
 on:
   push:
@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Format, lint, and test
+  lint:
+    name: Format and lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -28,5 +28,3 @@ jobs:
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - run: cargo test --all-targets
-
