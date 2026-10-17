@@ -1,4 +1,4 @@
-name: CI
+name: Lint
 
 on:
   push:
@@ -10,17 +10,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Format, lint, and test
+  lint:
+    name: Format and lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
