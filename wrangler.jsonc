@@ -3,6 +3,10 @@
   "main": "build/index.js",
   "compatibility_date": "2026-09-14",
   "routes": [{ "pattern": "api.textsatchel.com", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [{ "name": "USER", "class_name": "User" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["User"] }],
   "build": {
     "command": "cargo install -q \"worker-build@^0.8\" && worker-build --release"
   }
