@@ -27,3 +27,7 @@ codegen-units = 1
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[dev-dependencies]
+tiny_http = "0.12.0"
+ureq = { version = "3.5.0", default-features = false }

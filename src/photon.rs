@@ -61,6 +61,8 @@ pub struct PhotonClient {
     webhook_secret: String,
     /// The bot's Photon user id (`pho_usr_...`), not its phone number or email.
     bot_id: String,
+    /// Photon's base URL; the optional `PHOTON_API` var points tests at a fake.
+    api: String,
 }
 
 impl PhotonClient {
@@ -75,17 +77,24 @@ impl PhotonClient {
             project_secret,
             webhook_secret,
             bot_id,
+            api: PHOTON_API.to_owned(),
         }
     }
 
     /// Builds a client from the Worker's Photon secrets.
     pub fn from_env(env: &Env) -> worker::Result<Self> {
-        Ok(Self::new(
-            env.secret("PROJECT_ID")?.to_string(),
-            env.secret("PROJECT_SECRET")?.to_string(),
-            env.secret("SPECTRUM_WEBHOOK_SECRET")?.to_string(),
-            env.secret("PHOTON_BOT_ID")?.to_string(),
-        ))
+        let api = env
+            .var("PHOTON_API")
+            .map_or_else(|_| PHOTON_API.to_owned(), |v| v.to_string());
+        Ok(Self {
+            api,
+            ..Self::new(
+                env.secret("PROJECT_ID")?.to_string(),
+                env.secret("PROJECT_SECRET")?.to_string(),
+                env.secret("SPECTRUM_WEBHOOK_SECRET")?.to_string(),
+                env.secret("PHOTON_BOT_ID")?.to_string(),
+            )
+        })
     }
 
     /// Sends `message` into its space, as the bot.
@@ -118,7 +127,7 @@ impl PhotonClient {
         headers.set("Content-Type", "application/json")?;
         headers.set("Idempotency-Key", idempotency_key)?;
         headers.set("Authorization", &format!("Bearer {}", self.project_secret))?;
-        let url = format!("{PHOTON_API}/v1/projects/{}/{}", self.project_id, path);
+        let url = format!("{}/v1/projects/{}/{}", self.api, self.project_id, path);
         let mut request = RequestInit::new();
         request
             .with_method(Method::Post)

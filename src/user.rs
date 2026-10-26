@@ -45,6 +45,7 @@ impl DurableObject for User {
     /// Takes the user's text as the request body and returns the reply text.
     async fn fetch(&self, mut req: Request) -> Result<Response> {
         let storage = self.state.storage();
+        let text = req.text().await?;
         let idempotency_key = format!(
             "event:{}",
             req.headers()
@@ -55,7 +56,6 @@ impl DurableObject for User {
         if let Some(reply) = storage.get::<String>(&idempotency_key).await? {
             return Response::ok(reply);
         }
-        let text = req.text().await?;
         let reply = if text.trim().eq_ignore_ascii_case("reset") {
             storage.delete_all().await?;
             "Reset done. Text again to start as a new user."
