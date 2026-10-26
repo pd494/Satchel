@@ -1,13 +1,13 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use hmac::{Hmac, Mac};
-use satchel::photon::{parse_inbound, PhotonClient};
+use satchel::photon::{InboundMessage, PhotonClient};
 use sha2::Sha256;
 
 const KEY: &[u8] = b"test-signing-key";
 const NOW: i64 = 1_760_000_000;
 
 fn client(webhook_secret: String) -> PhotonClient {
-    PhotonClient::new(String::new(), String::new(), webhook_secret)
+    PhotonClient::new(String::new(), String::new(), webhook_secret, String::new())
 }
 
 fn sign(id: &str, timestamp: &str, body: &str) -> Option<String> {
@@ -65,17 +65,21 @@ fn parses_only_received_texts() {
     let event = |kind: &str, content: &str| {
         format!(
             r#"{{"type":"{kind}","data":{{"object":{{"content":{content},
-            "receivedBy":{{"id":"pho_usr_bot"}},"space":{{"id":"pho_spc_chat"}}}}}}}}"#
+            "sentBy":{{"id":"pho_usr_sender","handle":"+15551234567"}},"receivedBy":{{"id":"pho_usr_bot"}},"space":{{"id":"pho_spc_chat"}}}}}}}}"#
         )
     };
     let text = r#"{"type":"text","text":"hi"}"#;
 
-    let message = parse_inbound(&event("message.received", text)).unwrap();
-    assert_eq!(message.sender_id, "pho_usr_bot");
+    let message = InboundMessage::parse(&event("message.received", text), String::new()).unwrap();
+    assert_eq!(message.sender_id, "pho_usr_sender");
     assert_eq!(message.space_id, "pho_spc_chat");
     assert_eq!(message.text, "hi");
 
-    assert!(parse_inbound(&event("message.sent", text)).is_none());
-    assert!(parse_inbound(&event("message.received", r#"{"type":"image"}"#)).is_none());
-    assert!(parse_inbound("not json").is_none());
+    assert!(InboundMessage::parse(&event("message.sent", text), String::new()).is_none());
+    assert!(InboundMessage::parse(
+        &event("message.received", r#"{"type":"image"}"#),
+        String::new()
+    )
+    .is_none());
+    assert!(InboundMessage::parse("not json", String::new()).is_none());
 }

@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use worker::wasm_bindgen::JsValue;
-use worker::{console_error, Date, Fetch, Headers, Method, Request, RequestInit, Response};
+use worker::{Date, Env, Fetch, Headers, Method, Request, RequestInit};
 
 const PHOTON_API: &str = "https://api.photon.codes";
 type HmacSha256 = Hmac<Sha256>;
@@ -14,54 +14,93 @@ const LENIENT: GeneralPurpose = GeneralPurpose::new(
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
 );
 
-/// A text to send into a space as the agent user.
 pub struct OutboundMessage {
-    pub sender_id: String,
     pub space_id: String,
     pub text: String,
 }
 
-/// Pulls the echo target out of a `message.received` webhook body.
-///
-/// Returns `None` for other events, non-text messages, and malformed JSON,
-/// so the bot never echoes its own sends.
-pub fn parse_inbound(body: &str) -> Option<OutboundMessage> {
-    let payload: serde_json::Value = serde_json::from_str(body).ok()?;
-    if payload["type"] != "message.received" {
-        return None;
+pub enum PhotonRequestOutcome {
+    Text(InboundMessage),
+    Unsupported,
+    BadSignature,
+    TooLarge,
+}
+
+pub struct InboundMessage {
+    pub sender_id: String,
+    pub space_id: String,
+    pub text: String,
+    /// The `webhook-id` header; Photon reuses it on retries.
+    pub event_id: String,
+}
+
+impl InboundMessage {
+    /// Pulls the sender, space, and text out of a `message.received` webhook body.
+    ///
+    /// Returns `None` for other events (including the bot's own `message.sent`),
+    /// non-text messages, and malformed JSON.
+    pub fn parse(body: &str, event_id: String) -> Option<Self> {
+        let payload: serde_json::Value = serde_json::from_str(body).ok()?;
+        if payload["type"] != "message.received" {
+            return None;
+        }
+        let message = &payload["data"]["object"];
+        let field = |path: &str| Some(message.pointer(path)?.as_str()?.to_owned());
+        Some(Self {
+            sender_id: field("/sentBy/id")?,
+            space_id: field("/space/id")?,
+            text: field("/content/text")?,
+            event_id,
+        })
     }
-    let message = &payload["data"]["object"];
-    let field = |path: &str| Some(message.pointer(path)?.as_str()?.to_owned());
-    Some(OutboundMessage {
-        sender_id: field("/receivedBy/id")?,
-        space_id: field("/space/id")?,
-        text: field("/content/text")?,
-    })
 }
 
 pub struct PhotonClient {
     project_id: String,
     project_secret: String,
     webhook_secret: String,
+    /// The bot's Photon user id (`pho_usr_...`), not its phone number or email.
+    bot_id: String,
 }
 
 impl PhotonClient {
-    pub fn new(project_id: String, project_secret: String, webhook_secret: String) -> Self {
+    pub fn new(
+        project_id: String,
+        project_secret: String,
+        webhook_secret: String,
+        bot_id: String,
+    ) -> Self {
         Self {
             project_id,
             project_secret,
             webhook_secret,
+            bot_id,
         }
     }
 
-    async fn send(&self, message: OutboundMessage, idempotency_key: &str) -> worker::Result<()> {
+    /// Builds a client from the Worker's Photon secrets.
+    pub fn from_env(env: &Env) -> worker::Result<Self> {
+        Ok(Self::new(
+            env.secret("PROJECT_ID")?.to_string(),
+            env.secret("PROJECT_SECRET")?.to_string(),
+            env.secret("SPECTRUM_WEBHOOK_SECRET")?.to_string(),
+            env.secret("PHOTON_BOT_ID")?.to_string(),
+        ))
+    }
+
+    /// Sends `message` into its space, as the bot.
+    pub async fn send(
+        &self,
+        message: &OutboundMessage,
+        idempotency_key: &str,
+    ) -> worker::Result<()> {
         let request_body = serde_json::json!({
             "content": {
                 "type": "text",
                 "format": "plain",
                 "text": message.text,
             },
-            "senderId": message.sender_id,
+            "senderId": self.bot_id,
             "spaceId": message.space_id,
         });
 
@@ -99,31 +138,29 @@ impl PhotonClient {
         }
     }
 
-    pub async fn handle_webhook(&self, mut req: Request) -> worker::Result<Response> {
+    /// Verifies and parses a webhook.
+    pub async fn receive(&self, mut req: Request) -> worker::Result<PhotonRequestOutcome> {
         let header = |name| req.headers().get(name).map(Option::unwrap_or_default);
         let id = header("webhook-id")?;
         let timestamp = header("webhook-timestamp")?;
         let signature = header("webhook-signature")?;
         if signature.is_empty() {
-            return Response::error("bad signature", 401);
+            return Ok(PhotonRequestOutcome::BadSignature);
         }
         // Refuse oversized bodies before buffering them.
         let length = header("content-length")?.parse::<u64>().unwrap_or(0);
         if length > 1_000_000 {
-            return Response::error("payload too large", 413);
+            return Ok(PhotonRequestOutcome::TooLarge);
         }
         let body = req.text().await?;
         let now = Date::now().as_millis().cast_signed() / 1000;
         if !self.verify_webhook(&body, &id, &timestamp, &signature, now) {
-            return Response::error("bad signature", 401);
+            return Ok(PhotonRequestOutcome::BadSignature);
         }
-        let Some(message) = parse_inbound(&body) else {
-            return Response::ok("ok");
-        };
-        if let Err(err) = self.send(message, &id).await {
-            console_error!("echo send failed: {err}");
-        }
-        Response::ok("ok")
+        Ok(match InboundMessage::parse(&body, id) {
+            Some(message) => PhotonRequestOutcome::Text(message),
+            None => PhotonRequestOutcome::Unsupported,
+        })
     }
 
     /// Checks Photon's signature so only Photon can trigger the bot (Standard Webhooks).
