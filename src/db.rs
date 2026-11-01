@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS messages (
     event_id   TEXT UNIQUE,
     reply_to   TEXT UNIQUE REFERENCES messages(event_id),
     space_id   TEXT,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    sent_at    INTEGER,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     CHECK ((role = 'user') = (event_id IS NOT NULL)),
     CHECK ((role = 'assistant') = (reply_to IS NOT NULL)),
@@ -34,12 +36,13 @@ pub struct Row {
     pub content: String,
 }
 
-/// A user message that has no reply yet.
+/// A user message whose reply has not been sent yet; `reply` is set once one is saved.
 #[derive(Deserialize)]
-pub struct Unanswered {
+pub struct Pending {
     pub id: i64,
     pub event_id: String,
     pub space_id: String,
+    pub reply: Option<String>,
 }
 
 impl Db {
@@ -67,19 +70,40 @@ impl Db {
         Ok(())
     }
 
-    /// Returns the oldest user message with no reply, if any.
-    pub fn next_unanswered(&self) -> Result<Option<Unanswered>> {
-        let select_query = "SELECT id, event_id, space_id FROM messages AS m \
-            WHERE role = 'user' AND NOT EXISTS (SELECT 1 FROM messages WHERE reply_to = m.event_id) \
-            ORDER BY id LIMIT 1";
-        let mut rows: Vec<Unanswered> = self.sql.exec(select_query, None)?.to_array()?;
+    /// Marks the reply to `reply_to` as delivered.
+    pub fn mark_sent(&self, reply_to: &str) -> Result<()> {
+        let update_query = "UPDATE messages SET sent_at = unixepoch() WHERE reply_to = ?";
+        self.sql.exec(update_query, vec![reply_to.into()])?;
+        Ok(())
+    }
+
+    /// Counts one more try at replying to message `id` and returns the new total.
+    pub fn record_attempt(&self, id: i64) -> Result<i64> {
+        let update_query =
+            "UPDATE messages SET attempts = attempts + 1 WHERE id = ? RETURNING attempts";
+        #[derive(Deserialize)]
+        struct Attempts {
+            attempts: i64,
+        }
+        let row: Attempts = self.sql.exec(update_query, vec![id.into()])?.one()?;
+        Ok(row.attempts)
+    }
+
+    /// Returns the oldest user message whose reply has not been sent, if any.
+    pub fn next_pending(&self) -> Result<Option<Pending>> {
+        let select_query = "SELECT u.id, u.event_id, u.space_id, a.content AS reply \
+            FROM messages AS u LEFT JOIN messages AS a ON a.reply_to = u.event_id \
+            WHERE u.role = 'user' AND a.sent_at IS NULL ORDER BY u.id LIMIT 1";
+        let mut rows: Vec<Pending> = self.sql.exec(select_query, None)?.to_array()?;
         Ok(rows.pop())
     }
 
-    /// Returns up to `limit` messages ending at message `through_id`, oldest first.
+    /// Returns up to `limit` messages through user message `through_id`, oldest first, with each
+    /// reply placed right after the message it answers.
     pub fn load_history(&self, through_id: i64, limit: usize) -> Result<Vec<Row>> {
-        let select_query =
-            "SELECT role, content FROM messages WHERE id <= ? ORDER BY id DESC LIMIT ?";
+        let select_query = "SELECT m.role, m.content FROM messages AS m \
+            LEFT JOIN messages AS u ON u.event_id = m.reply_to \
+            WHERE COALESCE(u.id, m.id) <= ? ORDER BY COALESCE(u.id, m.id) DESC, m.id DESC LIMIT ?";
         let mut rows: Vec<Row> = self
             .sql
             .exec(select_query, vec![through_id.into(), (limit as i64).into()])?
