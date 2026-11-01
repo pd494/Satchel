@@ -1,6 +1,7 @@
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use worker::wasm_bindgen::JsValue;
@@ -26,6 +27,7 @@ pub enum PhotonRequestOutcome {
     TooLarge,
 }
 
+#[derive(Deserialize, Serialize)]
 pub struct InboundMessage {
     pub sender_id: String,
     pub space_id: String,

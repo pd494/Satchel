@@ -1,13 +1,12 @@
 use crate::agent::Agent;
 use crate::db::Db;
 use crate::harness::Harness;
+use crate::photon::{InboundMessage, PhotonClient};
+use std::time::Duration;
 use worker::{
-    durable_object, DurableObject, Env, Error, Headers, Method, Request, RequestInit, Response,
-    Result, State,
+    durable_object, DurableObject, Env, Error, Method, Request, RequestInit, Response, Result,
+    State,
 };
-
-/// Header that carries Photon's `webhook-id` from the Worker into the DO.
-const EVENT_ID_HEADER: &str = "x-event-id";
 
 #[durable_object]
 pub struct User {
@@ -16,22 +15,21 @@ pub struct User {
 }
 
 impl User {
-    /// Forwards one inbound text to the sender's Durable Object and returns its reply.
-    pub async fn send(env: &Env, sender_id: &str, text: &str, event_id: &str) -> Result<String> {
-        let stub = env.durable_object("USER")?.get_by_name(sender_id)?;
+    /// Hands one inbound text to the sender's Durable Object, which saves it and replies later.
+    pub async fn send(env: &Env, message: &InboundMessage) -> Result<()> {
+        let stub = env
+            .durable_object("USER")?
+            .get_by_name(&message.sender_id)?;
 
-        let headers = Headers::new();
-        headers.set(EVENT_ID_HEADER, event_id)?;
         let request = Request::new_with_init(
             "https://do/",
             RequestInit::new()
                 .with_method(Method::Post)
-                .with_body(Some(text.into()))
-                .with_headers(headers),
+                .with_body(Some(serde_json::to_string(message)?.into())),
         )?;
         let mut response = stub.fetch_with_request(request).await?;
         match response.status_code() {
-            200..=299 => response.text().await,
+            200..=299 => Ok(()),
             status => {
                 let detail = response.text().await.unwrap_or_default();
                 Err(Error::RustError(format!(
@@ -46,28 +44,31 @@ impl DurableObject for User {
     fn new(state: State, env: Env) -> Self {
         let db = Db::open(state.storage().sql()).expect("messages schema");
         let ai = env.ai("AI").expect("AI binding");
+        let photon = PhotonClient::from_env(&env).expect("Photon secrets");
         Self {
             state,
-            harness: Harness::new(db, Agent::new(ai)),
+            harness: Harness::new(db, Agent::new(ai), photon),
         }
     }
 
-    /// Takes the user's text as the request body and returns the reply text.
+    /// Saves the user's text and schedules the alarm that replies to it.
     async fn fetch(&self, mut req: Request) -> Result<Response> {
-        let text = req.text().await?;
-        let event_id = req
-            .headers()
-            .get(EVENT_ID_HEADER)?
-            .ok_or_else(|| Error::RustError(format!("missing {EVENT_ID_HEADER}")))?;
+        let message: InboundMessage = req.json().await?;
 
-        if text.trim().eq_ignore_ascii_case("reset") {
+        if message.text.trim().eq_ignore_ascii_case("reset") {
             self.state.storage().delete_all().await?;
             // delete_all drops the table too; recreate it so the next text works.
             Db::open(self.state.storage().sql())?;
-            return Response::ok("Reset done. Text again to start as a new user.");
         }
 
-        let reply = self.harness.run_turn(&text, &event_id).await?;
-        Response::ok(reply)
+        self.harness.receive(&message)?;
+        self.state.storage().set_alarm(Duration::ZERO).await?;
+        Response::ok("ok")
+    }
+
+    /// Replies to saved messages one at a time; the runtime retries this if it fails.
+    async fn alarm(&self) -> Result<Response> {
+        self.harness.answer_pending().await?;
+        Response::ok("ok")
     }
 }
