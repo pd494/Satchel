@@ -38,13 +38,16 @@ impl InboundMessage {
     /// Pulls the sender, space, and text out of a `message.received` webhook body.
     ///
     /// Returns `None` for other events (including the bot's own `message.sent`),
-    /// non-text messages, and malformed JSON.
+    /// group chats, non-text messages, and malformed JSON.
     pub fn parse(body: &str, event_id: String) -> Option<Self> {
         let payload: serde_json::Value = serde_json::from_str(body).ok()?;
         if payload["type"] != "message.received" {
             return None;
         }
         let message = &payload["data"]["object"];
+        if message["space"]["kind"] != "direct" {
+            return None;
+        }
         let field = |path: &str| Some(message.pointer(path)?.as_str()?.to_owned());
         Some(Self {
             sender_id: field("/sentBy/id")?,
