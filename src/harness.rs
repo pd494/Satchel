@@ -34,7 +34,7 @@ impl Harness {
             GREETING.to_string()
         } else {
             let context = self.db.load_history(6)?;
-            self.agent.reply(&context).await?
+            self.agent.response(&context).await?
         };
         self.db.save_agent_message(event_id, &reply)?;
         Ok(reply)
