@@ -17,7 +17,7 @@ impl Agent {
         Self { ai }
     }
 
-    pub async fn reply(&self, history: &[Row]) -> Result<String> {
+    pub async fn response(&self, history: &[Row]) -> Result<String> {
         let system = Row {
             role: "system".into(),
             content: SYSTEM_PROMPT.into(),

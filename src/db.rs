@@ -31,6 +31,13 @@ pub struct Row {
     pub role: String,
     pub content: String,
 }
+
+#[derive(Deserialize)]
+pub struct Pending {
+    pub id: i64,
+    pub event_id: String,
+}
+
 impl Db {
     pub fn open(sql: SqlStorage) -> Result<Self> {
         sql.exec(SCHEMA, None)?;
@@ -65,27 +72,32 @@ impl Db {
         Ok(())
     }
 
-    /// Returns the last `limit` messages, oldest first.
-    pub fn load_history(&self, limit: usize) -> Result<Vec<Row>> {
-        let select_query = "SELECT role, content FROM messages ORDER BY id DESC LIMIT ?";
+    /// Returns the last `limit` messages up to and including row `up_to`, oldest first.
+    pub fn load_history(&self, up_to: i64, limit: usize) -> Result<Vec<Row>> {
+        let select_query = "SELECT m.role, m.content FROM messages AS m \
+            LEFT JOIN messages AS u ON u.event_id = m.reply_to \
+            WHERE COALESCE(u.id, m.id) <= ? \
+            ORDER BY COALESCE(u.id, m.id) DESC, m.id DESC LIMIT ?";
         let mut rows: Vec<Row> = self
             .sql
             .exec(
                 select_query,
-                Some(vec![SqlStorageValue::Integer(limit as i64)]),
+                Some(vec![
+                    SqlStorageValue::Integer(up_to),
+                    SqlStorageValue::Integer(limit as i64),
+                ]),
             )?
             .to_array()?;
         rows.reverse();
         Ok(rows)
     }
 
-    /// Returns the saved reply to `event_id`, or `None` if the first attempt never saved one.
-    pub fn load_reply(&self, event_id: &str) -> Result<Option<String>> {
-        let select_query = "SELECT role, content FROM messages WHERE reply_to = ?";
-        let mut rows: Vec<Row> = self
-            .sql
-            .exec(select_query, Some(vec![event_id.into()]))?
-            .to_array()?;
-        Ok(rows.pop().map(|row| row.content))
+    /// Returns the oldest user message that has no reply yet.
+    pub fn next_unanswered(&self) -> Result<Option<Pending>> {
+        let select_query = "SELECT id, event_id FROM messages AS m WHERE role = 'user' \
+            AND NOT EXISTS (SELECT 1 FROM messages WHERE reply_to = m.event_id) \
+            ORDER BY id LIMIT 1";
+        let mut rows: Vec<Pending> = self.sql.exec(select_query, None)?.to_array()?;
+        Ok(rows.pop())
     }
 }
