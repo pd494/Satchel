@@ -1,5 +1,6 @@
 {
   "name": "satchel",
+  "account_id": "75646cd038d25b1b0e4b4545e4c09ef1",
   "main": "build/index.js",
   "compatibility_date": "2026-09-14",
   "routes": [{ "pattern": "api.textsatchel.com", "custom_domain": true }],
