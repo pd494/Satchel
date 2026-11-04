@@ -1,6 +1,5 @@
 use crate::db::Row;
-use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use worker::{Ai, Error, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
@@ -13,27 +12,11 @@ pub struct Agent {
     ai: Ai,
 }
 
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    messages: Vec<&'a Row>,
-    chat_template_kwargs: ChatTemplateKwargs,
-}
-
-#[derive(Serialize)]
-struct ChatTemplateKwargs {
-    enable_thinking: bool,
-}
-
 impl Agent {
     pub fn new(ai: Ai) -> Self {
         Self { ai }
     }
 
-    /// Sends the system prompt plus `history` to Workers AI and returns the assistant's reply text.
-    ///
-    /// Docs:
-    /// - Workers AI model page: <https://developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it/>
-    /// - `serde_json::Value`: <https://docs.rs/serde_json/latest/serde_json/enum.Value.html>
     pub async fn reply(&self, history: &[Row]) -> Result<String> {
         let system = Row {
             role: "system".into(),
@@ -41,12 +24,10 @@ impl Agent {
         };
         let mut messages = vec![&system];
         messages.extend(history);
-        let request = ChatRequest {
-            messages,
-            chat_template_kwargs: ChatTemplateKwargs {
-                enable_thinking: false,
-            },
-        };
+        let request = json!({
+            "messages": messages,
+            "chat_template_kwargs": { "enable_thinking": false },
+        });
         let response: Value = self.ai.run(MODEL, request).await?;
 
         response["choices"][0]["message"]["content"]
