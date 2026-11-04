@@ -52,7 +52,7 @@ impl InboundMessage {
         Some(Self {
             sender_id: field("/sentBy/id")?,
             space_id: field("/space/id")?,
-            text: field("/content/text")?,
+            text: field("/content/text")?.chars().take(2000).collect(),
             event_id,
         })
     }
