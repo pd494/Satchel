@@ -25,6 +25,15 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         PhotonRequestOutcome::TooLarge => return Response::error("payload too large", 413),
     };
 
+    for (binding, key) in [
+        ("SENDER_LIMIT", message.sender_id.clone()),
+        ("TOTAL_LIMIT", "all".to_string()),
+    ] {
+        if !env.rate_limiter(binding)?.limit(key).await?.success {
+            return Response::ok("rate limited");
+        }
+    }
+
     User::send(
         &env,
         &message.sender_id,

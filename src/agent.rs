@@ -26,6 +26,7 @@ impl Agent {
         messages.extend(history);
         let request = json!({
             "messages": messages,
+            "max_tokens": 512,
             "chat_template_kwargs": { "enable_thinking": false },
         });
         let response: Value = self.ai.run(MODEL, request).await?;
