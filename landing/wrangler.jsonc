@@ -25,6 +25,7 @@
     "binding": "ASSETS",
     "run_worker_first": ["/api/*"]
   },
+  "send_email": [{ "name": "NOTIFY", "allowed_sender_addresses": ["waitlist@textsatchel.com"] }],
   "durable_objects": {
     "bindings": [{ "name": "WAITLIST", "class_name": "Waitlist" }]
   },

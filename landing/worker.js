@@ -53,7 +53,7 @@ export class Waitlist extends DurableObject {
   }
 }
 
-async function handleSignup(request, env, url) {
+async function handleSignup(request, env, url, ctx) {
   if (request.method !== "POST") return reply({ error: "method_not_allowed" }, 405, { Allow: "POST" });
   const origin = request.headers.get("Origin");
   if ((origin && origin !== url.origin) || request.headers.get("Sec-Fetch-Site") === "cross-site") {
@@ -82,14 +82,22 @@ async function handleSignup(request, env, url) {
   if (verification !== "valid") return reply({ error: "verification_failed" }, 403);
 
   const added = await env.WAITLIST.getByName("signups").signup(email);
+  if (added) {
+    ctx.waitUntil(env.NOTIFY.send({
+      from: "waitlist@textsatchel.com",
+      to: env.NOTIFY_EMAIL,
+      subject: "New waitlist signup",
+      text: email,
+    }));
+  }
   return added ? reply({ ok: true }) : reply({ error: "already_registered" }, 409);
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
-      if (url.pathname === "/api/waitlist") return await handleSignup(request, env, url);
+      if (url.pathname === "/api/waitlist") return await handleSignup(request, env, url, ctx);
       if (url.pathname === "/api/turnstile" && request.method === "GET") {
         const config = turnstileConfig(env, url.hostname);
         return config
