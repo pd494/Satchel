@@ -1,12 +1,12 @@
 mod agent;
-mod db;
+pub mod db;
 mod harness;
 pub mod photon;
 pub mod user;
 
-use photon::{PhotonClient, PhotonRequestOutcome};
+use photon::{OutboundMessage, PhotonClient, PhotonRequestOutcome};
 use user::User;
-use worker::{event, Context, Env, Method, Request, Response, Result};
+use worker::{console_error, event, Context, Env, Method, Request, Response, Result};
 
 /// Worker entry point and HTTP routing.
 #[event(fetch)]
@@ -25,6 +25,14 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         PhotonRequestOutcome::TooLarge => return Response::error("payload too large", 413),
     };
 
-    User::send(&env, &message).await?;
+    let reply = OutboundMessage {
+        text: User::send(&env, &message.sender_id, &message.text, &message.event_id).await?,
+        space_id: message.space_id,
+    };
+
+    client
+        .send(&reply, &message.event_id)
+        .await
+        .inspect_err(|err| console_error!("reply send failed: {err}"))?;
     Response::ok("ok")
 }

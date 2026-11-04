@@ -1,48 +1,42 @@
 use crate::agent::Agent;
 use crate::db::Db;
-use crate::photon::{InboundMessage, OutboundMessage, PhotonClient};
 use worker::Result;
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
 
-/// Runs conversation turns: owns the user's state (`Db`), the model (`Agent`), and the outbound
-/// channel (`PhotonClient`), and is the only place that knows the order of a turn.
+/// Runs a conversation turn: owns the user's state (`Db`) and the model (`Agent`), and is the
+/// only place that knows the order of a turn.
 pub struct Harness {
     db: Db,
     agent: Agent,
-    photon: PhotonClient,
 }
 
 impl Harness {
-    pub fn new(db: Db, agent: Agent, photon: PhotonClient) -> Self {
-        Self { db, agent, photon }
+    pub fn new(db: Db, agent: Agent) -> Self {
+        Self { db, agent }
     }
 
-    /// Saves an inbound text so a later `answer_pending` replies to it.
-    pub fn receive(&self, message: &InboundMessage) -> Result<()> {
-        self.db
-            .save_user_message(&message.event_id, &message.space_id, &message.text)
-    }
-
-    /// Replies to every unanswered message, oldest first.
+    /// Runs one conversational turn and returns the reply text.
     ///
-    /// A brand-new user gets `GREETING` instead of a model call. The reply is saved only after it
-    /// is sent, so a failure leaves the message unanswered and the alarm's retry tries again.
-    pub async fn answer_pending(&self) -> Result<()> {
-        while let Some(message) = self.db.next_unanswered()? {
-            let context = self.db.load_history(message.id, 6)?;
-            let reply = OutboundMessage {
-                text: if context.len() == 1 {
-                    GREETING.to_string()
-                } else {
-                    self.agent.reply(&context).await?
-                },
-                space_id: message.space_id,
-            };
-            self.photon.send(&reply, &message.event_id).await?;
-            self.db.save_agent_message(&message.event_id, &reply.text)?;
+    /// A retried webhook gets the reply already saved for it; a brand-new user gets `GREETING`
+    /// instead of a model call. A failed or empty model reply is an error, so nothing is saved for
+    /// it and Photon's retry tries again.
+    pub async fn run_turn(&self, text: &str, event_id: &str) -> Result<String> {
+        if let Some(existing_reply) = self.db.load_reply(event_id)? {
+            return Ok(existing_reply);
         }
-        Ok(())
+
+        let is_new_user = self.db.load_history(1)?.is_empty();
+        self.db.save_user_message(event_id, text)?;
+
+        let reply = if is_new_user {
+            GREETING.to_string()
+        } else {
+            let context = self.db.load_history(6)?;
+            self.agent.reply(&context).await?
+        };
+        self.db.save_agent_message(event_id, &reply)?;
+        Ok(reply)
     }
 }
