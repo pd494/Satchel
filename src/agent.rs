@@ -1,5 +1,6 @@
 use crate::db::Row;
-use serde_json::{json, Value};
+use serde::Serialize;
+use serde_json::Value;
 use worker::{Ai, Error, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
@@ -10,6 +11,17 @@ const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
 /// The model call: history in, one assistant message out. Knows nothing about storage.
 pub struct Agent {
     ai: Ai,
+}
+
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    messages: Vec<&'a Row>,
+    chat_template_kwargs: ChatTemplateKwargs,
+}
+
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
 }
 
 impl Agent {
@@ -24,10 +36,12 @@ impl Agent {
         };
         let mut messages = vec![&system];
         messages.extend(history);
-        let request = json!({
-            "messages": messages,
-            "chat_template_kwargs": { "enable_thinking": false },
-        });
+        let request = ChatRequest {
+            messages,
+            chat_template_kwargs: ChatTemplateKwargs {
+                enable_thinking: false,
+            },
+        };
         let response: Value = self.ai.run(MODEL, request).await?;
 
         response["choices"][0]["message"]["content"]
