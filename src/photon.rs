@@ -6,6 +6,8 @@ use prost::encoding::{bool as pbool, bytes, int32, string};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use worker::js_sys::Uint8Array;
+
+use crate::media::Link;
 use worker::{Date, Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 const CLOUD_API: &str = "https://spectrum.photon.codes";
@@ -86,13 +88,37 @@ impl PhotonClient {
         bool::from(signature.as_bytes().ct_eq(expected.as_bytes()))
     }
 
-    /// Sends `text` into `space_id`. iMessage renders a preview card for a link in it.
+    /// Sends `text` into `space_id`, then each link in it as its own message, because iMessage
+    /// renders a preview card only for a message that is a single URL.
     pub async fn send(&self, space_id: &str, text: &str, idempotency_key: &str) -> Result<()> {
+        let links = Link::find_all(text);
+        let rest = links
+            .iter()
+            .fold(text.to_owned(), |rest, link| rest.replace(&link.typed, ""));
+        if !rest.trim().is_empty() {
+            self.send_one(space_id, rest.trim(), false, idempotency_key)
+                .await?;
+        }
+        for (i, link) in links.iter().enumerate() {
+            let key = format!("{idempotency_key}:link.{i}");
+            self.send_one(space_id, link.url.as_str(), true, &key)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn send_one(
+        &self,
+        space_id: &str,
+        text: &str,
+        preview: bool,
+        idempotency_key: &str,
+    ) -> Result<()> {
         // SendTextMessageRequest { chat_guid = 1, text = 2, enable_link_preview = 7 }
         let mut request = Vec::new();
         string::encode(1, &space_id.to_owned(), &mut request);
         string::encode(2, &text.to_owned(), &mut request);
-        pbool::encode(7, &true, &mut request);
+        pbool::encode(7, &preview, &mut request);
         self.call("MessageService/SendTextMessage", request, idempotency_key)
             .await
     }
@@ -145,31 +171,19 @@ impl PhotonClient {
             .with_headers(headers)
             .with_body(Some(Uint8Array::from(frame.as_slice()).into()));
         let url = format!("{IMESSAGE_API}.{method}");
-        let mut response = Fetch::Request(Request::new_with_init(&url, &init)?)
+        let response = Fetch::Request(Request::new_with_init(&url, &init)?)
             .send()
             .await?;
 
-        // A failed call puts its status in the headers; a successful one in a trailer frame.
+        // A failed call puts its status in the headers. A successful one puts it in HTTP
+        // trailers, which `fetch` can't read, so no status header means success.
         let headers = response.headers();
-        let trailers = match headers.get("grpc-status")? {
-            Some(status) => format!(
-                "grpc-status:{status}\r\ngrpc-message:{}",
+        match (response.status_code(), headers.get("grpc-status")?) {
+            (200, None) => Ok(()),
+            (200, Some(status)) if status == "0" => Ok(()),
+            (http, status) => Err(Error::RustError(format!(
+                "Photon {method} failed: http {http}, grpc-status {status:?} {}",
                 headers.get("grpc-message")?.unwrap_or_default()
-            ),
-            None => trailer_frame(&response.bytes().await?).unwrap_or_default(),
-        };
-        let field = |name: &str| {
-            trailers
-                .lines()
-                .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
-                .map(str::trim)
-                .unwrap_or_default()
-        };
-        match (response.status_code(), field("grpc-status")) {
-            (200, "0") => Ok(()),
-            (http, grpc) => Err(Error::RustError(format!(
-                "Photon {method} failed: http {http}, grpc-status {grpc:?} {}",
-                field("grpc-message")
             ))),
         }
     }
@@ -230,18 +244,4 @@ fn parse(body: &str) -> Option<InboundMessage> {
         text: field("/content/text")?,
         event_id: field("/id")?,
     })
-}
-
-/// Returns the text of the trailer frame (flag `0x80`) in a gRPC-web body.
-fn trailer_frame(body: &[u8]) -> Option<String> {
-    let mut rest = body;
-    while let [flag, a, b, c, d, tail @ ..] = rest {
-        let length = u32::from_be_bytes([*a, *b, *c, *d]) as usize;
-        let frame = tail.get(..length)?;
-        if flag & 0x80 != 0 {
-            return Some(String::from_utf8_lossy(frame).into_owned());
-        }
-        rest = &tail[length..];
-    }
-    None
 }
