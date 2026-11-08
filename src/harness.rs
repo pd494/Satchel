@@ -106,8 +106,9 @@ impl Harness {
             };
             self.db.insert_saved(message.id, &note)?;
         }
-        for link in &links {
-            self.db.insert_saved(message.id, link)?;
+        for mut link in links {
+            link.describe().await;
+            self.db.insert_saved(message.id, &link)?;
         }
         Ok(true)
     }
