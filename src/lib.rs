@@ -1,6 +1,7 @@
 mod agent;
 pub mod db;
 mod harness;
+mod media;
 pub mod photon;
 pub mod user;
 

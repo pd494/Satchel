@@ -1,5 +1,6 @@
-use crate::agent::Agent;
-use crate::db::Db;
+use crate::agent::{Agent, Intent};
+use crate::db::{Db, Pending};
+use crate::media::{find_links, Found, Link, Note};
 use crate::photon::{OutboundMessage, PhotonClient};
 use worker::{Env, Result, SqlStorage};
 
@@ -40,11 +41,22 @@ impl Harness {
             } else if message.attempts >= MAX_ATTEMPTS {
                 sorry(&message.content)
             } else {
-                let response = self.agent.response(&context).await;
-                if response.is_err() {
-                    self.db.record_failure(&message.event_id)?;
+                let result = async {
+                    match self.agent.classify_intent(&message.content).await? {
+                        Intent::Save => {
+                            self.save(&message).await?;
+                            Ok("Saved".to_string())
+                        }
+                        Intent::Search | Intent::Remind | Intent::Chat => {
+                            self.agent.response(&context).await
+                        }
+                    }
                 }
-                response?
+                .await;
+                if result.is_err() {
+                    self.db.record_failure(&message.event_id)?;
+                } 
+                result?
             };
             let reply = OutboundMessage {
                 text,
@@ -52,6 +64,20 @@ impl Harness {
             };
             self.photon.send(&reply, &message.event_id).await?;
             self.db.save_agent_message(&message.event_id, &reply.text)?;
+        }
+        Ok(())
+    }
+
+    /// Saves every link in `message`, or the whole text as a note when it has none.
+    async fn save(&self, message: &Pending) -> Result<()> {
+        let Found { mut sure, bare } = find_links(&message.content);
+        sure.extend(self.agent.check_links(&message.content, bare).await);
+        if sure.is_empty() {
+            let note = Note { text: message.content.clone() };
+            self.db.insert_saved(message.id, &note)?;
+        }
+        for url in sure {
+            self.db.insert_saved(message.id, &Link::bare(url))?;
         }
         Ok(())
     }

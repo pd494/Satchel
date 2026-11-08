@@ -1,16 +1,27 @@
 use crate::db::Row;
+use crate::media::Bare;
 use serde::Serialize;
-use serde_json::Value;
-use worker::{Ai, Error, Result};
+use serde_json::{json, Map, Value};
+use worker::{console_error, Ai, Error, Result, Url};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
-const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+const CLEF: &str = "@cf/cloudflare/clef-flash";
+/// Lowest Clef `noul` that still keeps a bare match as a link.
+const KEEP_LINK: f64 = 0.1;
+const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 
 // TODO: tools (Rig) go here later
 
-/// The model call: history in, one assistant message out. Knows nothing about storage.
 pub struct Agent {
     ai: Ai,
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) enum Intent {
+    Save,
+    Search,
+    Remind,
+    Chat,
 }
 
 #[derive(Serialize)]
@@ -50,5 +61,68 @@ impl Agent {
             .filter(|text| !text.is_empty())
             .map(str::to_string)
             .ok_or_else(|| Error::RustError(format!("no reply text in {response}")))
+    }
+
+    pub async fn classify_intent(&self, content: &str) -> Result<Intent> {
+        let body = json!({
+            "model": "clef-flash",
+            "state": content,
+            "questions": {
+                "intent": {
+                    "type": "choice",
+                    "instructions": "What is the user trying to do?",
+                    "criteria": {
+                        "save": "Store a link, note, or media for later",
+                        "search": "Find something they saved before",
+                        "remind": "Set a reminder or schedule something",
+                        "chat": "Greeting or off-topic; not save/search"
+                    }
+                }
+            }
+        });
+
+        let out: Value = self.ai.run(CLEF, body).await?;
+        let choice = out["answers"]["intent"]["choice"].as_str();
+        match choice {
+            Some("save") => Ok(Intent::Save),
+            Some("search") => Ok(Intent::Search),
+            Some("remind") => Ok(Intent::Remind),
+            Some("chat") => Ok(Intent::Chat),
+            other => Err(Error::RustError(format!("unknown intent: {other:?}"))),
+        }
+    }
+
+    /// Keeps each bare match unless Clef is sure it isn't a website.
+    /// If Clef fails, keeps them all: a wrong link costs less than a lost one.
+    pub async fn check_links(&self, content: &str, bare: Vec<Bare>) -> Vec<Url> {
+        if bare.is_empty() {
+            return Vec::new();
+        }
+        let questions: Map<String, Value> = bare
+            .iter()
+            .enumerate()
+            .map(|(i, candidate)| {
+                let instructions = format!("Is `{}` meant as a website address?", candidate.text);
+                (format!("link.{i}"), json!({ "type": "noul", "instructions": instructions }))
+            })
+            .collect();
+        let body = json!({ "model": "clef-flash", "state": content, "questions": questions });
+
+        let answers = match self.ai.run::<_, Value>(CLEF, body).await {
+            Ok(out) => out["answers"].clone(),
+            Err(error) => {
+                console_error!("check_links failed, keeping all: {error}");
+                Value::Null
+            }
+        };
+        bare.into_iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                answers[format!("link.{i}").as_str()]["noul"]
+                    .as_f64()
+                    .map_or(true, |p| p >= KEEP_LINK)
+            })
+            .map(|(_, candidate)| candidate.url)
+            .collect()
     }
 }

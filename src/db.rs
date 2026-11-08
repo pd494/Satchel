@@ -1,6 +1,8 @@
+use crate::media::Media;
 use serde::{Deserialize, Serialize};
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
+/// messages
 /// +----+-----------+------------------+----------+----------+----------+------------+
 /// | id | role      | content          | event_id | reply_to | attempts | created_at |
 /// +----+-----------+------------------+----------+----------+----------+------------+
@@ -8,6 +10,13 @@ use worker::{Result, SqlStorage, SqlStorageValue};
 /// +----+-----------+------------------+----------+----------+----------+------------+
 /// | 2  | assistant | "Sunset Lofts…"  | NULL     | evt_1    | 0        | 1761600002 |
 /// +----+-----------+------------------+----------+----------+----------+------------+
+///
+/// saved
+/// +----+------------+-------+------------------------+------------------+-------------+--------------------------+----------+------------+
+/// | id | message_id | media | content                | title            | description | data                     | attempts | created_at |
+/// +----+------------+-------+------------------------+------------------+-------------+--------------------------+----------+------------+
+/// | 1  | 1          | link  | "https://amazon.com/…" | "fairlife Choc…" | "Grocery…"  | {"image_url":"https://…"} | 0        | 1761600000 |
+/// +----+------------+-------+------------------------+------------------+-------------+--------------------------+----------+------------+
 /// ```
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
@@ -20,6 +29,19 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     CHECK ((role = 'user') = (event_id IS NOT NULL)),
     CHECK ((role = 'assistant') = (reply_to IS NOT NULL))
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS saved (
+    id          INTEGER PRIMARY KEY,
+    message_id  INTEGER NOT NULL REFERENCES messages(id),
+    media       TEXT NOT NULL CHECK (media IN ('link', 'note')),
+    content     TEXT NOT NULL,
+    title       TEXT,
+    description TEXT,
+    data        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)),
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    UNIQUE (message_id, content)
 ) STRICT;
 "#;
 
@@ -112,4 +134,27 @@ impl Db {
         let mut rows: Vec<Pending> = self.sql.exec(select_query, None)?.to_array()?;
         Ok(rows.pop())
     }
+
+    /// Inserts one saved row for `item`, skipping duplicates for this message.
+    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<bool> {
+        let data = serde_json::to_string(&item.data())?;
+        let insert_query = "INSERT OR IGNORE INTO saved (message_id, media, content, title, description, data) \
+            VALUES (?, ?, ?, ?, ?, ?)";
+        let cursor = self.sql.exec(
+            insert_query,
+            Some(vec![
+                SqlStorageValue::Integer(message_id),
+                SqlStorageValue::String(item.get_type().to_string()),
+                SqlStorageValue::String(item.content()),
+                opt_sql(item.title()),
+                opt_sql(item.description()),
+                SqlStorageValue::String(data),
+            ]),
+        )?;
+        Ok(cursor.rows_written() > 0)
+    }
+}
+
+fn opt_sql(value: Option<&str>) -> SqlStorageValue {
+    value.map_or(SqlStorageValue::Null, |s| SqlStorageValue::String(s.to_string()))
 }
