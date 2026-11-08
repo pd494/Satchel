@@ -31,6 +31,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         &message.sender_id,
         &message.text,
         &message.event_id,
+        &message.message_id,
         &message.space_id,
     )
     .await?;

@@ -32,6 +32,8 @@ pub struct InboundMessage {
     pub text: String,
     /// The `webhook-id` header; Photon reuses it on retries.
     pub event_id: String,
+    /// Photon's id for the message (`pho_msg_...`), which a tapback points at.
+    pub message_id: String,
 }
 
 impl InboundMessage {
@@ -54,6 +56,7 @@ impl InboundMessage {
             space_id: field("/space/id")?,
             text: field("/content/text")?,
             event_id,
+            message_id: field("/id")?,
         })
     }
 }
@@ -116,6 +119,23 @@ impl PhotonClient {
             "spaceId": message.space_id,
         });
 
+        self.post("messages", request_body, idempotency_key).await
+    }
+
+    /// Puts `reaction` as a tapback on the message `parent_id` in `space_id`, as the bot.
+    pub async fn react(
+        &self,
+        space_id: &str,
+        parent_id: &str,
+        reaction: &str,
+        idempotency_key: &str,
+    ) -> worker::Result<()> {
+        let request_body = serde_json::json!({
+            "content": { "type": "reaction", "reaction": reaction },
+            "parentMessageId": parent_id,
+            "senderId": self.bot_id,
+            "spaceId": space_id,
+        });
         self.post("messages", request_body, idempotency_key).await
     }
 

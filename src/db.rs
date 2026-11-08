@@ -3,13 +3,13 @@ use serde::{Deserialize, Serialize};
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
 /// messages
-/// +----+-----------+------------------+----------+----------+----------+------------+
-/// | id | role      | content          | event_id | reply_to | attempts | created_at |
-/// +----+-----------+------------------+----------+----------+----------+------------+
-/// | 1  | user      | "what was that…" | evt_1    | NULL     | 0        | 1761600000 |
-/// +----+-----------+------------------+----------+----------+----------+------------+
-/// | 2  | assistant | "Sunset Lofts…"  | NULL     | evt_1    | 0        | 1761600002 |
-/// +----+-----------+------------------+----------+----------+----------+------------+
+/// +----+-----------+------------------+----------+-----------+----------+----------+------------+
+/// | id | role      | content          | event_id | photon_id | reply_to | attempts | created_at |
+/// +----+-----------+------------------+----------+-----------+----------+----------+------------+
+/// | 1  | user      | "what was that…" | evt_1    | pho_msg_… | NULL     | 0        | 1761600000 |
+/// +----+-----------+------------------+----------+-----------+----------+----------+------------+
+/// | 2  | assistant | "Sunset Lofts…"  | NULL     | NULL      | evt_1    | 0        | 1761600002 |
+/// +----+-----------+------------------+----------+-----------+----------+----------+------------+
 ///
 /// saved
 /// +----+------------+-------+------------------------+------------------+-------------+--------------------------+----------+------------+
@@ -24,10 +24,12 @@ CREATE TABLE IF NOT EXISTS messages (
     role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     content    TEXT NOT NULL,
     event_id   TEXT UNIQUE,
+    photon_id  TEXT,
     reply_to   TEXT UNIQUE REFERENCES messages(event_id),
     attempts   INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     CHECK ((role = 'user') = (event_id IS NOT NULL)),
+    CHECK ((role = 'user') = (photon_id IS NOT NULL)),
     CHECK ((role = 'assistant') = (reply_to IS NOT NULL))
 ) STRICT;
 
@@ -70,6 +72,8 @@ pub struct Saved {
 pub struct Pending {
     pub id: i64,
     pub event_id: String,
+    /// Photon's id for the message (`pho_msg_...`), which a tapback points at.
+    pub photon_id: String,
     pub content: String,
     /// Failed model calls so far.
     pub attempts: i64,
@@ -82,13 +86,19 @@ impl Db {
     }
 
     /// Inserts the user's message; returns `false` if `event_id` was already saved.
-    pub fn save_user_message(&self, event_id: &str, content: &str) -> Result<bool> {
-        let insert_query =
-            "INSERT OR IGNORE INTO messages (role, event_id, content) VALUES ('user', ?, ?)";
+    pub fn save_user_message(
+        &self,
+        event_id: &str,
+        photon_id: &str,
+        content: &str,
+    ) -> Result<bool> {
+        let insert_query = "INSERT OR IGNORE INTO messages (role, event_id, photon_id, content) \
+            VALUES ('user', ?, ?, ?)";
         let cursor = self.sql.exec(
             insert_query,
             Some(vec![
                 SqlStorageValue::String(event_id.to_string()),
+                SqlStorageValue::String(photon_id.to_string()),
                 SqlStorageValue::String(content.to_string()),
             ]),
         )?;
@@ -139,7 +149,7 @@ impl Db {
     /// Returns the oldest user message that has no reply yet.
     pub fn next_unanswered(&self) -> Result<Option<Pending>> {
         let select_query =
-            "SELECT id, event_id, content, attempts FROM messages AS m WHERE role = 'user' \
+            "SELECT id, event_id, photon_id, content, attempts FROM messages AS m WHERE role = 'user' \
             AND NOT EXISTS (SELECT 1 FROM messages WHERE reply_to = m.event_id) \
             ORDER BY id LIMIT 1";
         let mut rows: Vec<Pending> = self.sql.exec(select_query, None)?.to_array()?;

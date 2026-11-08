@@ -10,6 +10,18 @@ const MAX_ATTEMPTS: i64 = 3;
 /// Lowest Clef save confidence that stores a link-free message as a note.
 const MIN_NOTE_CONFIDENCE: f64 = 0.5;
 
+/// The tapback a saved message gets instead of a text reply.
+const SAVED_TAPBACK: &str = "👍";
+
+/// How Satchel answers one message.
+enum Reply {
+    Text(String),
+    /// A tapback on the user's message `on` (its Photon id).
+    Tapback {
+        on: String,
+    },
+}
+
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
 
@@ -29,8 +41,8 @@ impl Harness {
     }
 
     /// Saves an inbound text so `answer_pending` replies to it later.
-    pub fn receive(&self, event_id: &str, text: &str) -> Result<()> {
-        self.db.save_user_message(event_id, text)?;
+    pub fn receive(&self, event_id: &str, photon_id: &str, text: &str) -> Result<()> {
+        self.db.save_user_message(event_id, photon_id, text)?;
         Ok(())
     }
 
@@ -39,21 +51,23 @@ impl Harness {
     pub async fn answer_pending(&self, space_id: &str) -> Result<()> {
         while let Some(message) = self.db.next_unanswered()? {
             let context = self.db.load_history(message.id, 6)?;
-            let text = if context.len() == 1 {
-                GREETING.to_string()
+            let reply = if context.len() == 1 {
+                Reply::Text(GREETING.to_string())
             } else if message.attempts >= MAX_ATTEMPTS {
-                sorry(&message.content)
+                Reply::Text(sorry(&message.content))
             } else {
-                let result = async {
+                let result: Result<Reply> = async {
                     let saved_it = match self.agent.classify_intent(&message.content).await? {
                         Intent::Save { confidence } => self.save(&message, confidence).await?,
                         Intent::Search | Intent::Remind | Intent::Chat => false,
                     };
                     if saved_it {
-                        return Ok("Saved".to_string());
+                        return Ok(Reply::Tapback {
+                            on: message.photon_id.clone(),
+                        });
                     }
                     let saved = self.db.load_saved(20)?;
-                    self.agent.response(&context, &saved).await
+                    Ok(Reply::Text(self.agent.response(&context, &saved).await?))
                 }
                 .await;
                 if result.is_err() {
@@ -61,12 +75,23 @@ impl Harness {
                 }
                 result?
             };
-            let reply = OutboundMessage {
-                text,
-                space_id: space_id.to_string(),
+            let answer = match reply {
+                Reply::Text(text) => {
+                    let outbound = OutboundMessage {
+                        text,
+                        space_id: space_id.to_string(),
+                    };
+                    self.photon.send(&outbound, &message.event_id).await?;
+                    outbound.text
+                }
+                Reply::Tapback { on } => {
+                    self.photon
+                        .react(space_id, &on, SAVED_TAPBACK, &message.event_id)
+                        .await?;
+                    SAVED_TAPBACK.to_string()
+                }
             };
-            self.photon.send(&reply, &message.event_id).await?;
-            self.db.save_agent_message(&message.event_id, &reply.text)?;
+            self.db.save_agent_message(&message.event_id, &answer)?;
         }
         Ok(())
     }
