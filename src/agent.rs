@@ -3,11 +3,10 @@ use crate::media::Link;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::fmt::Write;
-use worker::{console_error, Ai, Date, Error, Result, Url};
+use worker::{console_error, Ai, Date, Error, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const CLEF: &str = "@cf/cloudflare/clef-flash";
-/// Lowest Clef `noul` that still keeps a bare match as a link.
 const KEEP_LINK: f64 = 0.1;
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 
