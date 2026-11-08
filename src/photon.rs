@@ -139,6 +139,22 @@ impl PhotonClient {
         self.post("messages", request_body, idempotency_key).await
     }
 
+    /// Marks the message `parent_id` in `space_id` as read, as the bot.
+    pub async fn mark_read(
+        &self,
+        space_id: &str,
+        parent_id: &str,
+        idempotency_key: &str,
+    ) -> worker::Result<()> {
+        let request_body = serde_json::json!({
+            "content": { "type": "message.read" },
+            "parentMessageId": parent_id,
+            "senderId": self.bot_id,
+            "spaceId": space_id,
+        });
+        self.post("messages", request_body, idempotency_key).await
+    }
+
     async fn post(
         &self,
         path: &str,

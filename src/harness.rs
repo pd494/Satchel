@@ -83,10 +83,13 @@ impl Harness {
                         .react(space_id, &on, SAVED_TAPBACK, &message.event_id);
                     match react.await {
                         Ok(()) => SAVED_TAPBACK.to_string(),
+                        // Shared Photon lines can't send tapbacks; a read receipt is the
+                        // quietest acknowledgement they allow.
                         Err(error) => {
-                            console_error!("tapback failed, replying with text: {error}");
-                            let key = format!("{}:text", message.event_id);
-                            self.send_text(space_id, "Saved".to_string(), &key).await?
+                            console_error!("tapback failed, marking read instead: {error}");
+                            let key = format!("{}:read", message.event_id);
+                            self.photon.mark_read(space_id, &on, &key).await?;
+                            "Saved".to_string()
                         }
                     }
                 }
