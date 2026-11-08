@@ -74,8 +74,7 @@ impl Harness {
                             on: message.photon_id.clone(),
                         });
                     }
-                    let saved = self.db.load_saved(20)?;
-                    Ok(Reply::Text(self.agent.response(&context, &saved).await?))
+                    Ok(Reply::Text(self.agent.response(&context).await?))
                 }
                 .await;
                 if result.is_err() {

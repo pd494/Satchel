@@ -1,10 +1,9 @@
-use crate::db::{Row, Saved};
+use crate::db::Row;
 use crate::media::Link;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::fmt::Write;
 use wasm_bindgen::JsValue;
-use worker::{console_error, Ai, Date, Error, Result};
+use worker::{console_error, Ai, Error, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const CLEF: &str = "@cf/cloudflare/clef-flash";
@@ -47,16 +46,12 @@ impl Agent {
         Self { ai }
     }
 
-    pub async fn response(&self, history: &[Row], saved: &[Saved]) -> Result<String> {
+    pub async fn response(&self, history: &[Row]) -> Result<String> {
         let system = Row {
             role: "system".into(),
             content: SYSTEM_PROMPT.into(),
         };
-        let saved = Row {
-            role: "system".into(),
-            content: saved_prompt(saved),
-        };
-        let mut messages = vec![&system, &saved];
+        let mut messages = vec![&system];
         messages.extend(history);
         let request = ChatRequest {
             messages,
@@ -142,20 +137,4 @@ impl Agent {
             .map(|(_, link)| link)
             .collect()
     }
-}
-
-/// Lists the user's saved items for the model, so it can answer "what was that…?".
-fn saved_prompt(saved: &[Saved]) -> String {
-    let mut prompt = format!("Today is {}.\n", Date::now());
-    if saved.is_empty() {
-        prompt.push_str("The user has saved nothing yet.");
-        return prompt;
-    }
-    prompt.push_str(
-        "The user's saved items, newest first. Whenever you mention a saved link, include its full URL.\n",
-    );
-    for item in saved {
-        let _ = writeln!(prompt, "- {item}");
-    }
-    prompt
 }

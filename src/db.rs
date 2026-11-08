@@ -1,6 +1,5 @@
 use crate::media::Media;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
 /// messages
@@ -56,28 +55,6 @@ pub struct Db {
 pub struct Row {
     pub role: String,
     pub content: String,
-}
-
-/// One `saved` row, as the agent sees it.
-#[derive(Deserialize)]
-pub struct Saved {
-    pub media: String,
-    pub content: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    /// `YYYY-MM-DD`, in UTC.
-    pub saved_on: String,
-}
-
-/// Reads as `2026-11-08 link: https://… | title | description`, one line of the agent's prompt.
-impl fmt::Display for Saved {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} {}: {}", self.saved_on, self.media, self.content)?;
-        for extra in [&self.title, &self.description].into_iter().flatten() {
-            write!(f, " | {extra}")?;
-        }
-        Ok(())
-    }
 }
 
 #[derive(Deserialize)]
@@ -186,19 +163,6 @@ impl Db {
             ]),
         )?;
         Ok(cursor.rows_written() > 0)
-    }
-
-    /// Returns the newest `limit` saved rows, newest first.
-    pub fn load_saved(&self, limit: usize) -> Result<Vec<Saved>> {
-        let select_query = "SELECT media, content, title, description, \
-            date(created_at, 'unixepoch') AS saved_on \
-            FROM saved ORDER BY id DESC LIMIT ?";
-        self.sql
-            .exec(
-                select_query,
-                Some(vec![SqlStorageValue::Integer(limit as i64)]),
-            )?
-            .to_array()
     }
 }
 
