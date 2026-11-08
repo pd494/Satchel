@@ -2,7 +2,7 @@ use crate::agent::{Agent, Intent};
 use crate::db::{Db, Pending};
 use crate::media::{Link, Note};
 use crate::photon::{OutboundMessage, PhotonClient};
-use worker::{Env, Result, SqlStorage};
+use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls before a message gets `sorry` instead.
 const MAX_ATTEMPTS: i64 = 3;
@@ -76,24 +76,39 @@ impl Harness {
                 result?
             };
             let answer = match reply {
-                Reply::Text(text) => {
-                    let outbound = OutboundMessage {
-                        text,
-                        space_id: space_id.to_string(),
-                    };
-                    self.photon.send(&outbound, &message.event_id).await?;
-                    outbound.text
-                }
+                Reply::Text(text) => self.send_text(space_id, text, &message.event_id).await?,
                 Reply::Tapback { on } => {
-                    self.photon
-                        .react(space_id, &on, SAVED_TAPBACK, &message.event_id)
-                        .await?;
-                    SAVED_TAPBACK.to_string()
+                    let react = self
+                        .photon
+                        .react(space_id, &on, SAVED_TAPBACK, &message.event_id);
+                    match react.await {
+                        Ok(()) => SAVED_TAPBACK.to_string(),
+                        Err(error) => {
+                            console_error!("tapback failed, replying with text: {error}");
+                            let key = format!("{}:text", message.event_id);
+                            self.send_text(space_id, "Saved".to_string(), &key).await?
+                        }
+                    }
                 }
             };
             self.db.save_agent_message(&message.event_id, &answer)?;
         }
         Ok(())
+    }
+
+    /// Sends `text` into `space_id` and returns it, for the history.
+    async fn send_text(
+        &self,
+        space_id: &str,
+        text: String,
+        idempotency_key: &str,
+    ) -> Result<String> {
+        let outbound = OutboundMessage {
+            text,
+            space_id: space_id.to_string(),
+        };
+        self.photon.send(&outbound, idempotency_key).await?;
+        Ok(outbound.text)
     }
 
     /// Saves every link in `message`, or the whole text as a note when it has none.
