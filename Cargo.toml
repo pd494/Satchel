@@ -22,6 +22,8 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6.1"
 rig = { version = "0.45.0", package = "rig-core", default-features = false }
+# Encodes the Photon iMessage gRPC requests.
+prost = { version = "0.14.4", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = "s"

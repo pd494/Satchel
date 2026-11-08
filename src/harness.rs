@@ -1,6 +1,6 @@
 use crate::agent::Agent;
 use crate::db::Db;
-use crate::photon::{OutboundMessage, PhotonClient};
+use crate::photon::PhotonClient;
 use worker::{Env, Result, SqlStorage};
 
 /// Failed model calls before a message gets `sorry` instead.
@@ -46,12 +46,8 @@ impl Harness {
                 }
                 response?
             };
-            let reply = OutboundMessage {
-                text,
-                space_id: space_id.to_string(),
-            };
-            self.photon.send(&reply, &message.event_id).await?;
-            self.db.save_agent_message(&message.event_id, &reply.text)?;
+            self.photon.send(space_id, &text, &message.event_id).await?;
+            self.db.save_agent_message(&message.event_id, &text)?;
         }
         Ok(())
     }
