@@ -16,7 +16,6 @@ concurrency:
 jobs:
   deploy:
     name: Deploy to Cloudflare
-    # Only pd494 (user id 63752034), only from this repo, never from a fork.
     if: >-
       github.actor_id == '63752034' &&
       github.triggering_actor == 'pd494' &&
