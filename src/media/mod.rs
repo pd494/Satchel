@@ -3,7 +3,7 @@
 mod link;
 mod note;
 
-pub use link::{find_links, Bare, Found, Link};
+pub use link::Link;
 pub use note::Note;
 use serde_json::{json, Value};
 

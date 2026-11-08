@@ -4,45 +4,6 @@ use worker::Url;
 
 use super::Media;
 
-/// Links in one message, split by how sure we are.
-#[derive(Default)]
-pub struct Found {
-    /// Typed with a scheme, like `https://zillow.com/x`.
-    pub sure: Vec<Url>,
-    /// No scheme, like `pd494.ai`. Could be a file name instead.
-    pub bare: Vec<Bare>,
-}
-
-/// A schemeless match: the text as typed, and the URL with `https://` added.
-pub struct Bare {
-    pub text: String,
-    pub url: Url,
-}
-
-/// Finds every link in `text`, with or without a scheme.
-pub fn find_links(text: &str) -> Found {
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url]).url_must_have_scheme(false);
-    let mut found = Found::default();
-    for link in finder.links(text) {
-        let raw = link
-            .as_str()
-            .trim_matches(|c: char| !c.is_ascii() && !c.is_alphanumeric());
-        match Url::parse(raw) {
-            Ok(url) if url.has_host() => found.sure.push(url),
-            _ => {
-                if let Ok(url) = Url::parse(&format!("https://{raw}")) {
-                    found.bare.push(Bare {
-                        text: raw.to_string(),
-                        url,
-                    });
-                }
-            }
-        }
-    }
-    found
-}
-
 #[derive(Debug)]
 pub struct Link {
     pub url: Url,
@@ -82,6 +43,26 @@ impl Media for Link {
 }
 
 impl Link {
+    /// Finds every link in `text`, with or without a scheme, each paired with the text as typed.
+    /// A match with no scheme gets `https://`.
+    pub fn find_all(text: &str) -> Vec<(&str, Link)> {
+        let mut finder = LinkFinder::new();
+        finder.kinds(&[LinkKind::Url]).url_must_have_scheme(false);
+        finder
+            .links(text)
+            .filter_map(|found| {
+                let typed = found
+                    .as_str()
+                    .trim_matches(|c: char| !c.is_ascii() && !c.is_alphanumeric());
+                let url = Url::parse(typed)
+                    .ok()
+                    .filter(Url::has_host)
+                    .or_else(|| Url::parse(&format!("https://{typed}")).ok())?;
+                Some((typed, Link::bare(url)))
+            })
+            .collect()
+    }
+
     pub(crate) fn bare(url: Url) -> Link {
         Link {
             url,

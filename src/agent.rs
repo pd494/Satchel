@@ -1,5 +1,5 @@
 use crate::db::{Row, Saved};
-use crate::media::Bare;
+use crate::media::Link;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::fmt::Write;
@@ -97,23 +97,25 @@ impl Agent {
         }
     }
 
-    /// Keeps each bare match unless Clef is sure it isn't a website.
+    /// Keeps every link typed with a scheme, and each bare one unless Clef is sure it isn't a
+    /// website. Clef sees the text as typed: `node.js` reads as a file, `https://node.js` doesn't.
     /// If Clef fails, keeps them all: a wrong link costs less than a lost one.
-    pub async fn check_links(&self, content: &str, bare: Vec<Bare>) -> Vec<Url> {
-        if bare.is_empty() {
-            return Vec::new();
-        }
-        let questions: Map<String, Value> = bare
+    pub async fn check_links(&self, content: &str, found: Vec<(&str, Link)>) -> Vec<Link> {
+        let questions: Map<String, Value> = found
             .iter()
             .enumerate()
-            .map(|(i, candidate)| {
-                let instructions = format!("Is `{}` meant as a website address?", candidate.text);
+            .filter(|(_, (typed, _))| !typed.contains("://"))
+            .map(|(i, (typed, _))| {
+                let instructions = format!("Is `{typed}` meant as a website address?");
                 (
                     format!("link.{i}"),
                     json!({ "type": "noul", "instructions": instructions }),
                 )
             })
             .collect();
+        if questions.is_empty() {
+            return found.into_iter().map(|(_, link)| link).collect();
+        }
         let body = json!({ "model": "clef-flash", "state": content, "questions": questions });
 
         let answers = match self.ai.run::<_, Value>(CLEF, body).await {
@@ -123,14 +125,15 @@ impl Agent {
                 Value::Null
             }
         };
-        bare.into_iter()
+        found
+            .into_iter()
             .enumerate()
             .filter(|(i, _)| {
                 answers[format!("link.{i}").as_str()]["noul"]
                     .as_f64()
                     .is_none_or(|p| p >= KEEP_LINK)
             })
-            .map(|(_, candidate)| candidate.url)
+            .map(|(_, (_, link))| link)
             .collect()
     }
 }

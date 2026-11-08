@@ -1,6 +1,6 @@
 use crate::agent::{Agent, Intent};
 use crate::db::{Db, Pending};
-use crate::media::{find_links, Found, Link, Note};
+use crate::media::{Link, Note};
 use crate::photon::{OutboundMessage, PhotonClient};
 use worker::{Env, Result, SqlStorage};
 
@@ -71,16 +71,16 @@ impl Harness {
 
     /// Saves every link in `message`, or the whole text as a note when it has none.
     async fn save(&self, message: &Pending) -> Result<()> {
-        let Found { mut sure, bare } = find_links(&message.content);
-        sure.extend(self.agent.check_links(&message.content, bare).await);
-        if sure.is_empty() {
+        let found = Link::find_all(&message.content);
+        let links = self.agent.check_links(&message.content, found).await;
+        if links.is_empty() {
             let note = Note {
                 text: message.content.clone(),
             };
             self.db.insert_saved(message.id, &note)?;
         }
-        for url in sure {
-            self.db.insert_saved(message.id, &Link::bare(url))?;
+        for link in &links {
+            self.db.insert_saved(message.id, link)?;
         }
         Ok(())
     }
