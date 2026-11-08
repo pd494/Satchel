@@ -701,6 +701,7 @@ dependencies = [
  "linkify",
  "rig-core",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "sha2",
  "subtle",

@@ -7,6 +7,9 @@ use worker::{Env, Result, SqlStorage};
 /// Failed model calls before a message gets `sorry` instead.
 const MAX_ATTEMPTS: i64 = 3;
 
+/// Lowest Clef save confidence that stores a link-free message as a note.
+const MIN_NOTE_CONFIDENCE: f64 = 0.5;
+
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
 
@@ -42,16 +45,15 @@ impl Harness {
                 sorry(&message.content)
             } else {
                 let result = async {
-                    match self.agent.classify_intent(&message.content).await? {
-                        Intent::Save => {
-                            self.save(&message).await?;
-                            Ok("Saved".to_string())
-                        }
-                        Intent::Search | Intent::Remind | Intent::Chat => {
-                            let saved = self.db.load_saved(20)?;
-                            self.agent.response(&context, &saved).await
-                        }
+                    let saved_it = match self.agent.classify_intent(&message.content).await? {
+                        Intent::Save { confidence } => self.save(&message, confidence).await?,
+                        Intent::Search | Intent::Remind | Intent::Chat => false,
+                    };
+                    if saved_it {
+                        return Ok("Saved".to_string());
                     }
+                    let saved = self.db.load_saved(20)?;
+                    self.agent.response(&context, &saved).await
                 }
                 .await;
                 if result.is_err() {
@@ -70,10 +72,15 @@ impl Harness {
     }
 
     /// Saves every link in `message`, or the whole text as a note when it has none.
-    async fn save(&self, message: &Pending) -> Result<()> {
+    /// Returns `false`, saving nothing, for a link-free message that Clef was unsure about:
+    /// that is usually a question ("send me the chili recipe"), so it gets an answer instead.
+    async fn save(&self, message: &Pending, confidence: f64) -> Result<bool> {
         let found = Link::find_all(&message.content);
         let links = self.agent.check_links(&message.content, found).await;
         if links.is_empty() {
+            if confidence < MIN_NOTE_CONFIDENCE {
+                return Ok(false);
+            }
             let note = Note {
                 text: message.content.clone(),
             };
@@ -82,7 +89,7 @@ impl Harness {
         for link in &links {
             self.db.insert_saved(message.id, link)?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 

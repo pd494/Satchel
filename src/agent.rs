@@ -3,6 +3,7 @@ use crate::media::Link;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::fmt::Write;
+use wasm_bindgen::JsValue;
 use worker::{console_error, Ai, Date, Error, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
@@ -16,9 +17,11 @@ pub struct Agent {
     ai: Ai,
 }
 
-#[derive(PartialEq, Eq)]
 pub(crate) enum Intent {
-    Save,
+    /// `confidence` is Clef's 0–1 certainty that this is a save.
+    Save {
+        confidence: f64,
+    },
     Search,
     Remind,
     Chat,
@@ -28,6 +31,16 @@ pub(crate) enum Intent {
 struct ChatRequest<'a> {
     messages: Vec<&'a Row>,
     chat_template_kwargs: ChatTemplateKwargs,
+}
+
+/// Workers AI turns Rust maps into JS `Map`s, which Clef rejects. `questions` has dynamic keys
+/// (`link.0`, ...), so it is built as a plain JS object up front and passed through as is.
+#[derive(Serialize)]
+struct ClefRequest<'a> {
+    model: &'static str,
+    state: &'a str,
+    #[serde(with = "serde_wasm_bindgen::preserve")]
+    questions: JsValue,
 }
 
 #[derive(Serialize)]
@@ -67,28 +80,38 @@ impl Agent {
             .ok_or_else(|| Error::RustError(format!("no reply text in {response}")))
     }
 
+    /// Asks Clef `questions` about `state` and returns its `answers`.
+    async fn ask_clef(&self, state: &str, questions: &Value) -> Result<Value> {
+        let questions = questions.serialize(&serde_wasm_bindgen::Serializer::json_compatible())?;
+        let request = ClefRequest {
+            model: "clef-flash",
+            state,
+            questions,
+        };
+        let out: Value = self.ai.run(CLEF, request).await?;
+        Ok(out["answers"].clone())
+    }
+
     pub async fn classify_intent(&self, content: &str) -> Result<Intent> {
-        let body = json!({
-            "model": "clef-flash",
-            "state": content,
-            "questions": {
+        let questions = json!({
                 "intent": {
                     "type": "choice",
-                    "instructions": "What is the user trying to do?",
+                    "instructions": "The user is texting Satchel, an app that saves what they send and finds it later. What does this message do?",
                     "criteria": {
-                        "save": "Store a link, note, or media for later",
-                        "search": "Find something they saved before",
-                        "remind": "Set a reminder or schedule something",
-                        "chat": "Greeting or off-topic; not save/search"
+                        "save": "Shares a link, photo, or note, or asks to keep or remember something. Sharing a link counts even with casual comments around it.",
+                        "search": "Asks about or wants back something they saved before",
+                        "remind": "Asks to be reminded at a later time",
+                        "chat": "Greeting, thanks, reaction, or off-topic, with nothing to keep and nothing to find"
                     }
                 }
-            }
         });
 
-        let out: Value = self.ai.run(CLEF, body).await?;
-        let choice = out["answers"]["intent"]["choice"].as_str();
-        match choice {
-            Some("save") => Ok(Intent::Save),
+        let answers = self.ask_clef(content, &questions).await?;
+        let intent = &answers["intent"];
+        match intent["choice"].as_str() {
+            Some("save") => Ok(Intent::Save {
+                confidence: intent["confidence"].as_f64().unwrap_or(1.0),
+            }),
             Some("search") => Ok(Intent::Search),
             Some("remind") => Ok(Intent::Remind),
             Some("chat") => Ok(Intent::Chat),
@@ -115,10 +138,8 @@ impl Agent {
         if questions.is_empty() {
             return found.into_iter().map(|(_, link)| link).collect();
         }
-        let body = json!({ "model": "clef-flash", "state": content, "questions": questions });
-
-        let answers = match self.ai.run::<_, Value>(CLEF, body).await {
-            Ok(out) => out["answers"].clone(),
+        let answers = match self.ask_clef(content, &Value::Object(questions)).await {
+            Ok(answers) => answers,
             Err(error) => {
                 console_error!("check_links failed, keeping all: {error}");
                 Value::Null
@@ -145,7 +166,7 @@ fn saved_prompt(saved: &[Saved]) -> String {
         return prompt;
     }
     prompt.push_str(
-        "The user's saved items, newest first. When they ask about one, reply with its URL.\n",
+        "The user's saved items, newest first. Whenever you mention a saved link, include its full URL.\n",
     );
     for item in saved {
         let _ = write!(

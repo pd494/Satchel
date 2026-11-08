@@ -23,6 +23,7 @@ sha2 = "0.10"
 subtle = "2.6.1"
 rig = { version = "0.45.0", package = "rig-core", default-features = false }
 linkify = "0.11.0"
+serde-wasm-bindgen = "0.6.5"
 
 [profile.release]
 opt-level = "s"
