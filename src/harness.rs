@@ -50,6 +50,14 @@ impl Harness {
     /// `MAX_ATTEMPTS` times gets `sorry` instead, so it can't block the messages after it.
     pub async fn answer_pending(&self, space_id: &str) -> Result<()> {
         while let Some(message) = self.db.next_unanswered()? {
+            let read_key = format!("{}:read", message.event_id);
+            if let Err(error) = self
+                .photon
+                .mark_read(space_id, &message.photon_id, &read_key)
+                .await
+            {
+                console_error!("mark read failed: {error}");
+            }
             let context = self.db.load_history(message.id, 6)?;
             let reply = if context.len() == 1 {
                 Reply::Text(GREETING.to_string())
@@ -83,12 +91,10 @@ impl Harness {
                         .react(space_id, &on, SAVED_TAPBACK, &message.event_id);
                     match react.await {
                         Ok(()) => SAVED_TAPBACK.to_string(),
-                        // Shared Photon lines can't send tapbacks; a read receipt is the
-                        // quietest acknowledgement they allow.
+                        // Shared Photon lines can't send tapbacks. The message is already
+                        // marked read, which is the quietest acknowledgement they allow.
                         Err(error) => {
-                            console_error!("tapback failed, marking read instead: {error}");
-                            let key = format!("{}:read", message.event_id);
-                            self.photon.mark_read(space_id, &on, &key).await?;
+                            console_error!("tapback failed, leaving the read receipt: {error}");
                             "Saved".to_string()
                         }
                     }
