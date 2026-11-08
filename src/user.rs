@@ -10,7 +10,6 @@ use worker::{
 const EVENT_ID_HEADER: &str = "x-event-id";
 /// Header that carries the Photon space to reply into.
 const SPACE_ID_HEADER: &str = "x-space-id";
-const MESSAGE_ID_HEADER: &str = "x-message-id";
 /// Storage key for the space the alarm replies into.
 const SPACE_ID_KEY: &str = "space_id";
 
@@ -27,7 +26,6 @@ impl User {
         sender_id: &str,
         text: &str,
         event_id: &str,
-        message_id: &str,
         space_id: &str,
     ) -> Result<()> {
         let stub = env.durable_object("USER")?.get_by_name(sender_id)?;
@@ -35,7 +33,6 @@ impl User {
         let headers = Headers::new();
         headers.set(EVENT_ID_HEADER, event_id)?;
         headers.set(SPACE_ID_HEADER, space_id)?;
-        headers.set(MESSAGE_ID_HEADER, message_id)?;
         let request = Request::new_with_init(
             "https://do/",
             RequestInit::new()
@@ -73,17 +70,13 @@ impl DurableObject for User {
             .headers()
             .get(SPACE_ID_HEADER)?
             .ok_or_else(|| Error::RustError(format!("missing {SPACE_ID_HEADER}")))?;
-        let message_id = req
-            .headers()
-            .get(MESSAGE_ID_HEADER)?
-            .ok_or_else(|| Error::RustError(format!("missing {MESSAGE_ID_HEADER}")))?;
 
         if text.trim().eq_ignore_ascii_case("reset") {
             self.state.storage().delete_all().await?;
             Db::open(self.state.storage().sql())?;
         }
 
-        self.harness.receive(&event_id, &message_id, &text)?;
+        self.harness.receive(&event_id, &text)?;
         self.state.storage().put(SPACE_ID_KEY, &space_id).await?;
         self.state
             .storage()

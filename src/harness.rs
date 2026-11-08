@@ -1,7 +1,7 @@
 use crate::agent::{Agent, Intent};
 use crate::db::{Db, Pending};
 use crate::media::{Link, Note};
-use crate::photon::{OutboundMessage, PhotonClient};
+use crate::photon::PhotonClient;
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls before a message gets `sorry` instead.
@@ -16,10 +16,8 @@ const SAVED_TAPBACK: &str = "👍";
 /// How Satchel answers one message.
 enum Reply {
     Text(String),
-    /// A tapback on the user's message `on` (its Photon id).
-    Tapback {
-        on: String,
-    },
+    /// A tapback on the user's message.
+    Tapback,
 }
 
 const GREETING: &str =
@@ -41,8 +39,8 @@ impl Harness {
     }
 
     /// Saves an inbound text so `answer_pending` replies to it later.
-    pub fn receive(&self, event_id: &str, photon_id: &str, text: &str) -> Result<()> {
-        self.db.save_user_message(event_id, photon_id, text)?;
+    pub fn receive(&self, event_id: &str, text: &str) -> Result<()> {
+        self.db.save_user_message(event_id, text)?;
         Ok(())
     }
 
@@ -51,11 +49,7 @@ impl Harness {
     pub async fn answer_pending(&self, space_id: &str) -> Result<()> {
         while let Some(message) = self.db.next_unanswered()? {
             let read_key = format!("{}:read", message.event_id);
-            if let Err(error) = self
-                .photon
-                .mark_read(space_id, &message.photon_id, &read_key)
-                .await
-            {
+            if let Err(error) = self.photon.mark_read(space_id, &read_key).await {
                 console_error!("mark read failed: {error}");
             }
             let context = self.db.load_history(message.id, 6)?;
@@ -70,9 +64,7 @@ impl Harness {
                         (Intent::Search | Intent::Remind | Intent::Chat, _) => false,
                     };
                     if saved_it {
-                        return Ok(Reply::Tapback {
-                            on: message.photon_id.clone(),
-                        });
+                        return Ok(Reply::Tapback);
                     }
                     let saved = self.db.load_saved(20)?;
                     Ok(Reply::Text(self.agent.response(&context, &saved).await?))
@@ -84,40 +76,19 @@ impl Harness {
                 result?
             };
             let answer = match reply {
-                Reply::Text(text) => self.send_text(space_id, text, &message.event_id).await?,
-                Reply::Tapback { on } => {
-                    let react = self
-                        .photon
-                        .react(space_id, &on, SAVED_TAPBACK, &message.event_id);
-                    match react.await {
-                        Ok(()) => SAVED_TAPBACK.to_string(),
-                        // Shared Photon lines can't send tapbacks. The message is already
-                        // marked read, which is the quietest acknowledgement they allow.
-                        Err(error) => {
-                            console_error!("tapback failed, leaving the read receipt: {error}");
-                            "Saved".to_string()
-                        }
-                    }
+                Reply::Text(text) => {
+                    self.photon.send(space_id, &text, &message.event_id).await?;
+                    text
+                }
+                Reply::Tapback => {
+                    let id = &message.event_id;
+                    self.photon.like(space_id, id, id).await?;
+                    SAVED_TAPBACK.to_string()
                 }
             };
             self.db.save_agent_message(&message.event_id, &answer)?;
         }
         Ok(())
-    }
-
-    /// Sends `text` into `space_id` and returns it, for the history.
-    async fn send_text(
-        &self,
-        space_id: &str,
-        text: String,
-        idempotency_key: &str,
-    ) -> Result<String> {
-        let outbound = OutboundMessage {
-            text,
-            space_id: space_id.to_string(),
-        };
-        self.photon.send(&outbound, idempotency_key).await?;
-        Ok(outbound.text)
     }
 
     /// Saves every link in `message`, or the whole text as a note when it has none.

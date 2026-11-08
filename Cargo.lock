@@ -600,6 +600,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -699,6 +708,7 @@ dependencies = [
  "base64 0.23.1",
  "hmac",
  "linkify",
+ "prost",
  "rig-core",
  "serde",
  "serde-wasm-bindgen",
