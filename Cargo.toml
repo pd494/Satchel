@@ -22,9 +22,6 @@ hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6.1"
 rig = { version = "0.45.0", package = "rig-core", default-features = false }
-lol_html = "3.0.3"
-html-escape = "0.3.0"
-futures-util = "0.3.34"
 linkify = "0.11.0"
 
 [profile.release]

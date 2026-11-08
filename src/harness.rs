@@ -48,14 +48,15 @@ impl Harness {
                             Ok("Saved".to_string())
                         }
                         Intent::Search | Intent::Remind | Intent::Chat => {
-                            self.agent.response(&context).await
+                            let saved = self.db.load_saved(20)?;
+                            self.agent.response(&context, &saved).await
                         }
                     }
                 }
                 .await;
                 if result.is_err() {
                     self.db.record_failure(&message.event_id)?;
-                } 
+                }
                 result?
             };
             let reply = OutboundMessage {
@@ -73,7 +74,9 @@ impl Harness {
         let Found { mut sure, bare } = find_links(&message.content);
         sure.extend(self.agent.check_links(&message.content, bare).await);
         if sure.is_empty() {
-            let note = Note { text: message.content.clone() };
+            let note = Note {
+                text: message.content.clone(),
+            };
             self.db.insert_saved(message.id, &note)?;
         }
         for url in sure {

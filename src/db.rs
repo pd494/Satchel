@@ -55,6 +55,17 @@ pub struct Row {
     pub content: String,
 }
 
+/// One `saved` row, as the agent sees it.
+#[derive(Deserialize)]
+pub struct Saved {
+    pub media: String,
+    pub content: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    /// `YYYY-MM-DD`, in UTC.
+    pub saved_on: String,
+}
+
 #[derive(Deserialize)]
 pub struct Pending {
     pub id: i64,
@@ -138,7 +149,8 @@ impl Db {
     /// Inserts one saved row for `item`, skipping duplicates for this message.
     pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<bool> {
         let data = serde_json::to_string(&item.data())?;
-        let insert_query = "INSERT OR IGNORE INTO saved (message_id, media, content, title, description, data) \
+        let insert_query =
+            "INSERT OR IGNORE INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?)";
         let cursor = self.sql.exec(
             insert_query,
@@ -153,8 +165,23 @@ impl Db {
         )?;
         Ok(cursor.rows_written() > 0)
     }
+
+    /// Returns the newest `limit` saved rows, newest first.
+    pub fn load_saved(&self, limit: usize) -> Result<Vec<Saved>> {
+        let select_query = "SELECT media, content, title, description, \
+            date(created_at, 'unixepoch') AS saved_on \
+            FROM saved ORDER BY id DESC LIMIT ?";
+        self.sql
+            .exec(
+                select_query,
+                Some(vec![SqlStorageValue::Integer(limit as i64)]),
+            )?
+            .to_array()
+    }
 }
 
 fn opt_sql(value: Option<&str>) -> SqlStorageValue {
-    value.map_or(SqlStorageValue::Null, |s| SqlStorageValue::String(s.to_string()))
+    value.map_or(SqlStorageValue::Null, |s| {
+        SqlStorageValue::String(s.to_string())
+    })
 }

@@ -1,8 +1,9 @@
-use crate::db::Row;
+use crate::db::{Row, Saved};
 use crate::media::Bare;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use worker::{console_error, Ai, Error, Result, Url};
+use std::fmt::Write;
+use worker::{console_error, Ai, Date, Error, Result, Url};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const CLEF: &str = "@cf/cloudflare/clef-flash";
@@ -40,12 +41,16 @@ impl Agent {
         Self { ai }
     }
 
-    pub async fn response(&self, history: &[Row]) -> Result<String> {
+    pub async fn response(&self, history: &[Row], saved: &[Saved]) -> Result<String> {
         let system = Row {
             role: "system".into(),
             content: SYSTEM_PROMPT.into(),
         };
-        let mut messages = vec![&system];
+        let saved = Row {
+            role: "system".into(),
+            content: saved_prompt(saved),
+        };
+        let mut messages = vec![&system, &saved];
         messages.extend(history);
         let request = ChatRequest {
             messages,
@@ -103,7 +108,10 @@ impl Agent {
             .enumerate()
             .map(|(i, candidate)| {
                 let instructions = format!("Is `{}` meant as a website address?", candidate.text);
-                (format!("link.{i}"), json!({ "type": "noul", "instructions": instructions }))
+                (
+                    format!("link.{i}"),
+                    json!({ "type": "noul", "instructions": instructions }),
+                )
             })
             .collect();
         let body = json!({ "model": "clef-flash", "state": content, "questions": questions });
@@ -120,9 +128,33 @@ impl Agent {
             .filter(|(i, _)| {
                 answers[format!("link.{i}").as_str()]["noul"]
                     .as_f64()
-                    .map_or(true, |p| p >= KEEP_LINK)
+                    .is_none_or(|p| p >= KEEP_LINK)
             })
             .map(|(_, candidate)| candidate.url)
             .collect()
     }
+}
+
+/// Lists the user's saved items for the model, so it can answer "what was that…?".
+fn saved_prompt(saved: &[Saved]) -> String {
+    let mut prompt = format!("Today is {}.\n", Date::now());
+    if saved.is_empty() {
+        prompt.push_str("The user has saved nothing yet.");
+        return prompt;
+    }
+    prompt.push_str(
+        "The user's saved items, newest first. When they ask about one, reply with its URL.\n",
+    );
+    for item in saved {
+        let _ = write!(
+            prompt,
+            "- {} {}: {}",
+            item.saved_on, item.media, item.content
+        );
+        for extra in [&item.title, &item.description].into_iter().flatten() {
+            let _ = write!(prompt, " | {extra}");
+        }
+        prompt.push('\n');
+    }
+    prompt
 }
