@@ -66,8 +66,8 @@ impl Harness {
             } else {
                 let result: Result<Reply> = async {
                     let saved_it = match self.agent.classify_intent(&message.content).await? {
-                        Intent::Save { confidence } => self.save(&message, confidence).await?,
-                        Intent::Search | Intent::Remind | Intent::Chat => false,
+                        (Intent::Save, confidence) => self.save(&message, confidence).await?,
+                        (Intent::Search | Intent::Remind | Intent::Chat, _) => false,
                     };
                     if saved_it {
                         return Ok(Reply::Tapback {

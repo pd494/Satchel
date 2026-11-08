@@ -1,6 +1,6 @@
 use crate::db::{Row, Saved};
 use crate::media::Link;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fmt::Write;
 use wasm_bindgen::JsValue;
@@ -17,11 +17,10 @@ pub struct Agent {
     ai: Ai,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum Intent {
-    /// `confidence` is Clef's 0–1 certainty that this is a save.
-    Save {
-        confidence: f64,
-    },
+    Save,
     Search,
     Remind,
     Chat,
@@ -33,15 +32,10 @@ struct ChatRequest<'a> {
     chat_template_kwargs: ChatTemplateKwargs,
 }
 
-/// Workers AI turns Rust maps into JS `Map`s, which Clef rejects. `questions` has dynamic keys
-/// (`link.0`, ...), so it is built as a plain JS object up front and passed through as is.
+/// A JS value handed to Workers AI as is. Workers AI would turn a `json!` object into a JS `Map`,
+/// which Clef rejects, so the request is converted to a plain JS object first.
 #[derive(Serialize)]
-struct ClefRequest<'a> {
-    model: &'static str,
-    state: &'a str,
-    #[serde(with = "serde_wasm_bindgen::preserve")]
-    questions: JsValue,
-}
+struct Js(#[serde(with = "serde_wasm_bindgen::preserve")] JsValue);
 
 #[derive(Serialize)]
 struct ChatTemplateKwargs {
@@ -81,18 +75,15 @@ impl Agent {
     }
 
     /// Asks Clef `questions` about `state` and returns its `answers`.
-    async fn ask_clef(&self, state: &str, questions: &Value) -> Result<Value> {
-        let questions = questions.serialize(&serde_wasm_bindgen::Serializer::json_compatible())?;
-        let request = ClefRequest {
-            model: "clef-flash",
-            state,
-            questions,
-        };
-        let out: Value = self.ai.run(CLEF, request).await?;
+    async fn ask_clef(&self, state: &str, questions: Value) -> Result<Value> {
+        let request = json!({ "model": "clef-flash", "state": state, "questions": questions })
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())?;
+        let out: Value = self.ai.run(CLEF, Js(request)).await?;
         Ok(out["answers"].clone())
     }
 
-    pub async fn classify_intent(&self, content: &str) -> Result<Intent> {
+    /// Returns the intent and Clef's 0–1 confidence in it.
+    pub async fn classify_intent(&self, content: &str) -> Result<(Intent, f64)> {
         let questions = json!({
                 "intent": {
                     "type": "choice",
@@ -106,29 +97,24 @@ impl Agent {
                 }
         });
 
-        let answers = self.ask_clef(content, &questions).await?;
-        let intent = &answers["intent"];
-        match intent["choice"].as_str() {
-            Some("save") => Ok(Intent::Save {
-                confidence: intent["confidence"].as_f64().unwrap_or(1.0),
-            }),
-            Some("search") => Ok(Intent::Search),
-            Some("remind") => Ok(Intent::Remind),
-            Some("chat") => Ok(Intent::Chat),
-            other => Err(Error::RustError(format!("unknown intent: {other:?}"))),
-        }
+        let answer = self.ask_clef(content, questions).await?["intent"].take();
+        let confidence = answer["confidence"].as_f64().unwrap_or(1.0);
+        Ok((
+            serde_json::from_value(answer["choice"].clone())?,
+            confidence,
+        ))
     }
 
     /// Keeps every link typed with a scheme, and each bare one unless Clef is sure it isn't a
     /// website. Clef sees the text as typed: `node.js` reads as a file, `https://node.js` doesn't.
     /// If Clef fails, keeps them all: a wrong link costs less than a lost one.
-    pub async fn check_links(&self, content: &str, found: Vec<(&str, Link)>) -> Vec<Link> {
+    pub async fn check_links(&self, content: &str, found: Vec<Link>) -> Vec<Link> {
         let questions: Map<String, Value> = found
             .iter()
             .enumerate()
-            .filter(|(_, (typed, _))| !typed.contains("://"))
-            .map(|(i, (typed, _))| {
-                let instructions = format!("Is `{typed}` meant as a website address?");
+            .filter(|(_, link)| !link.typed.contains("://"))
+            .map(|(i, link)| {
+                let instructions = format!("Is `{}` meant as a website address?", link.typed);
                 (
                     format!("link.{i}"),
                     json!({ "type": "noul", "instructions": instructions }),
@@ -136,9 +122,9 @@ impl Agent {
             })
             .collect();
         if questions.is_empty() {
-            return found.into_iter().map(|(_, link)| link).collect();
+            return found;
         }
-        let answers = match self.ask_clef(content, &Value::Object(questions)).await {
+        let answers = match self.ask_clef(content, Value::Object(questions)).await {
             Ok(answers) => answers,
             Err(error) => {
                 console_error!("check_links failed, keeping all: {error}");
@@ -153,7 +139,7 @@ impl Agent {
                     .as_f64()
                     .is_none_or(|p| p >= KEEP_LINK)
             })
-            .map(|(_, (_, link))| link)
+            .map(|(_, link)| link)
             .collect()
     }
 }
@@ -169,15 +155,7 @@ fn saved_prompt(saved: &[Saved]) -> String {
         "The user's saved items, newest first. Whenever you mention a saved link, include its full URL.\n",
     );
     for item in saved {
-        let _ = write!(
-            prompt,
-            "- {} {}: {}",
-            item.saved_on, item.media, item.content
-        );
-        for extra in [&item.title, &item.description].into_iter().flatten() {
-            let _ = write!(prompt, " | {extra}");
-        }
-        prompt.push('\n');
+        let _ = writeln!(prompt, "- {item}");
     }
     prompt
 }

@@ -1,5 +1,6 @@
 use crate::media::Media;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
 /// messages
@@ -66,6 +67,17 @@ pub struct Saved {
     pub description: Option<String>,
     /// `YYYY-MM-DD`, in UTC.
     pub saved_on: String,
+}
+
+/// Reads as `2026-11-08 link: https://… | title | description`, one line of the agent's prompt.
+impl fmt::Display for Saved {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} {}: {}", self.saved_on, self.media, self.content)?;
+        for extra in [&self.title, &self.description].into_iter().flatten() {
+            write!(f, " | {extra}")?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]

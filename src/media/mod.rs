@@ -7,7 +7,6 @@ pub use link::Link;
 pub use note::Note;
 use serde_json::{json, Value};
 
-/// What the Harness and `Db` need from any saved thing.
 pub trait Media {
     /// The value for `saved.media`.
     fn get_type(&self) -> &'static str;
