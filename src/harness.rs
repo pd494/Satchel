@@ -1,6 +1,6 @@
 use crate::agent::Agent;
 use crate::db::{Db, Pending};
-use crate::linq::{LinqClient, OutboundMessage, Part};
+use crate::linq::{LinqClient, OutboundMessage};
 use crate::media::Link;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -45,19 +45,20 @@ impl Harness {
     /// Replies to every unanswered message, oldest first. After `MAX_ATTEMPTS` failures, a
     /// message gets `SORRY`, and it is marked answered even if that send fails.
     pub async fn answer_pending(&self, space_id: &str) -> Result<()> {
+        if let Err(error) = self.linq.mark_read(space_id).await {
+            console_error!("mark read failed: {error}");
+        }
         while let Some(message) = self.db.next_unanswered()? {
-            if let Err(error) = self.linq.mark_read(space_id).await {
-                console_error!("mark read failed: {error}");
-            }
-            let context = self.db.load_history(message.id, 6)?;
-            let reply = if context.len() == 1 {
-                Reply::Text(GREETING.to_string())
-            } else if message.attempts >= MAX_ATTEMPTS {
+            let reply = if message.attempts >= MAX_ATTEMPTS {
                 Reply::Text(SORRY.to_string())
             } else {
                 let result: Result<Reply> = async {
                     if self.save(&message).await? {
                         return Ok(Reply::Tapback);
+                    }
+                    let context = self.db.load_history(message.id, 6)?;
+                    if context.len() == 1 {
+                        return Ok(Reply::Text(GREETING.to_string()));
                     }
                     Ok(Reply::Text(self.agent.response(&context).await?))
                 }
@@ -70,14 +71,10 @@ impl Harness {
             let (answer, sent) = match reply {
                 Reply::Text(text) => {
                     let (rest, links) = Link::split(&text);
-                    let mut parts = Vec::new();
-                    if !rest.is_empty() {
-                        parts.push(Part::Text(rest));
-                    }
-                    parts.extend(links.iter().map(|link| Part::Link(link.url.to_string())));
                     let outbound = OutboundMessage {
                         space_id: space_id.to_string(),
-                        parts,
+                        text: rest,
+                        links,
                         idempotency_key: message.event_id.clone(),
                     };
                     let sent = self.linq.send(&outbound).await;

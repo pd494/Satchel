@@ -27,8 +27,6 @@ struct ChatMessage<'a> {
     content: &'a str,
 }
 
-/// A JS value handed to Workers AI as is. Workers AI would turn a `json!` object into a JS `Map`,
-/// which Clef rejects, so the request is converted to a plain JS object first.
 #[derive(Serialize)]
 struct Js(#[serde(with = "serde_wasm_bindgen::preserve")] JsValue);
 
@@ -71,11 +69,10 @@ impl Agent {
     async fn ask_clef(&self, state: &str, questions: Value) -> Result<Value> {
         let request = json!({ "model": "clef-flash", "state": state, "questions": questions })
             .serialize(&serde_wasm_bindgen::Serializer::json_compatible())?;
-        let out: Value = self.ai.run(CLEF, Js(request)).await?;
-        Ok(out["answers"].clone())
+        let mut out: Value = self.ai.run(CLEF, Js(request)).await?;
+        Ok(out["answers"].take())
     }
 
-    /// Returns Clef's 0–1 odds that each suspicious link is a website. `None` for any other link.
     pub async fn website_odds(&self, content: &str, links: &[Link]) -> Result<Vec<Option<f64>>> {
         let questions: Map<String, Value> = links
             .iter()

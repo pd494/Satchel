@@ -127,12 +127,12 @@ impl Db {
         Ok(rows.pop())
     }
 
-    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<bool> {
+    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<()> {
         let data = serde_json::to_string(&item.data())?;
         let insert_query =
             "INSERT OR IGNORE INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?)";
-        let cursor = self.sql.exec(
+        self.sql.exec(
             insert_query,
             Some(vec![
                 SqlStorageValue::Integer(message_id),
@@ -143,7 +143,7 @@ impl Db {
                 SqlStorageValue::String(data),
             ]),
         )?;
-        Ok(cursor.rows_written() > 0)
+        Ok(())
     }
 }
 

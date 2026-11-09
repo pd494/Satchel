@@ -1,4 +1,3 @@
-use serde::Serialize;
 use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
@@ -11,16 +10,10 @@ pub struct LinqClient {
     api_key: String,
 }
 
-#[derive(Serialize)]
-#[serde(tag = "type", content = "value", rename_all = "lowercase")]
-pub enum Part {
-    Text(String),
-    Link(String),
-}
-
 pub struct OutboundMessage {
     pub space_id: String,
-    pub parts: Vec<Part>,
+    pub text: String,
+    pub links: Vec<String>,
     pub idempotency_key: String,
 }
 
@@ -30,11 +23,16 @@ impl LinqClient {
         Ok(Self { api_key })
     }
 
-    /// Sends each part as its own message. Linq requires a link part to be the only part.
-    /// Linq drops a repeated `idempotency_key`.
+    /// Linq requires a link part to be the only part. Linq drops a repeated `idempotency_key`.
     pub async fn send(&self, message: &OutboundMessage) -> Result<()> {
         let path = format!("chats/{}/messages", message.space_id);
-        for (i, part) in message.parts.iter().enumerate() {
+        let text =
+            (!message.text.is_empty()).then(|| json!({ "type": "text", "value": message.text }));
+        let links = message
+            .links
+            .iter()
+            .map(|link| json!({ "type": "link", "value": link }));
+        for (i, part) in text.into_iter().chain(links).enumerate() {
             let key = format!("{}:{i}", message.idempotency_key);
             let body = json!({ "message": { "parts": [part], "idempotency_key": key } });
             self.post(&path, Some(body)).await?;
