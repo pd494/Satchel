@@ -10,22 +10,44 @@ pub struct LinqClient {
     api_key: String,
 }
 
+pub struct OutboundMessage {
+    pub space_id: String,
+    pub text: String,
+    pub links: Vec<String>,
+    pub idempotency_key: String,
+}
+
 impl LinqClient {
     pub fn from_env(env: &Env) -> Result<Self> {
         let api_key = env.secret("LINQ_API_KEY")?.to_string();
         Ok(Self { api_key })
     }
 
-    /// Sends `text` into the chat `space_id`. Linq drops a repeated `idempotency_key`.
-    pub async fn send(&self, space_id: &str, text: &str, idempotency_key: &str) -> Result<()> {
-        let body = json!({
-            "message": {
-                "parts": [{ "type": "text", "value": text }],
-                "idempotency_key": idempotency_key,
-            }
-        });
-        self.post(&format!("chats/{space_id}/messages"), Some(body))
+    /// Linq requires a link part to be the only part. Linq drops a repeated `idempotency_key`.
+    pub async fn send(&self, message: &OutboundMessage) -> Result<()> {
+        let path = format!("chats/{}/messages", message.space_id);
+        let text =
+            (!message.text.is_empty()).then(|| json!({ "type": "text", "value": message.text }));
+        let links = message
+            .links
+            .iter()
+            .map(|link| json!({ "type": "link", "value": link }));
+        for (i, part) in text.into_iter().chain(links).enumerate() {
+            let key = format!("{}:{i}", message.idempotency_key);
+            let body = json!({ "message": { "parts": [part], "idempotency_key": key } });
+            self.post(&path, Some(body)).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn like(&self, message_id: &str) -> Result<()> {
+        let body = json!({ "operation": "add", "type": "like" });
+        self.post(&format!("messages/{message_id}/reactions"), Some(body))
             .await
+    }
+
+    pub async fn mark_read(&self, space_id: &str) -> Result<()> {
+        self.post(&format!("chats/{space_id}/read"), None).await
     }
 
     async fn post(&self, path: &str, body: Option<Value>) -> Result<()> {

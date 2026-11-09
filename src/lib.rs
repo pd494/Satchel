@@ -2,6 +2,7 @@ mod agent;
 pub mod db;
 mod harness;
 pub mod linq;
+mod media;
 pub mod user;
 
 use linq::{LinqRequestOutcome, LinqWebhook};
