@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
+use crate::media::Link;
+
 mod webhook;
 pub use webhook::{LinqRequestOutcome, LinqWebhook};
 
@@ -16,16 +18,39 @@ impl LinqClient {
         Ok(Self { api_key })
     }
 
-    /// Sends `text` into the chat `space_id`. Linq drops a repeated `idempotency_key`.
+    /// Sends `text` into the chat `space_id`, then each link in it as its own message.
+    /// Linq requires a link part to be the only part. Linq drops a repeated `idempotency_key`.
     pub async fn send(&self, space_id: &str, text: &str, idempotency_key: &str) -> Result<()> {
-        let body = json!({
-            "message": {
-                "parts": [{ "type": "text", "value": text }],
-                "idempotency_key": idempotency_key,
-            }
-        });
+        let links = Link::find_all(text);
+        let rest = links
+            .iter()
+            .fold(text.to_owned(), |rest, link| rest.replace(&link.typed, ""));
+        if !rest.trim().is_empty() {
+            let part = json!({ "type": "text", "value": rest.trim() });
+            self.send_part(space_id, part, idempotency_key).await?;
+        }
+        for (i, link) in links.iter().enumerate() {
+            let part = json!({ "type": "link", "value": link.url.as_str() });
+            let key = format!("{idempotency_key}:link.{i}");
+            self.send_part(space_id, part, &key).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_part(&self, space_id: &str, part: Value, idempotency_key: &str) -> Result<()> {
+        let body = json!({ "message": { "parts": [part], "idempotency_key": idempotency_key } });
         self.post(&format!("chats/{space_id}/messages"), Some(body))
             .await
+    }
+
+    pub async fn like(&self, message_id: &str) -> Result<()> {
+        let body = json!({ "operation": "add", "type": "like" });
+        self.post(&format!("messages/{message_id}/reactions"), Some(body))
+            .await
+    }
+
+    pub async fn mark_read(&self, space_id: &str) -> Result<()> {
+        self.post(&format!("chats/{space_id}/read"), None).await
     }
 
     async fn post(&self, path: &str, body: Option<Value>) -> Result<()> {
