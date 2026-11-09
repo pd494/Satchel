@@ -38,7 +38,7 @@ pub struct Pending {
     pub id: i64,
     pub event_id: String,
     pub content: String,
-    /// Failed model calls so far.
+    /// Failed model calls or sends so far.
     pub attempts: i64,
 }
 
@@ -96,7 +96,7 @@ impl Db {
         Ok(rows)
     }
 
-    /// Counts one failed model call for the user message `event_id`.
+    /// Counts one failed model call or send for the user message `event_id`.
     pub fn record_failure(&self, event_id: &str) -> Result<()> {
         let update_query = "UPDATE messages SET attempts = attempts + 1 WHERE event_id = ?";
         self.sql.exec(update_query, Some(vec![event_id.into()]))?;
