@@ -1,5 +1,7 @@
+mod attachment;
 mod link;
 
+pub use attachment::{Attachment, MediaKind};
 pub use link::Link;
 use serde_json::{json, Value};
 

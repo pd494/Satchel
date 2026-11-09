@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 mod webhook;
-pub use webhook::{LinqRequestOutcome, LinqWebhook};
+pub use webhook::{InboundMessage, LinqRequestOutcome, LinqWebhook};
 
 const API: &str = "https://api.linqapp.com/api/partner/v3";
 
@@ -14,6 +14,8 @@ pub struct OutboundMessage {
     pub space_id: String,
     pub text: String,
     pub links: Vec<String>,
+    /// Linq attachment ids to send back.
+    pub attachments: Vec<String>,
     pub idempotency_key: String,
 }
 
@@ -32,7 +34,11 @@ impl LinqClient {
             .links
             .iter()
             .map(|link| json!({ "type": "link", "value": link }));
-        for (i, part) in text.into_iter().chain(links).enumerate() {
+        let attachments = message
+            .attachments
+            .iter()
+            .map(|id| json!({ "type": "media", "attachment_id": id }));
+        for (i, part) in text.into_iter().chain(links).chain(attachments).enumerate() {
             let key = format!("{}:{i}", message.idempotency_key);
             let body = json!({ "message": { "parts": [part], "idempotency_key": key } });
             self.post(&path, Some(body)).await?;

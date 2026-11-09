@@ -1,5 +1,7 @@
+use crate::media::{Attachment, MediaKind};
 use base64::{engine::general_purpose::STANDARD_PAD_INDIFFERENT as BASE64, Engine as _};
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -9,16 +11,18 @@ const MAX_BODY_BYTES: u64 = 1_000_000;
 const TIMESTAMP_TOLERANCE_SECS: u64 = 300;
 
 pub enum LinqRequestOutcome {
-    Text(InboundMessage),
+    Message(InboundMessage),
     Unsupported,
     BadSignature,
     TooLarge,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct InboundMessage {
     pub sender_id: String,
     pub space_id: String,
     pub text: String,
+    pub media: Vec<Attachment>,
     pub event_id: String,
 }
 
@@ -52,7 +56,7 @@ impl LinqWebhook {
             return Ok(LinqRequestOutcome::BadSignature);
         }
         Ok(match parse(&body) {
-            Some(message) => LinqRequestOutcome::Text(message),
+            Some(message) => LinqRequestOutcome::Message(message),
             None => LinqRequestOutcome::Unsupported,
         })
     }
@@ -80,14 +84,19 @@ fn parse(body: &str) -> Option<InboundMessage> {
     if payload["event_type"] != "message.received" || data["chat"]["is_group"] != false {
         return None;
     }
-    let text = data["parts"]
-        .as_array()?
+    let parts = data["parts"].as_array()?;
+    let text = parts
         .iter()
         .filter(|part| part["type"] == "text" || part["type"] == "link")
         .filter_map(|part| part["value"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    if text.is_empty() {
+    let media: Vec<Attachment> = parts
+        .iter()
+        .filter(|part| part["type"] == "media")
+        .filter_map(attachment)
+        .collect();
+    if text.is_empty() && media.is_empty() {
         return None;
     }
     let field = |path: &str| Some(data.pointer(path)?.as_str()?.to_owned());
@@ -95,6 +104,82 @@ fn parse(body: &str) -> Option<InboundMessage> {
         sender_id: field("/sender_handle/handle")?,
         space_id: field("/chat/id")?,
         text,
+        media,
         event_id: field("/id")?,
     })
+}
+
+fn attachment(part: &Value) -> Option<Attachment> {
+    let field = |name: &str| Some(part[name].as_str()?.to_owned());
+    Some(Attachment {
+        kind: MediaKind::from_mime(part["mime_type"].as_str()?)?,
+        id: field("id")?,
+        filename: field("filename"),
+        url: field("url")?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn body(parts: Value) -> String {
+        json!({
+            "event_type": "message.received",
+            "data": {
+                "id": "evt_1",
+                "chat": { "id": "chat_1", "is_group": false },
+                "sender_handle": { "handle": "+15550001111" },
+                "parts": parts,
+            },
+        })
+        .to_string()
+    }
+
+    fn media(id: &str, mime: &str) -> Value {
+        json!({
+            "type": "media",
+            "id": id,
+            "filename": "photo.jpg",
+            "mime_type": mime,
+            "size_bytes": 245678,
+            "url": "https://cdn.linqapp.com/x",
+        })
+    }
+
+    #[test]
+    fn parses_media_only_message() {
+        let message = parse(&body(json!([media("att_1", "image/jpeg")]))).unwrap();
+        assert_eq!(message.text, "");
+        assert_eq!(message.media.len(), 1);
+        let photo = &message.media[0];
+        assert!(matches!(photo.kind, MediaKind::Image));
+        assert_eq!(photo.id, "att_1");
+        assert_eq!(photo.filename.as_deref(), Some("photo.jpg"));
+        assert_eq!(photo.url, "https://cdn.linqapp.com/x");
+    }
+
+    #[test]
+    fn parses_text_with_media() {
+        let parts = json!([
+            { "type": "text", "value": "our trip" },
+            media("att_1", "image/png"),
+            media("att_2", "video/mp4"),
+        ]);
+        let message = parse(&body(parts)).unwrap();
+        assert_eq!(message.text, "our trip");
+        let kinds: Vec<_> = message.media.iter().map(|m| m.kind).collect();
+        assert!(matches!(kinds[..], [MediaKind::Image, MediaKind::Video]));
+    }
+
+    #[test]
+    fn drops_unsupported_media() {
+        assert!(parse(&body(json!([media("att_1", "application/pdf")]))).is_none());
+
+        let parts = json!([{ "type": "text", "value": "notes" }, media("att_1", "audio/m4a")]);
+        let message = parse(&body(parts)).unwrap();
+        assert_eq!(message.text, "notes");
+        assert!(message.media.is_empty());
+    }
 }
