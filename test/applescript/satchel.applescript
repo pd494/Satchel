@@ -12,8 +12,9 @@ on allCases()
 		{"save-link-with-comment", "check this place out https://www.zillow.com/homes/austin looks nice", "tapback", ""}, ¬
 		{"save-two-links-prefix", "tour at example.org, details at example.org/tour", "tapback", ""}, ¬
 		{"save-link-duplicate", "https://www.rust-lang.org/learn", "tapback", ""}, ¬
-		{"save-note", "remember my gate code is 4521", "tapback", ""}, ¬
-		{"save-note-emoji", "remember the 🍜 pho place on 5th street is the best", "tapback", ""}, ¬
+		{"suspicious-not-link", "node.js is my favorite runtime", "text-only", ""}, ¬
+		{"remember-note", "remember my gate code is 4521", "text-only", ""}, ¬
+		{"remember-note-emoji", "remember the 🍜 pho place on 5th street is the best", "text-only", ""}, ¬
 		{"recall-note", "what's my gate code?", "text-only", "4521"}, ¬
 		{"recall-link", "what rust link did i save?", "text-only", "rust-lang.org"}, ¬
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}}

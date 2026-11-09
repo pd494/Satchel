@@ -1,15 +1,13 @@
-use crate::agent::{Agent, Intent};
+use crate::agent::Agent;
 use crate::db::{Db, Pending};
 use crate::linq::{LinqClient, OutboundMessage, Part};
-use crate::media::{Link, Note};
+use crate::media::Link;
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
 const MAX_ATTEMPTS: i64 = 3;
 
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
-
-const MIN_NOTE_CONFIDENCE: f64 = 0.5;
 
 const KEEP_LINK: f64 = 0.1;
 
@@ -58,11 +56,7 @@ impl Harness {
                 Reply::Text(SORRY.to_string())
             } else {
                 let result: Result<Reply> = async {
-                    let saved_it = match self.agent.classify_intent(&message.content).await? {
-                        (Intent::Save, confidence) => self.save(&message, confidence).await?,
-                        (Intent::Search | Intent::Remind | Intent::Chat, _) => false,
-                    };
-                    if saved_it {
+                    if self.save(&message).await? {
                         return Ok(Reply::Tapback);
                     }
                     Ok(Reply::Text(self.agent.response(&context).await?))
@@ -104,8 +98,11 @@ impl Harness {
         Ok(())
     }
 
-    async fn save(&self, message: &Pending, confidence: f64) -> Result<bool> {
+    async fn save(&self, message: &Pending) -> Result<bool> {
         let found = Link::find_all(&message.content);
+        if found.is_empty() {
+            return Ok(false);
+        }
         let odds = match self.agent.website_odds(&message.content, &found).await {
             Ok(odds) => odds,
             Err(error) => {
@@ -119,18 +116,9 @@ impl Harness {
             .filter(|(_, odds)| odds.is_none_or(|odds| odds >= KEEP_LINK))
             .map(|(link, _)| link)
             .collect();
-        if links.is_empty() {
-            if confidence < MIN_NOTE_CONFIDENCE {
-                return Ok(false);
-            }
-            let note = Note {
-                text: message.content.clone(),
-            };
-            self.db.insert_saved(message.id, &note)?;
-        }
         for link in &links {
             self.db.insert_saved(message.id, link)?;
         }
-        Ok(true)
+        Ok(!links.is_empty())
     }
 }

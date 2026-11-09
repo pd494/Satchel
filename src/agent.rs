@@ -1,6 +1,6 @@
 use crate::db::Row;
 use crate::media::Link;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use wasm_bindgen::JsValue;
 use worker::{Ai, Error, Result};
@@ -13,15 +13,6 @@ const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 
 pub struct Agent {
     ai: Ai,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Intent {
-    Save,
-    Search,
-    Remind,
-    Chat,
 }
 
 #[derive(Serialize)]
@@ -84,34 +75,12 @@ impl Agent {
         Ok(out["answers"].clone())
     }
 
-    pub async fn classify_intent(&self, content: &str) -> Result<(Intent, f64)> {
-        let questions = json!({
-                "intent": {
-                    "type": "choice",
-                    "instructions": "The user is texting Satchel, an app that saves what they send and finds it later. What does this message do?",
-                    "criteria": {
-                        "save": "Shares a link, photo, or note, or asks to keep or remember something. Sharing a link counts even with casual comments around it.",
-                        "search": "Asks about or wants back something they saved before",
-                        "remind": "Asks to be reminded at a later time",
-                        "chat": "Greeting, thanks, reaction, or off-topic, with nothing to keep and nothing to find"
-                    }
-                }
-        });
-
-        let answer = self.ask_clef(content, questions).await?["intent"].take();
-        let confidence = answer["confidence"].as_f64().unwrap_or(1.0);
-        Ok((
-            serde_json::from_value(answer["choice"].clone())?,
-            confidence,
-        ))
-    }
-
-    /// Returns Clef's 0–1 odds that each bare link is a website. `None` for a link with a scheme.
+    /// Returns Clef's 0–1 odds that each suspicious link is a website. `None` for any other link.
     pub async fn website_odds(&self, content: &str, links: &[Link]) -> Result<Vec<Option<f64>>> {
         let questions: Map<String, Value> = links
             .iter()
             .enumerate()
-            .filter(|(_, link)| link.bare)
+            .filter(|(_, link)| link.suspicious)
             .map(|(i, link)| {
                 let instructions = format!("Is `{}` meant as a website address?", link.typed);
                 (

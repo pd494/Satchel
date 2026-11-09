@@ -8,7 +8,7 @@ use super::Media;
 pub struct Link {
     pub url: Url,
     pub typed: String,
-    pub bare: bool,
+    pub suspicious: bool,
 }
 
 impl Media for Link {
@@ -55,10 +55,14 @@ impl Link {
                 let typed_url = Url::parse(typed).ok().filter(Url::has_host);
                 let bare = typed_url.is_none();
                 let url = typed_url.or_else(|| Url::parse(&format!("https://{typed}")).ok())?;
+                let known_suffix = url
+                    .host_str()
+                    .and_then(|host| psl::suffix(host.as_bytes()))
+                    .is_some_and(|suffix| suffix.is_known());
                 let link = Self {
                     url,
                     typed: typed.to_owned(),
-                    bare,
+                    suspicious: bare && !known_suffix,
                 };
                 Some((start..start + typed.len(), link))
             })
