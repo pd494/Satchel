@@ -6,9 +6,7 @@ use worker::{
     Result, State,
 };
 
-/// Header that carries Photon's `webhook-id` from the Worker into the DO.
 const EVENT_ID_HEADER: &str = "x-event-id";
-/// Header that carries the Photon space to reply into.
 const SPACE_ID_HEADER: &str = "x-space-id";
 /// Storage key for the space the alarm replies into.
 const SPACE_ID_KEY: &str = "space_id";
