@@ -3,11 +3,10 @@ use crate::media::Link;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use wasm_bindgen::JsValue;
-use worker::{console_error, Ai, Error, Result};
+use worker::{Ai, Error, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const CLEF: &str = "@cf/cloudflare/clef-flash";
-const KEEP_LINK: f64 = 0.1;
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 
 // TODO: tools (Rig) go here later
@@ -27,8 +26,14 @@ pub(crate) enum Intent {
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
-    messages: Vec<&'a Row>,
+    messages: Vec<ChatMessage<'a>>,
     chat_template_kwargs: ChatTemplateKwargs,
+}
+
+#[derive(Serialize)]
+struct ChatMessage<'a> {
+    role: &'a str,
+    content: &'a str,
 }
 
 /// A JS value handed to Workers AI as is. Workers AI would turn a `json!` object into a JS `Map`,
@@ -47,12 +52,15 @@ impl Agent {
     }
 
     pub async fn response(&self, history: &[Row]) -> Result<String> {
-        let system = Row {
-            role: "system".into(),
-            content: SYSTEM_PROMPT.into(),
+        let system = ChatMessage {
+            role: "system",
+            content: SYSTEM_PROMPT,
         };
-        let mut messages = vec![&system];
-        messages.extend(history);
+        let mut messages = vec![system];
+        messages.extend(history.iter().map(|row| ChatMessage {
+            role: &row.role,
+            content: &row.content,
+        }));
         let request = ChatRequest {
             messages,
             chat_template_kwargs: ChatTemplateKwargs {
@@ -98,11 +106,12 @@ impl Agent {
         ))
     }
 
-    pub async fn check_links(&self, content: &str, found: Vec<Link>) -> Vec<Link> {
-        let questions: Map<String, Value> = found
+    /// Returns Clef's 0–1 odds that each bare link is a website. `None` for a link with a scheme.
+    pub async fn website_odds(&self, content: &str, links: &[Link]) -> Result<Vec<Option<f64>>> {
+        let questions: Map<String, Value> = links
             .iter()
             .enumerate()
-            .filter(|(_, link)| !link.typed.contains("://"))
+            .filter(|(_, link)| link.bare)
             .map(|(i, link)| {
                 let instructions = format!("Is `{}` meant as a website address?", link.typed);
                 (
@@ -112,24 +121,11 @@ impl Agent {
             })
             .collect();
         if questions.is_empty() {
-            return found;
+            return Ok(vec![None; links.len()]);
         }
-        let answers = match self.ask_clef(content, Value::Object(questions)).await {
-            Ok(answers) => answers,
-            Err(error) => {
-                console_error!("check_links failed, keeping all: {error}");
-                Value::Null
-            }
-        };
-        found
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| {
-                answers[format!("link.{i}").as_str()]["noul"]
-                    .as_f64()
-                    .is_none_or(|p| p >= KEEP_LINK)
-            })
-            .map(|(_, link)| link)
-            .collect()
+        let answers = self.ask_clef(content, Value::Object(questions)).await?;
+        Ok((0..links.len())
+            .map(|i| answers[format!("link.{i}").as_str()]["noul"].as_f64())
+            .collect())
     }
 }

@@ -1,5 +1,5 @@
 use crate::media::Media;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
 /// +----+-----------+------------------+----------+----------+----------+------------+
@@ -41,7 +41,7 @@ pub struct Db {
     sql: SqlStorage,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 pub struct Row {
     pub role: String,
     pub content: String,

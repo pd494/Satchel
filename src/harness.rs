@@ -1,6 +1,6 @@
 use crate::agent::{Agent, Intent};
 use crate::db::{Db, Pending};
-use crate::linq::LinqClient;
+use crate::linq::{LinqClient, OutboundMessage, Part};
 use crate::media::{Link, Note};
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -10,6 +10,8 @@ const MAX_ATTEMPTS: i64 = 3;
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 
 const MIN_NOTE_CONFIDENCE: f64 = 0.5;
+
+const KEEP_LINK: f64 = 0.1;
 
 const SAVED_TAPBACK: &str = "👍";
 
@@ -73,7 +75,18 @@ impl Harness {
             };
             let (answer, sent) = match reply {
                 Reply::Text(text) => {
-                    let sent = self.linq.send(space_id, &text, &message.event_id).await;
+                    let (rest, links) = Link::split(&text);
+                    let mut parts = Vec::new();
+                    if !rest.is_empty() {
+                        parts.push(Part::Text(rest));
+                    }
+                    parts.extend(links.iter().map(|link| Part::Link(link.url.to_string())));
+                    let outbound = OutboundMessage {
+                        space_id: space_id.to_string(),
+                        parts,
+                        idempotency_key: message.event_id.clone(),
+                    };
+                    let sent = self.linq.send(&outbound).await;
                     (text, sent)
                 }
                 Reply::Tapback => {
@@ -93,7 +106,19 @@ impl Harness {
 
     async fn save(&self, message: &Pending, confidence: f64) -> Result<bool> {
         let found = Link::find_all(&message.content);
-        let links = self.agent.check_links(&message.content, found).await;
+        let odds = match self.agent.website_odds(&message.content, &found).await {
+            Ok(odds) => odds,
+            Err(error) => {
+                console_error!("website_odds failed, keeping all links: {error}");
+                vec![None; found.len()]
+            }
+        };
+        let links: Vec<Link> = found
+            .into_iter()
+            .zip(odds)
+            .filter(|(_, odds)| odds.is_none_or(|odds| odds >= KEEP_LINK))
+            .map(|(link, _)| link)
+            .collect();
         if links.is_empty() {
             if confidence < MIN_NOTE_CONFIDENCE {
                 return Ok(false);

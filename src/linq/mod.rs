@@ -1,7 +1,6 @@
+use serde::Serialize;
 use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
-
-use crate::media::Link;
 
 mod webhook;
 pub use webhook::{LinqRequestOutcome, LinqWebhook};
@@ -12,35 +11,35 @@ pub struct LinqClient {
     api_key: String,
 }
 
+#[derive(Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "lowercase")]
+pub enum Part {
+    Text(String),
+    Link(String),
+}
+
+pub struct OutboundMessage {
+    pub space_id: String,
+    pub parts: Vec<Part>,
+    pub idempotency_key: String,
+}
+
 impl LinqClient {
     pub fn from_env(env: &Env) -> Result<Self> {
         let api_key = env.secret("LINQ_API_KEY")?.to_string();
         Ok(Self { api_key })
     }
 
-    /// Sends `text` into the chat `space_id`, then each link in it as its own message.
-    /// Linq requires a link part to be the only part. Linq drops a repeated `idempotency_key`.
-    pub async fn send(&self, space_id: &str, text: &str, idempotency_key: &str) -> Result<()> {
-        let links = Link::find_all(text);
-        let rest = links
-            .iter()
-            .fold(text.to_owned(), |rest, link| rest.replace(&link.typed, ""));
-        if !rest.trim().is_empty() {
-            let part = json!({ "type": "text", "value": rest.trim() });
-            self.send_part(space_id, part, idempotency_key).await?;
-        }
-        for (i, link) in links.iter().enumerate() {
-            let part = json!({ "type": "link", "value": link.url.as_str() });
-            let key = format!("{idempotency_key}:link.{i}");
-            self.send_part(space_id, part, &key).await?;
+    /// Sends each part as its own message. Linq requires a link part to be the only part.
+    /// Linq drops a repeated `idempotency_key`.
+    pub async fn send(&self, message: &OutboundMessage) -> Result<()> {
+        let path = format!("chats/{}/messages", message.space_id);
+        for (i, part) in message.parts.iter().enumerate() {
+            let key = format!("{}:{i}", message.idempotency_key);
+            let body = json!({ "message": { "parts": [part], "idempotency_key": key } });
+            self.post(&path, Some(body)).await?;
         }
         Ok(())
-    }
-
-    async fn send_part(&self, space_id: &str, part: Value, idempotency_key: &str) -> Result<()> {
-        let body = json!({ "message": { "parts": [part], "idempotency_key": idempotency_key } });
-        self.post(&format!("chats/{space_id}/messages"), Some(body))
-            .await
     }
 
     pub async fn like(&self, message_id: &str) -> Result<()> {
