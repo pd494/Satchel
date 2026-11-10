@@ -1,5 +1,7 @@
+mod file;
 mod link;
 
+pub use file::{File, Kind};
 pub use link::Link;
 use serde_json::{json, Value};
 
