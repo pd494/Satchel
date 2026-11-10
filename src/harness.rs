@@ -171,18 +171,10 @@ fn requested_media(text: &str) -> Option<&'static str> {
     if !has(&["send", "show", "give", "resend"]) && !has(&["that", "the", "my"]) {
         return None;
     }
-    if has(&[
-        "voice",
-        "voicemail",
-        "memo",
-        "audio",
-        "recording",
-        "recordings",
-        "memos",
-    ]) {
-        Some("voice")
-    } else if has(&["video", "vid", "clip"]) {
+    if has(&["video", "vid", "clip"]) {
         Some("video")
+    } else if has(&["voice", "voicemail", "audio", "recording", "recordings"]) {
+        Some("voice")
     } else if has(&[
         "picture", "pic", "photo", "image", "pics", "pictures", "photos",
     ]) {
@@ -207,6 +199,8 @@ mod tests {
         assert_eq!(requested_media("give me the audio"), Some("voice"));
         assert_eq!(requested_media("play my voicemail"), Some("voice"));
         assert_eq!(requested_media("memorial day plans"), None);
+        assert_eq!(requested_media("show me the memo about rent"), None);
+        assert_eq!(requested_media("send me the video recording"), Some("video"));
         assert_eq!(requested_media("lets go on a picnic"), None);
         assert_eq!(requested_media("send me the zillow link"), None);
     }

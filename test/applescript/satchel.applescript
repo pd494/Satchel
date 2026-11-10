@@ -21,6 +21,7 @@ on allCases()
 		{"save-image", "file:~/Pictures/satchel-test/sample-photo.jpg", "tapback", ""}, ¬
 		{"save-video", "file:~/Pictures/satchel-test/sample-video.mp4", "tapback", ""}, ¬
 		{"recall-image", "send me that picture", "attachment", ""}, ¬
+		{"recall-video", "send me that video", "attachment", ""}, ¬
 		{"save-voice", "file:~/Pictures/satchel-test/sample-voice.m4a", "tapback", ""}, ¬
 		{"recall-voice", "send me that voice memo", "attachment", ""}, ¬
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}}
