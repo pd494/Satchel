@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::db::{Db, Pending};
-use crate::linq::{LinqClient, OutboundMessage};
-use crate::media::Link;
+use crate::linq::{LinqClient, Part};
+use crate::media::{File, Kind, Link};
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
@@ -70,14 +70,7 @@ impl Harness {
             };
             let (answer, sent) = match reply {
                 Reply::Text(text) => {
-                    let (rest, links) = Link::split(&text);
-                    let outbound = OutboundMessage {
-                        space_id: space_id.to_string(),
-                        text: rest,
-                        links,
-                        idempotency_key: message.event_id.clone(),
-                    };
-                    let sent = self.linq.send(&outbound).await;
+                    let sent = self.send_text(space_id, &message.event_id, &text).await;
                     (text, sent)
                 }
                 Reply::Tapback => {
@@ -95,10 +88,43 @@ impl Harness {
         Ok(())
     }
 
+    /// Sends each part of `text` as its own message. Linq requires a link or media part to be
+    /// the only part. A saved photo, video, contact, location, or file URL goes back as the file itself, and a saved
+    /// voice memo goes back as a voice-memo bubble.
+    async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
+        let (rest, urls) = Link::split(text);
+        let text = (!rest.is_empty()).then_some(Part::Text(rest));
+        let files = urls.into_iter().map(|url| match File::parse(&url) {
+            Some(File {
+                kind: Kind::Voice,
+                id,
+                ..
+            }) => Part::Voice(id),
+            Some(file) => Part::Media(file.id),
+            None => Part::Link(url),
+        });
+        for (i, part) in text.into_iter().chain(files).enumerate() {
+            self.linq
+                .send(space_id, &format!("{event_id}:{i}"), part)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn save(&self, message: &Pending) -> Result<bool> {
-        let found = Link::find_all(&message.content);
+        let mut found = Vec::new();
+        let mut saved_file = false;
+        for link in Link::find_all(&message.content) {
+            match File::parse(link.url.as_str()) {
+                Some(file) => {
+                    self.db.insert_saved(message.id, &file)?;
+                    saved_file = true;
+                }
+                None => found.push(link),
+            }
+        }
         if found.is_empty() {
-            return Ok(false);
+            return Ok(saved_file);
         }
         let odds = match self.agent.website_odds(&message.content, &found).await {
             Ok(odds) => odds,
@@ -116,6 +142,6 @@ impl Harness {
         for link in &links {
             self.db.insert_saved(message.id, link)?;
         }
-        Ok(!links.is_empty())
+        Ok(saved_file || !links.is_empty())
     }
 }

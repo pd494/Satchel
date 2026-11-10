@@ -10,11 +10,11 @@ pub struct LinqClient {
     api_key: String,
 }
 
-pub struct OutboundMessage {
-    pub space_id: String,
-    pub text: String,
-    pub links: Vec<String>,
-    pub idempotency_key: String,
+pub enum Part {
+    Text(String),
+    Link(String),
+    Media(String),
+    Voice(String),
 }
 
 impl LinqClient {
@@ -23,21 +23,22 @@ impl LinqClient {
         Ok(Self { api_key })
     }
 
-    /// Linq requires a link part to be the only part. Linq drops a repeated `idempotency_key`.
-    pub async fn send(&self, message: &OutboundMessage) -> Result<()> {
-        let path = format!("chats/{}/messages", message.space_id);
-        let text =
-            (!message.text.is_empty()).then(|| json!({ "type": "text", "value": message.text }));
-        let links = message
-            .links
-            .iter()
-            .map(|link| json!({ "type": "link", "value": link }));
-        for (i, part) in text.into_iter().chain(links).enumerate() {
-            let key = format!("{}:{i}", message.idempotency_key);
-            let body = json!({ "message": { "parts": [part], "idempotency_key": key } });
-            self.post(&path, Some(body)).await?;
-        }
-        Ok(())
+    /// Linq drops a repeated `idempotency_key`. A voice memo goes to its own endpoint.
+    pub async fn send(&self, space_id: &str, idempotency_key: &str, part: Part) -> Result<()> {
+        let part = match part {
+            Part::Text(text) => json!({ "type": "text", "value": text }),
+            Part::Link(url) => json!({ "type": "link", "value": url }),
+            Part::Media(id) => json!({ "type": "media", "attachment_id": id }),
+            Part::Voice(id) => {
+                let body = json!({ "attachment_id": id });
+                return self
+                    .post(&format!("chats/{space_id}/voicememo"), Some(body))
+                    .await;
+            }
+        };
+        let body = json!({ "message": { "parts": [part], "idempotency_key": idempotency_key } });
+        self.post(&format!("chats/{space_id}/messages"), Some(body))
+            .await
     }
 
     pub async fn like(&self, message_id: &str) -> Result<()> {

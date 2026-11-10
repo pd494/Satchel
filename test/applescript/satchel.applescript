@@ -18,6 +18,18 @@ on allCases()
 		{"remember-note-emoji", "remember the 🍜 pho place on 5th street is the best", "text-only", ""}, ¬
 		{"recall-note", "what's my gate code?", "text-only", "4521"}, ¬
 		{"recall-link", "what rust link did i save?", "text-only", "rust-lang.org"}, ¬
+		{"save-image", "file:~/Pictures/satchel-test/sample-photo.jpg", "tapback", ""}, ¬
+		{"save-video", "file:~/Pictures/satchel-test/sample-video.mp4", "tapback", ""}, ¬
+		{"recall-image", "send me that picture", "attachment", ""}, ¬
+		{"recall-video", "send me that video", "attachment", ""}, ¬
+		{"save-voice", "file:~/Pictures/satchel-test/sample-voice.m4a", "tapback", ""}, ¬
+		{"recall-voice", "send me that voice memo", "attachment", ""}, ¬
+		{"save-contact", "file:~/Pictures/satchel-test/sample-contact.vcf", "tapback", ""}, ¬
+		{"recall-contact", "send me that contact", "attachment", ""}, ¬
+		{"save-location", "file:~/Pictures/satchel-test/sample-pin.loc.vcf", "tapback", ""}, ¬
+		{"recall-location", "send me that location", "attachment", ""}, ¬
+		{"save-file", "file:~/Pictures/satchel-test/sample-file.pdf", "tapback", ""}, ¬
+		{"recall-file", "send me that pdf", "attachment", ""}, ¬
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}}
 end allCases
 
@@ -80,14 +92,19 @@ end doctor
 
 on runCase(satchelNumber, caseText, wantKind, wantText)
 	set startDate to do shell script "echo $(( ($(date +%s) - 978307200) * 1000000000 ))"
+	set toSend to caseText
+	if caseText starts with "file:~/" then
+		set toSend to POSIX file ((POSIX path of (path to home folder)) & (text 8 thru -1 of caseText))
+	end if
 	tell application "Messages"
 		set toSatchel to participant satchelNumber of (first account whose service type = iMessage)
-		send caseText to toSatchel
+		send toSend to toSatchel
 	end tell
 	set fromSatchel to "FROM message m JOIN handle h ON m.handle_id = h.ROWID WHERE h.id = '" & satchelNumber & "' AND m.is_from_me = 0 AND m.date > " & startDate
 	set countQuery to "SELECT coalesce(sum(m.associated_message_type = " & likeTapback & "), 0) || '|' || " & ¬
 		"coalesce(sum(m.associated_message_type = 0 AND (instr(lower(coalesce(m.text, '')), lower('" & wantText & "')) > 0" & ¬
-		" OR instr(hex(m.attributedBody), hex('" & wantText & "')) > 0)), 0) " & fromSatchel
+		" OR instr(hex(m.attributedBody), hex('" & wantText & "')) > 0)), 0) || '|' || " & ¬
+		"coalesce(sum(m.cache_has_attachments), 0) " & fromSatchel
 	set passed to false
 	repeat (timeoutSeconds div 3) times
 		delay 3
@@ -95,13 +112,15 @@ on runCase(satchelNumber, caseText, wantKind, wantText)
 		set AppleScript's text item delimiters to "|"
 		set likes to (text item 1 of counts) as integer
 		set matches to (text item 2 of counts) as integer
+		set attachments to (text item 3 of counts) as integer
 		if wantKind is "tapback" and likes > 0 then set passed to true
+		if wantKind is "attachment" and attachments > 0 then set passed to true
 		if wantKind is "text" and matches > 0 then set passed to true
 		if wantKind is "text-only" and matches > 0 then set passed to (likes = 0)
 		if passed or (wantKind is "text-only" and matches > 0) then exit repeat
 	end repeat
 	set repliesQuery to "SELECT group_concat(CASE WHEN m.associated_message_type = " & likeTapback & ¬
-		" THEN '[like]' ELSE coalesce(m.text, '[attributed text]') END, ' | ') " & fromSatchel
+		" THEN '[like]' WHEN m.cache_has_attachments THEN '[attachment]' ELSE coalesce(m.text, '[attributed text]') END, ' | ') " & fromSatchel
 	set replies to do shell script "sqlite3 -readonly " & chatDb & " " & quoted form of repliesQuery
 	if replies is "" then set replies to "(no reply in " & timeoutSeconds & "s)"
 	return {passed, replies}

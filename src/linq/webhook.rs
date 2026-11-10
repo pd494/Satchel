@@ -83,8 +83,11 @@ fn parse(body: &str) -> Option<InboundMessage> {
     let text = data["parts"]
         .as_array()?
         .iter()
-        .filter(|part| part["type"] == "text" || part["type"] == "link")
-        .filter_map(|part| part["value"].as_str())
+        .filter_map(|part| match part["type"].as_str()? {
+            "text" | "link" => part["value"].as_str(),
+            "media" => part["url"].as_str(),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if text.is_empty() {

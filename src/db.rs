@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS saved (
     id          INTEGER PRIMARY KEY,
     message_id  INTEGER NOT NULL REFERENCES messages(id),
-    media       TEXT NOT NULL CHECK (media IN ('link', 'note')),
+    media       TEXT NOT NULL CHECK (media IN ('link', 'note', 'image', 'video', 'voice', 'contact', 'location', 'file')),
     content     TEXT NOT NULL,
     title       TEXT,
     description TEXT,
