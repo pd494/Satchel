@@ -8,6 +8,7 @@ pub enum Kind {
     Voice,
     Contact,
     Location,
+    Document,
 }
 
 pub struct File {
@@ -24,6 +25,7 @@ impl Media for File {
             Kind::Voice => "voice",
             Kind::Contact => "contact",
             Kind::Location => "location",
+            Kind::Document => "file",
         }
     }
 
@@ -53,6 +55,7 @@ impl File {
             mime::VIDEO => Kind::Video,
             mime::AUDIO => Kind::Voice,
             mime::TEXT if file_type.subtype().as_str().contains("vcard") => Kind::Contact,
+            mime::APPLICATION | mime::TEXT => Kind::Document,
             _ => return None,
         };
         Some(Self {
