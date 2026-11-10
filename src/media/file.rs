@@ -7,6 +7,7 @@ pub enum Kind {
     Video,
     Voice,
     Contact,
+    Location,
 }
 
 pub struct File {
@@ -22,6 +23,7 @@ impl Media for File {
             Kind::Video => "video",
             Kind::Voice => "voice",
             Kind::Contact => "contact",
+            Kind::Location => "location",
         }
     }
 
@@ -37,9 +39,13 @@ impl File {
         let path = url.strip_prefix("https://cdn.linqapp.com/attachments/")?;
         let (folder, filename) = path.rsplit_once('/')?;
         let (_, id) = folder.rsplit_once('/')?;
-        // iMessage shared pins also arrive as vCards (`CL.loc.vcf`). Those are locations.
+        // iMessage shared pins also arrive as vCards (`CL.loc.vcf`).
         if filename.to_ascii_lowercase().ends_with(".loc.vcf") {
-            return None;
+            return Some(Self {
+                kind: Kind::Location,
+                url: url.to_owned(),
+                id: id.to_owned(),
+            });
         }
         let file_type = mime_guess::from_path(filename).first()?;
         let kind = match file_type.type_() {

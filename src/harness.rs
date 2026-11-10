@@ -94,7 +94,7 @@ impl Harness {
     }
 
     /// Sends each part of `text` as its own message. Linq requires a link or media part to be
-    /// the only part. A saved photo, video, or contact URL goes back as the file itself, and a saved
+    /// the only part. A saved photo, video, contact, or location URL goes back as the file itself, and a saved
     /// voice memo goes back as a voice-memo bubble.
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
         let (rest, urls) = Link::split(text);
@@ -152,7 +152,7 @@ impl Harness {
 }
 
 /// The saved kind a text asks to get back: "send me that picture" is an image, "that video"
-/// a video, "that voice memo" a voice memo, "that contact" a contact.
+/// a video, "that voice memo" a voice memo, "that contact" a contact, "that pin" a location.
 fn requested_media(text: &str) -> Option<&'static str> {
     let text = text.to_lowercase();
     let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).collect();
@@ -164,6 +164,8 @@ fn requested_media(text: &str) -> Option<&'static str> {
         Some("video")
     } else if has(&["voice", "voicemail", "audio", "recording", "recordings"]) {
         Some("voice")
+    } else if has(&["location", "pin", "spot"]) {
+        Some("location")
     } else if has(&["contact", "contacts", "vcard"]) {
         Some("contact")
     } else if has(&[
