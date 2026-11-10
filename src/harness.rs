@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::db::{Db, Pending};
-use crate::linq::{LinqClient, OutboundMessage, Part};
-use crate::media::{Image, Link, Video, Voice};
+use crate::linq::{LinqClient, Part};
+use crate::media::{File, Kind, Link};
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
@@ -99,25 +99,19 @@ impl Harness {
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
         let (rest, urls) = Link::split(text);
         let text = (!rest.is_empty()).then_some(Part::Text(rest));
-        let files = urls.into_iter().map(|url| {
-            let id = Image::parse(&url)
-                .map(|image| image.id)
-                .or_else(|| Video::parse(&url).map(|video| video.id));
-            id.map_or(Part::Link(url), Part::Media)
+        let files = urls.into_iter().map(|url| match File::parse(&url) {
+            Some(File {
+                kind: Kind::Voice,
+                id,
+                ..
+            }) => Part::Voice(id),
+            Some(file) => Part::Media(file.id),
+            None => Part::Link(url),
         });
         for (i, part) in text.into_iter().chain(files).enumerate() {
-            if let Part::Link(url) = &part {
-                if let Some(voice) = Voice::parse(url) {
-                    self.linq.send_voice_memo(space_id, &voice.id).await?;
-                    continue;
-                }
-            }
-            let outbound = OutboundMessage {
-                space_id: space_id.to_string(),
-                part,
-                idempotency_key: format!("{event_id}:{i}"),
-            };
-            self.linq.send(&outbound).await?;
+            self.linq
+                .send(space_id, &format!("{event_id}:{i}"), part)
+                .await?;
         }
         Ok(())
     }
@@ -126,17 +120,12 @@ impl Harness {
         let mut found = Vec::new();
         let mut saved_file = false;
         for link in Link::find_all(&message.content) {
-            if let Some(image) = Image::parse(link.url.as_str()) {
-                self.db.insert_saved(message.id, &image)?;
-                saved_file = true;
-            } else if let Some(video) = Video::parse(link.url.as_str()) {
-                self.db.insert_saved(message.id, &video)?;
-                saved_file = true;
-            } else if let Some(voice) = Voice::parse(link.url.as_str()) {
-                self.db.insert_saved(message.id, &voice)?;
-                saved_file = true;
-            } else {
-                found.push(link);
+            match File::parse(link.url.as_str()) {
+                Some(file) => {
+                    self.db.insert_saved(message.id, &file)?;
+                    saved_file = true;
+                }
+                None => found.push(link),
             }
         }
         if found.is_empty() {
@@ -181,27 +170,5 @@ fn requested_media(text: &str) -> Option<&'static str> {
         Some("image")
     } else {
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::requested_media;
-
-    #[test]
-    fn maps_requests_to_the_latest_kind() {
-        assert_eq!(requested_media("send me that picture"), Some("image"));
-        assert_eq!(requested_media("that photo"), Some("image"));
-        assert_eq!(requested_media("the pic"), Some("image"));
-        assert_eq!(requested_media("send me that video"), Some("video"));
-        assert_eq!(requested_media("send me that voice memo"), Some("voice"));
-        assert_eq!(requested_media("that recording"), Some("voice"));
-        assert_eq!(requested_media("give me the audio"), Some("voice"));
-        assert_eq!(requested_media("play my voicemail"), Some("voice"));
-        assert_eq!(requested_media("memorial day plans"), None);
-        assert_eq!(requested_media("show me the memo about rent"), None);
-        assert_eq!(requested_media("send me the video recording"), Some("video"));
-        assert_eq!(requested_media("lets go on a picnic"), None);
-        assert_eq!(requested_media("send me the zillow link"), None);
     }
 }

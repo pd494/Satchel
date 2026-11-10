@@ -14,12 +14,7 @@ pub enum Part {
     Text(String),
     Link(String),
     Media(String),
-}
-
-pub struct OutboundMessage {
-    pub space_id: String,
-    pub part: Part,
-    pub idempotency_key: String,
+    Voice(String),
 }
 
 impl LinqClient {
@@ -28,23 +23,21 @@ impl LinqClient {
         Ok(Self { api_key })
     }
 
-    /// Linq drops a repeated `idempotency_key`.
-    pub async fn send(&self, message: &OutboundMessage) -> Result<()> {
-        let part = match &message.part {
+    /// Linq drops a repeated `idempotency_key`. A voice memo goes to its own endpoint.
+    pub async fn send(&self, space_id: &str, idempotency_key: &str, part: Part) -> Result<()> {
+        let part = match part {
             Part::Text(text) => json!({ "type": "text", "value": text }),
             Part::Link(url) => json!({ "type": "link", "value": url }),
             Part::Media(id) => json!({ "type": "media", "attachment_id": id }),
+            Part::Voice(id) => {
+                let body = json!({ "attachment_id": id });
+                return self
+                    .post(&format!("chats/{space_id}/voicememo"), Some(body))
+                    .await;
+            }
         };
-        let body = json!({
-            "message": { "parts": [part], "idempotency_key": message.idempotency_key }
-        });
-        self.post(&format!("chats/{}/messages", message.space_id), Some(body))
-            .await
-    }
-
-    pub async fn send_voice_memo(&self, space_id: &str, attachment_id: &str) -> Result<()> {
-        let body = json!({ "attachment_id": attachment_id });
-        self.post(&format!("chats/{space_id}/voicememo"), Some(body))
+        let body = json!({ "message": { "parts": [part], "idempotency_key": idempotency_key } });
+        self.post(&format!("chats/{space_id}/messages"), Some(body))
             .await
     }
 
