@@ -42,6 +42,12 @@ impl LinqClient {
             .await
     }
 
+    pub async fn send_voice_memo(&self, space_id: &str, attachment_id: &str) -> Result<()> {
+        let body = json!({ "attachment_id": attachment_id });
+        self.post(&format!("chats/{space_id}/voicememo"), Some(body))
+            .await
+    }
+
     pub async fn like(&self, message_id: &str) -> Result<()> {
         let body = json!({ "operation": "add", "type": "like" });
         self.post(&format!("messages/{message_id}/reactions"), Some(body))

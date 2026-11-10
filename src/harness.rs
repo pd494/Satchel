@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::db::{Db, Pending};
 use crate::linq::{LinqClient, OutboundMessage, Part};
-use crate::media::{Image, Link, Video};
+use crate::media::{Image, Link, Video, Voice};
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
@@ -94,7 +94,8 @@ impl Harness {
     }
 
     /// Sends each part of `text` as its own message. Linq requires a link or media part to be
-    /// the only part. A saved photo or video URL goes back as the file itself.
+    /// the only part. A saved photo or video URL goes back as the file itself, and a saved
+    /// voice memo goes back as a voice-memo bubble.
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
         let (rest, urls) = Link::split(text);
         let text = (!rest.is_empty()).then_some(Part::Text(rest));
@@ -105,6 +106,12 @@ impl Harness {
             id.map_or(Part::Link(url), Part::Media)
         });
         for (i, part) in text.into_iter().chain(files).enumerate() {
+            if let Part::Link(url) = &part {
+                if let Some(voice) = Voice::parse(url) {
+                    self.linq.send_voice_memo(space_id, &voice.id).await?;
+                    continue;
+                }
+            }
             let outbound = OutboundMessage {
                 space_id: space_id.to_string(),
                 part,
@@ -124,6 +131,9 @@ impl Harness {
                 saved_file = true;
             } else if let Some(video) = Video::parse(link.url.as_str()) {
                 self.db.insert_saved(message.id, &video)?;
+                saved_file = true;
+            } else if let Some(voice) = Voice::parse(link.url.as_str()) {
+                self.db.insert_saved(message.id, &voice)?;
                 saved_file = true;
             } else {
                 found.push(link);
@@ -152,7 +162,8 @@ impl Harness {
     }
 }
 
-/// The saved kind a text asks to get back: "send me that picture" is an image, "that video" a video.
+/// The saved kind a text asks to get back: "send me that picture" is an image, "that video"
+/// a video, "that voice memo" a voice memo.
 fn requested_media(text: &str) -> Option<&'static str> {
     let text = text.to_lowercase();
     let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).collect();
@@ -160,7 +171,17 @@ fn requested_media(text: &str) -> Option<&'static str> {
     if !has(&["send", "show", "give", "resend"]) && !has(&["that", "the", "my"]) {
         return None;
     }
-    if has(&["video", "vid", "clip"]) {
+    if has(&[
+        "voice",
+        "voicemail",
+        "memo",
+        "audio",
+        "recording",
+        "recordings",
+        "memos",
+    ]) {
+        Some("voice")
+    } else if has(&["video", "vid", "clip"]) {
         Some("video")
     } else if has(&[
         "picture", "pic", "photo", "image", "pics", "pictures", "photos",
@@ -181,6 +202,11 @@ mod tests {
         assert_eq!(requested_media("that photo"), Some("image"));
         assert_eq!(requested_media("the pic"), Some("image"));
         assert_eq!(requested_media("send me that video"), Some("video"));
+        assert_eq!(requested_media("send me that voice memo"), Some("voice"));
+        assert_eq!(requested_media("that recording"), Some("voice"));
+        assert_eq!(requested_media("give me the audio"), Some("voice"));
+        assert_eq!(requested_media("play my voicemail"), Some("voice"));
+        assert_eq!(requested_media("memorial day plans"), None);
         assert_eq!(requested_media("lets go on a picnic"), None);
         assert_eq!(requested_media("send me the zillow link"), None);
     }

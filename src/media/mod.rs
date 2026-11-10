@@ -1,12 +1,14 @@
 mod image;
 mod link;
 mod video;
+mod voice;
 
 pub use image::Image;
 pub use link::Link;
 use mime_guess::Mime;
 use serde_json::{json, Value};
 pub use video::Video;
+pub use voice::Voice;
 
 pub trait Media {
     fn get_type(&self) -> &'static str;
@@ -37,7 +39,7 @@ fn linq_file(url: &str) -> Option<(String, Mime)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Image, Link, Video};
+    use super::{Image, Link, Video, Voice};
 
     const CDN: &str = "https://cdn.linqapp.com/attachments/partners/p1";
 
@@ -60,6 +62,19 @@ mod tests {
     fn ignores_other_files_and_sites() {
         assert!(Image::parse(&format!("{CDN}/7d4e/menu.pdf")).is_none());
         assert!(Video::parse(&format!("{CDN}/7d4e/menu.pdf")).is_none());
+        assert!(Voice::parse(&format!("{CDN}/7d4e/menu.pdf")).is_none());
         assert!(Image::parse("https://example.com/attachments/partners/p1/1/a.jpg").is_none());
+    }
+
+    #[test]
+    fn reads_voice_memos_and_audio_from_linq_urls() {
+        for name in ["Audio Message.caf", "memo.m4a", "song.mp3", "take.wav"] {
+            let url = format!("{CDN}/a1b2/{name}");
+            assert_eq!(
+                Voice::parse(&url).expect("audio is a voice memo").id,
+                "a1b2"
+            );
+            assert!(Image::parse(&url).is_none() && Video::parse(&url).is_none());
+        }
     }
 }
