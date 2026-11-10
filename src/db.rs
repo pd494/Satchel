@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS saved (
     id          INTEGER PRIMARY KEY,
     message_id  INTEGER NOT NULL REFERENCES messages(id),
-    media       TEXT NOT NULL CHECK (media IN ('link', 'note', 'image', 'video', 'voice')),
+    media       TEXT NOT NULL CHECK (media IN ('link', 'note', 'image', 'video', 'voice', 'contact')),
     content     TEXT NOT NULL,
     title       TEXT,
     description TEXT,
@@ -37,9 +37,9 @@ CREATE TABLE IF NOT EXISTS saved (
 ) STRICT;
 "#;
 
-/// Finds a `saved` table made before voice memos. SQLite can't change a CHECK in place.
+/// Finds a `saved` table made before contact cards. SQLite can't change a CHECK in place.
 const OLD_SAVED: &str =
-    "SELECT 1 FROM sqlite_master WHERE name = 'saved' AND sql NOT LIKE '%''voice''%'";
+    "SELECT 1 FROM sqlite_master WHERE name = 'saved' AND sql NOT LIKE '%''contact''%'";
 
 pub struct Db {
     sql: SqlStorage,

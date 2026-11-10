@@ -24,6 +24,8 @@ on allCases()
 		{"recall-video", "send me that video", "attachment", ""}, ¬
 		{"save-voice", "file:~/Pictures/satchel-test/sample-voice.m4a", "tapback", ""}, ¬
 		{"recall-voice", "send me that voice memo", "attachment", ""}, ¬
+		{"save-contact", "file:~/Pictures/satchel-test/sample-contact.vcf", "tapback", ""}, ¬
+		{"recall-contact", "send me that contact", "attachment", ""}, ¬
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}}
 end allCases
 
