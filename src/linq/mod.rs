@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 mod webhook;
-pub use webhook::{InboundMessage, LinqRequestOutcome, LinqWebhook};
+pub use webhook::{LinqRequestOutcome, LinqWebhook};
 
 const API: &str = "https://api.linqapp.com/api/partner/v3";
 
@@ -10,12 +10,15 @@ pub struct LinqClient {
     api_key: String,
 }
 
+pub enum Part {
+    Text(String),
+    Link(String),
+    Media(String),
+}
+
 pub struct OutboundMessage {
     pub space_id: String,
-    pub text: String,
-    pub links: Vec<String>,
-    /// Linq attachment ids to send back.
-    pub attachments: Vec<String>,
+    pub part: Part,
     pub idempotency_key: String,
 }
 
@@ -25,25 +28,18 @@ impl LinqClient {
         Ok(Self { api_key })
     }
 
-    /// Linq requires a link part to be the only part. Linq drops a repeated `idempotency_key`.
+    /// Linq drops a repeated `idempotency_key`.
     pub async fn send(&self, message: &OutboundMessage) -> Result<()> {
-        let path = format!("chats/{}/messages", message.space_id);
-        let text =
-            (!message.text.is_empty()).then(|| json!({ "type": "text", "value": message.text }));
-        let links = message
-            .links
-            .iter()
-            .map(|link| json!({ "type": "link", "value": link }));
-        let attachments = message
-            .attachments
-            .iter()
-            .map(|id| json!({ "type": "media", "attachment_id": id }));
-        for (i, part) in text.into_iter().chain(links).chain(attachments).enumerate() {
-            let key = format!("{}:{i}", message.idempotency_key);
-            let body = json!({ "message": { "parts": [part], "idempotency_key": key } });
-            self.post(&path, Some(body)).await?;
-        }
-        Ok(())
+        let part = match &message.part {
+            Part::Text(text) => json!({ "type": "text", "value": text }),
+            Part::Link(url) => json!({ "type": "link", "value": url }),
+            Part::Media(id) => json!({ "type": "media", "attachment_id": id }),
+        };
+        let body = json!({
+            "message": { "parts": [part], "idempotency_key": message.idempotency_key }
+        });
+        self.post(&format!("chats/{}/messages", message.space_id), Some(body))
+            .await
     }
 
     pub async fn like(&self, message_id: &str) -> Result<()> {

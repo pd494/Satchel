@@ -1,12 +1,13 @@
 use crate::db::Db;
 use crate::harness::Harness;
-use crate::linq::InboundMessage;
 use std::time::Duration;
 use worker::{
-    durable_object, DurableObject, Env, Error, Method, Request, RequestInit, Response, Result,
-    State,
+    durable_object, DurableObject, Env, Error, Headers, Method, Request, RequestInit, Response,
+    Result, State,
 };
 
+const EVENT_ID_HEADER: &str = "x-event-id";
+const SPACE_ID_HEADER: &str = "x-space-id";
 /// Storage key for the space the alarm replies into.
 const SPACE_ID_KEY: &str = "space_id";
 
@@ -17,17 +18,25 @@ pub struct User {
 }
 
 impl User {
-    /// Hands one inbound message to the sender's Durable Object, which replies from its alarm.
-    pub async fn send(env: &Env, message: &InboundMessage) -> Result<()> {
-        let stub = env
-            .durable_object("USER")?
-            .get_by_name(&message.sender_id)?;
-        let body = serde_json::to_string(message)?;
+    /// Hands one inbound text to the sender's Durable Object, which replies from its alarm.
+    pub async fn send(
+        env: &Env,
+        sender_id: &str,
+        text: &str,
+        event_id: &str,
+        space_id: &str,
+    ) -> Result<()> {
+        let stub = env.durable_object("USER")?.get_by_name(sender_id)?;
+
+        let headers = Headers::new();
+        headers.set(EVENT_ID_HEADER, event_id)?;
+        headers.set(SPACE_ID_HEADER, space_id)?;
         let request = Request::new_with_init(
             "https://do/",
             RequestInit::new()
                 .with_method(Method::Post)
-                .with_body(Some(body.into())),
+                .with_body(Some(text.into()))
+                .with_headers(headers),
         )?;
         let mut response = stub.fetch_with_request(request).await?;
         match response.status_code() {
@@ -48,20 +57,25 @@ impl DurableObject for User {
         Self { state, harness }
     }
 
-    /// Saves the user's message and media, and sets the alarm that replies to it.
+    /// Saves the user's text and sets the alarm that replies to it.
     async fn fetch(&self, mut req: Request) -> Result<Response> {
-        let message: InboundMessage = req.json().await?;
+        let text = req.text().await?;
+        let event_id = req
+            .headers()
+            .get(EVENT_ID_HEADER)?
+            .ok_or_else(|| Error::RustError(format!("missing {EVENT_ID_HEADER}")))?;
+        let space_id = req
+            .headers()
+            .get(SPACE_ID_HEADER)?
+            .ok_or_else(|| Error::RustError(format!("missing {SPACE_ID_HEADER}")))?;
 
-        if message.text.trim().eq_ignore_ascii_case("reset") {
+        if text.trim().eq_ignore_ascii_case("reset") {
             self.state.storage().delete_all().await?;
             Db::open(self.state.storage().sql())?;
         }
 
-        self.harness.receive(&message)?;
-        self.state
-            .storage()
-            .put(SPACE_ID_KEY, &message.space_id)
-            .await?;
+        self.harness.receive(&event_id, &text)?;
+        self.state.storage().put(SPACE_ID_KEY, &space_id).await?;
         self.state
             .storage()
             .set_alarm(Duration::from_secs(0))

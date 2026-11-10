@@ -19,12 +19,19 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 
     let message = match LinqWebhook::from_env(&env)?.receive(req).await? {
-        LinqRequestOutcome::Message(message) => message,
+        LinqRequestOutcome::Text(message) => message,
         LinqRequestOutcome::Unsupported => return Response::ok("ok"),
         LinqRequestOutcome::BadSignature => return Response::error("bad signature", 401),
         LinqRequestOutcome::TooLarge => return Response::error("payload too large", 413),
     };
 
-    User::send(&env, &message).await?;
+    User::send(
+        &env,
+        &message.sender_id,
+        &message.text,
+        &message.event_id,
+        &message.space_id,
+    )
+    .await?;
     Response::ok("ok")
 }

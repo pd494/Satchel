@@ -1,7 +1,7 @@
 use crate::agent::Agent;
 use crate::db::{Db, Pending};
-use crate::linq::{InboundMessage, LinqClient, OutboundMessage};
-use crate::media::{Attachment, Link};
+use crate::linq::{LinqClient, OutboundMessage, Part};
+use crate::media::{Image, Link, Video};
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
@@ -36,17 +36,9 @@ impl Harness {
         })
     }
 
-    /// Saves an inbound message and its media so `answer_pending` replies to it later.
-    /// A webhook retry with the same `event_id` saves nothing.
-    pub fn receive(&self, message: &InboundMessage) -> Result<()> {
-        if let Some(id) = self
-            .db
-            .save_user_message(&message.event_id, &message.text)?
-        {
-            for attachment in &message.media {
-                self.db.insert_saved(id, attachment)?;
-            }
-        }
+    /// Saves an inbound text so `answer_pending` replies to it later.
+    pub fn receive(&self, event_id: &str, text: &str) -> Result<()> {
+        self.db.save_user_message(event_id, text)?;
         Ok(())
     }
 
@@ -61,8 +53,13 @@ impl Harness {
                 Reply::Text(SORRY.to_string())
             } else {
                 let result: Result<Reply> = async {
-                    if self.save(&message).await? || message.saved > 0 {
+                    if self.save(&message).await? {
                         return Ok(Reply::Tapback);
+                    }
+                    if let Some(media) = requested_media(&message.content) {
+                        if let Some(url) = self.db.latest_saved(media)? {
+                            return Ok(Reply::Text(url));
+                        }
                     }
                     let context = self.db.load_history(message.id, 6)?;
                     if context.len() == 1 {
@@ -78,20 +75,7 @@ impl Harness {
             };
             let (answer, sent) = match reply {
                 Reply::Text(text) => {
-                    let (rest, ids) = Attachment::split_tags(&text);
-                    let (rest, links) = Link::split(&rest);
-                    let mut attachments = Vec::new();
-                    for id in ids {
-                        attachments.extend(self.db.attachment_id(id)?);
-                    }
-                    let outbound = OutboundMessage {
-                        space_id: space_id.to_string(),
-                        text: rest,
-                        links,
-                        attachments,
-                        idempotency_key: message.event_id.clone(),
-                    };
-                    let sent = self.linq.send(&outbound).await;
+                    let sent = self.send_text(space_id, &message.event_id, &text).await;
                     (text, sent)
                 }
                 Reply::Tapback => {
@@ -109,10 +93,44 @@ impl Harness {
         Ok(())
     }
 
+    /// Sends each part of `text` as its own message. Linq requires a link or media part to be
+    /// the only part. A saved photo or video URL goes back as the file itself.
+    async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
+        let (rest, urls) = Link::split(text);
+        let text = (!rest.is_empty()).then_some(Part::Text(rest));
+        let files = urls.into_iter().map(|url| {
+            let id = Image::parse(&url)
+                .map(|image| image.id)
+                .or_else(|| Video::parse(&url).map(|video| video.id));
+            id.map_or(Part::Link(url), Part::Media)
+        });
+        for (i, part) in text.into_iter().chain(files).enumerate() {
+            let outbound = OutboundMessage {
+                space_id: space_id.to_string(),
+                part,
+                idempotency_key: format!("{event_id}:{i}"),
+            };
+            self.linq.send(&outbound).await?;
+        }
+        Ok(())
+    }
+
     async fn save(&self, message: &Pending) -> Result<bool> {
-        let found = Link::find_all(&message.content);
+        let mut found = Vec::new();
+        let mut saved_file = false;
+        for link in Link::find_all(&message.content) {
+            if let Some(image) = Image::parse(link.url.as_str()) {
+                self.db.insert_saved(message.id, &image)?;
+                saved_file = true;
+            } else if let Some(video) = Video::parse(link.url.as_str()) {
+                self.db.insert_saved(message.id, &video)?;
+                saved_file = true;
+            } else {
+                found.push(link);
+            }
+        }
         if found.is_empty() {
-            return Ok(false);
+            return Ok(saved_file);
         }
         let odds = match self.agent.website_odds(&message.content, &found).await {
             Ok(odds) => odds,
@@ -130,6 +148,40 @@ impl Harness {
         for link in &links {
             self.db.insert_saved(message.id, link)?;
         }
-        Ok(!links.is_empty())
+        Ok(saved_file || !links.is_empty())
+    }
+}
+
+/// The saved kind a text asks to get back: "send me that picture" is an image, "that video" a video.
+fn requested_media(text: &str) -> Option<&'static str> {
+    let text = text.to_lowercase();
+    let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).collect();
+    let has = |options: &[&str]| words.iter().any(|word| options.contains(word));
+    if !has(&["send", "show", "give", "resend"]) && !has(&["that", "the", "my"]) {
+        return None;
+    }
+    if has(&["video", "vid", "clip"]) {
+        Some("video")
+    } else if has(&[
+        "picture", "pic", "photo", "image", "pics", "pictures", "photos",
+    ]) {
+        Some("image")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requested_media;
+
+    #[test]
+    fn maps_requests_to_the_latest_kind() {
+        assert_eq!(requested_media("send me that picture"), Some("image"));
+        assert_eq!(requested_media("that photo"), Some("image"));
+        assert_eq!(requested_media("the pic"), Some("image"));
+        assert_eq!(requested_media("send me that video"), Some("video"));
+        assert_eq!(requested_media("lets go on a picnic"), None);
+        assert_eq!(requested_media("send me the zillow link"), None);
     }
 }
