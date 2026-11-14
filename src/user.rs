@@ -53,7 +53,8 @@ impl User {
 
 impl DurableObject for User {
     fn new(state: State, env: Env) -> Self {
-        let harness = Harness::new(state.storage().sql(), &env).expect("harness setup");
+        let user_id = state.id().name().expect("user DO is named");
+        let harness = Harness::new(state.storage().sql(), &env, user_id).expect("harness setup");
         Self { state, harness }
     }
 

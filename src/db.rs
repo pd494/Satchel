@@ -1,3 +1,4 @@
+use crate::agent::Role;
 use crate::media::Media;
 use serde::Deserialize;
 use worker::{Result, SqlStorage, SqlStorageValue};
@@ -43,7 +44,7 @@ pub struct Db {
 
 #[derive(Deserialize)]
 pub struct Row {
-    pub role: String,
+    pub role: Role,
     pub content: String,
 }
 

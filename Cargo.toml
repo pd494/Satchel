@@ -21,11 +21,11 @@ base64 = "0.23.1"
 hmac = "0.12"
 sha2 = "0.10"
 subtle = "2.6.1"
-rig = { version = "0.45.0", package = "rig-core", default-features = false }
 linkify = "0.11.0"
 serde-wasm-bindgen = "0.6.5"
 psl = "2"
 mime_guess = "2"
+schemars = "1.2.3"
 
 [profile.release]
 opt-level = "s"
