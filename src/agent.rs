@@ -1,5 +1,6 @@
 use crate::db::Row;
-use crate::tools::{self, Definition, ToolCall, ToolResult};
+use crate::harness::Turn;
+use crate::tools::{self, Definition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
@@ -24,10 +25,6 @@ extern "C" {
         input: JsValue,
         options: JsValue,
     ) -> std::result::Result<Promise, JsValue>;
-}
-
-pub trait ToolExecutor {
-    async fn execute(&mut self, call: ToolCall) -> ToolResult;
 }
 
 pub struct Agent {
@@ -66,23 +63,21 @@ struct ChatMessage {
     tool_call_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ModelToolCall {
-    #[serde(default)]
     id: String,
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type")]
     kind: ToolKind,
     function: FunctionCall,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ToolKind {
-    #[default]
     Function,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct FunctionCall {
     name: String,
     /// A JSON string in the OpenAI format; some models send an object instead.
@@ -138,7 +133,7 @@ impl Agent {
         &self,
         history: &[Row],
         labels: &str,
-        executor: &mut impl ToolExecutor,
+        turn: &mut Turn<'_>,
     ) -> Result<String> {
         let mut messages = vec![ChatMessage::new(Role::System, SYSTEM_PROMPT.into(), None)];
         messages.extend(
@@ -171,22 +166,15 @@ impl Agent {
             if message.tool_calls.is_empty() {
                 break;
             }
-            let calls: Vec<_> = message
-                .tool_calls
-                .iter()
-                .map(|call| {
-                    let parsed = tools::parse(&call.function.name, &call.function.arguments);
-                    (call.id.clone(), parsed)
-                })
-                .collect();
+            let calls = message.tool_calls.clone();
             messages.push(message);
-            for (id, call) in calls {
-                let result = match call {
-                    Ok(call) => executor.execute(call).await,
+            for call in calls {
+                let result = match tools::parse(&call.function.name, &call.function.arguments) {
+                    Ok(parsed) => turn.execute(parsed).await,
                     Err(error) => Err(error),
                 };
                 let content = result.unwrap_or_else(|error| format!("error: {error}"));
-                messages.push(ChatMessage::new(Role::Tool, content, Some(id)));
+                messages.push(ChatMessage::new(Role::Tool, content, Some(call.id)));
             }
         }
         Ok(text)

@@ -1,4 +1,4 @@
-use crate::agent::{Agent, ToolExecutor};
+use crate::agent::Agent;
 use crate::db::{Db, Pending};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Media, Note};
@@ -127,18 +127,18 @@ fn label(text: &str) -> Vec<(String, Box<dyn Media>)> {
         .map(|link| match File::parse(link.url.as_str()) {
             Some(file) => {
                 files += 1;
-                (format!("F{files}"), Box::new(file) as Box<dyn Media>)
+                (format!("F{files}"), Box::new(file) as _)
             }
             None => {
                 links += 1;
-                (format!("L{links}"), Box::new(link) as Box<dyn Media>)
+                (format!("L{links}"), Box::new(link) as _)
             }
         })
         .collect()
 }
 
 /// Runs the model's tool calls for one message.
-struct Turn<'a> {
+pub struct Turn<'a> {
     db: &'a Db,
     linq: &'a LinqClient,
     message: &'a Pending,
@@ -146,16 +146,14 @@ struct Turn<'a> {
     tapback: Option<Tapback>,
 }
 
-impl ToolExecutor for Turn<'_> {
-    async fn execute(&mut self, call: ToolCall) -> ToolResult {
+impl Turn<'_> {
+    pub async fn execute(&mut self, call: ToolCall) -> ToolResult {
         match call {
             ToolCall::React(React { emoji }) => self.react(emoji).await,
             ToolCall::Save(Save { items, note }) => self.save(&items, note),
         }
     }
-}
 
-impl Turn<'_> {
     async fn react(&mut self, tapback: Tapback) -> ToolResult {
         self.linq
             .react(&self.message.event_id, tapback)
