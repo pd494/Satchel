@@ -1,21 +1,19 @@
-use crate::agent::Agent;
+use crate::agent::{Agent, ToolExecutor};
 use crate::db::{Db, Pending};
 use crate::linq::{LinqClient, Part};
-use crate::media::{File, Kind, Link};
-use worker::{console_error, Env, Result, SqlStorage};
+use crate::media::{File, Kind, Link, Media, Note};
+use crate::tools::{Tapback, ToolCall, ToolResult};
+use worker::{console_error, Env, Error, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
 const MAX_ATTEMPTS: i64 = 3;
 
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 
-const KEEP_LINK: f64 = 0.1;
-
-const SAVED_TAPBACK: &str = "👍";
-
 enum Reply {
     Text(String),
-    Tapback,
+    /// Already sent by the `react` tool.
+    Tapback(Tapback),
 }
 
 const GREETING: &str =
@@ -28,10 +26,10 @@ pub struct Harness {
 }
 
 impl Harness {
-    pub fn new(sql: SqlStorage, env: &Env) -> Result<Self> {
+    pub fn new(sql: SqlStorage, env: &Env, user_id: String) -> Result<Self> {
         Ok(Self {
             db: Db::open(sql)?,
-            agent: Agent::new(env.ai("AI")?),
+            agent: Agent::new(env.ai("AI")?, user_id),
             linq: LinqClient::from_env(env)?,
         })
     }
@@ -53,14 +51,26 @@ impl Harness {
                 Reply::Text(SORRY.to_string())
             } else {
                 let result: Result<Reply> = async {
-                    if self.save(&message).await? {
-                        return Ok(Reply::Tapback);
-                    }
                     let context = self.db.load_history(message.id, 6)?;
-                    if context.len() == 1 {
-                        return Ok(Reply::Text(GREETING.to_string()));
+                    let mut turn = Turn {
+                        db: &self.db,
+                        linq: &self.linq,
+                        message: &message,
+                        labels: label(&message.content),
+                        tapback: None,
+                    };
+                    let labels: String = turn
+                        .labels
+                        .iter()
+                        .map(|(label, part)| format!("\n[{label}] {}", part.content()))
+                        .collect();
+                    let text = self.agent.response(&context, &labels, &mut turn).await?;
+                    match (text.is_empty(), turn.tapback) {
+                        _ if context.len() == 1 => Ok(Reply::Text(GREETING.to_string())),
+                        (false, _) => Ok(Reply::Text(text)),
+                        (true, Some(tapback)) => Ok(Reply::Tapback(tapback)),
+                        (true, None) => Err(Error::RustError("model sent no reply".into())),
                     }
-                    Ok(Reply::Text(self.agent.response(&context).await?))
                 }
                 .await;
                 if result.is_err() {
@@ -73,10 +83,7 @@ impl Harness {
                     let sent = self.send_text(space_id, &message.event_id, &text).await;
                     (text, sent)
                 }
-                Reply::Tapback => {
-                    let sent = self.linq.like(&message.event_id).await;
-                    (SAVED_TAPBACK.to_string(), sent)
-                }
+                Reply::Tapback(tapback) => (tapback.emoji().to_string(), Ok(())),
             };
             if sent.is_err() && message.attempts < MAX_ATTEMPTS {
                 self.db.record_failure(&message.event_id)?;
@@ -110,38 +117,97 @@ impl Harness {
         }
         Ok(())
     }
+}
 
-    async fn save(&self, message: &Pending) -> Result<bool> {
-        let mut found = Vec::new();
-        let mut saved_file = false;
-        for link in Link::find_all(&message.content) {
-            match File::parse(link.url.as_str()) {
-                Some(file) => {
-                    self.db.insert_saved(message.id, &file)?;
-                    saved_file = true;
-                }
-                None => found.push(link),
+/// Labels the links and files in `text` `L1`, `F1`, ... so the model can save them by label.
+fn label(text: &str) -> Vec<(String, Box<dyn Media>)> {
+    let (mut links, mut files) = (0, 0);
+    Link::find_all(text)
+        .into_iter()
+        .map(|link| match File::parse(link.url.as_str()) {
+            Some(file) => {
+                files += 1;
+                (format!("F{files}"), Box::new(file) as Box<dyn Media>)
             }
-        }
-        if found.is_empty() {
-            return Ok(saved_file);
-        }
-        let odds = match self.agent.website_odds(&message.content, &found).await {
-            Ok(odds) => odds,
-            Err(error) => {
-                console_error!("website_odds failed, keeping all links: {error}");
-                vec![None; found.len()]
+            None => {
+                links += 1;
+                (format!("L{links}"), Box::new(link) as Box<dyn Media>)
             }
+        })
+        .collect()
+}
+
+/// Runs the model's tool calls for one message.
+struct Turn<'a> {
+    db: &'a Db,
+    linq: &'a LinqClient,
+    message: &'a Pending,
+    labels: Vec<(String, Box<dyn Media>)>,
+    tapback: Option<Tapback>,
+}
+
+impl ToolExecutor for Turn<'_> {
+    async fn execute(&mut self, call: ToolCall) -> ToolResult {
+        match call {
+            ToolCall::React { emoji } => self.react(emoji).await,
+            ToolCall::Save { items, note } => self.save(&items, note),
+        }
+    }
+}
+
+impl Turn<'_> {
+    async fn react(&mut self, tapback: Tapback) -> ToolResult {
+        self.linq
+            .react(&self.message.event_id, tapback)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.tapback = Some(tapback);
+        Ok("reacted".into())
+    }
+
+    fn save(&self, items: &[String], note: Option<String>) -> ToolResult {
+        let parts = items
+            .iter()
+            .map(|item| {
+                self.labels
+                    .iter()
+                    .find(|(label, _)| label == item)
+                    .map(|(_, part)| part.as_ref())
+                    .ok_or_else(|| format!("unknown label {item}"))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let insert = |part: &dyn Media| {
+            self.db
+                .insert_saved(self.message.id, part)
+                .map_err(|error| error.to_string())
         };
-        let links: Vec<Link> = found
-            .into_iter()
-            .zip(odds)
-            .filter(|(_, odds)| odds.is_none_or(|odds| odds >= KEEP_LINK))
-            .map(|(link, _)| link)
+        parts.into_iter().try_for_each(insert)?;
+        note.map(|note| insert(&Note(note))).transpose()?;
+        Ok("saved".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_links_and_files() {
+        let text = "this apartment https://example.com/apt and https://cdn.linqapp.com/attachments/partners/p/abc/IMG_1.jpg";
+        let labels: Vec<(String, String)> = label(text)
+            .iter()
+            .map(|(label, part)| (label.clone(), part.content()))
             .collect();
-        for link in &links {
-            self.db.insert_saved(message.id, link)?;
-        }
-        Ok(saved_file || !links.is_empty())
+        assert_eq!(
+            labels,
+            vec![
+                ("L1".into(), "https://example.com/apt".into()),
+                (
+                    "F1".into(),
+                    "https://cdn.linqapp.com/attachments/partners/p/abc/IMG_1.jpg".into()
+                ),
+            ]
+        );
+        assert!(label("ok thanks").is_empty());
     }
 }

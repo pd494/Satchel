@@ -1,8 +1,10 @@
 mod agent;
+mod ai;
 pub mod db;
 mod harness;
 pub mod linq;
 mod media;
+mod tools;
 pub mod user;
 
 use linq::{LinqRequestOutcome, LinqWebhook};

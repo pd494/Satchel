@@ -9,7 +9,6 @@ const FILE_EXTENSIONS: [&str; 7] = ["md", "py", "rs", "sh", "pl", "zip", "mov"];
 
 pub struct Link {
     pub url: Url,
-    pub typed: String,
     pub suspicious: bool,
     span: Range<usize>,
 }
@@ -61,7 +60,6 @@ impl Link {
                     });
                 Some(Self {
                     url,
-                    typed: typed.to_owned(),
                     suspicious: bare && !trusted_suffix,
                     span: start..start + typed.len(),
                 })

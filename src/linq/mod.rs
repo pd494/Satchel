@@ -1,3 +1,4 @@
+use crate::tools::Tapback;
 use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
@@ -41,8 +42,16 @@ impl LinqClient {
             .await
     }
 
-    pub async fn like(&self, message_id: &str) -> Result<()> {
-        let body = json!({ "operation": "add", "type": "like" });
+    pub async fn react(&self, message_id: &str, tapback: Tapback) -> Result<()> {
+        let kind = match tapback {
+            Tapback::Like => "like",
+            Tapback::Love => "love",
+            Tapback::Dislike => "dislike",
+            Tapback::Laugh => "laugh",
+            Tapback::Emphasize => "emphasize",
+            Tapback::Question => "question",
+        };
+        let body = json!({ "operation": "add", "type": kind });
         self.post(&format!("messages/{message_id}/reactions"), Some(body))
             .await
     }
