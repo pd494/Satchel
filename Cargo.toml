@@ -35,6 +35,3 @@ codegen-units = 1
 [lints.rust]
 unsafe_code = "forbid"
 
-[dev-dependencies]
-futures = "0.3.34"
-

@@ -1,5 +1,4 @@
 mod agent;
-mod ai;
 pub mod db;
 mod harness;
 pub mod linq;

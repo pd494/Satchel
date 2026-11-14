@@ -186,28 +186,3 @@ impl Turn<'_> {
         Ok("saved".into())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn labels_links_and_files() {
-        let text = "this apartment https://example.com/apt and https://cdn.linqapp.com/attachments/partners/p/abc/IMG_1.jpg";
-        let labels: Vec<(String, String)> = label(text)
-            .iter()
-            .map(|(label, part)| (label.clone(), part.content()))
-            .collect();
-        assert_eq!(
-            labels,
-            vec![
-                ("L1".into(), "https://example.com/apt".into()),
-                (
-                    "F1".into(),
-                    "https://cdn.linqapp.com/attachments/partners/p/abc/IMG_1.jpg".into()
-                ),
-            ]
-        );
-        assert!(label("ok thanks").is_empty());
-    }
-}

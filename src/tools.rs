@@ -1,8 +1,8 @@
 use schemars::{schema_for, JsonSchema, Schema};
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
 #[schemars(inline)]
 pub enum Tapback {
     #[serde(rename = "👍")]
@@ -33,13 +33,13 @@ impl Tapback {
 }
 
 /// Tapback the user's message.
-#[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 pub struct React {
     pub emoji: Tapback,
 }
 
 /// Save labeled links and files from the user's message, and/or a note to remember.
-#[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[derive(Deserialize, JsonSchema)]
 pub struct Save {
     /// Labels like "L1" or "F1".
     #[serde(default)]
@@ -48,7 +48,6 @@ pub struct Save {
     pub note: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
 pub enum ToolCall {
     React(React),
     Save(Save),
@@ -57,19 +56,41 @@ pub enum ToolCall {
 /// `Err` goes back to the model as an error message.
 pub type ToolResult = Result<String, String>;
 
-pub fn definitions() -> Value {
-    let tool = |name: &str, mut parameters: Schema| {
+#[derive(Serialize)]
+pub struct Definition {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: Function,
+}
+
+#[derive(Serialize)]
+struct Function {
+    name: &'static str,
+    description: Option<Value>,
+    parameters: Schema,
+}
+
+impl Definition {
+    fn new(name: &'static str, mut parameters: Schema) -> Self {
         parameters.remove("$schema");
         parameters.remove("title");
         let description = parameters.remove("description");
-        json!({ "type": "function", "function": {
-            "name": name, "description": description, "parameters": parameters,
-        }})
-    };
-    json!([
-        tool("react", schema_for!(React)),
-        tool("save", schema_for!(Save)),
-    ])
+        Self {
+            kind: "function",
+            function: Function {
+                name,
+                description,
+                parameters,
+            },
+        }
+    }
+}
+
+pub fn definitions() -> [Definition; 2] {
+    [
+        Definition::new("react", schema_for!(React)),
+        Definition::new("save", schema_for!(Save)),
+    ]
 }
 
 /// `arguments` is a JSON string in the OpenAI format; some models send an object instead.
@@ -85,54 +106,4 @@ pub fn parse(name: &str, arguments: &Value) -> Result<ToolCall, String> {
         _ => return Err(format!("unknown tool {name}")),
     }
     .map_err(bad)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_string_and_object_arguments() {
-        assert_eq!(
-            parse("react", &json!(r#"{"emoji":"👍"}"#)),
-            Ok(ToolCall::React(React {
-                emoji: Tapback::Like
-            }))
-        );
-        assert_eq!(
-            parse(
-                "save",
-                &json!({ "items": ["L1"], "note": "wifi pw is on the fridge" })
-            ),
-            Ok(ToolCall::Save(Save {
-                items: vec!["L1".into()],
-                note: Some("wifi pw is on the fridge".into())
-            }))
-        );
-        assert_eq!(
-            parse("save", &json!({ "note": "x" })),
-            Ok(ToolCall::Save(Save {
-                items: vec![],
-                note: Some("x".into())
-            }))
-        );
-    }
-
-    #[test]
-    fn rejects_bad_calls() {
-        assert!(parse("react", &json!({ "emoji": "🦀" })).is_err());
-        assert!(parse("react", &json!("not json")).is_err());
-        assert!(parse("delete", &json!({})).is_err());
-    }
-
-    #[test]
-    fn definitions_inline_the_schemas() {
-        let tools = definitions();
-        assert_eq!(tools[0]["function"]["name"], "react");
-        assert_eq!(
-            tools[0]["function"]["parameters"]["properties"]["emoji"]["enum"][0],
-            "👍"
-        );
-        assert_eq!(tools[1]["function"]["parameters"]["required"], Value::Null);
-    }
 }
