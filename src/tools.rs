@@ -33,30 +33,25 @@ impl Tapback {
 }
 
 /// Tapback the user's message.
-#[derive(Deserialize, JsonSchema)]
-struct React {
-    emoji: Tapback,
+#[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+pub struct React {
+    pub emoji: Tapback,
 }
 
 /// Save labeled links and files from the user's message, and/or a note to remember.
-#[derive(Deserialize, JsonSchema)]
-struct Save {
+#[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+pub struct Save {
     /// Labels like "L1" or "F1".
     #[serde(default)]
-    items: Vec<String>,
+    pub items: Vec<String>,
     /// Text to remember, in the user's words.
-    note: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum ToolCall {
-    React {
-        emoji: Tapback,
-    },
-    Save {
-        items: Vec<String>,
-        note: Option<String>,
-    },
+    React(React),
+    Save(Save),
 }
 
 /// `Err` goes back to the model as an error message.
@@ -85,14 +80,11 @@ pub fn parse(name: &str, arguments: &Value) -> Result<ToolCall, String> {
         other => other.clone(),
     };
     match name {
-        "react" => serde_json::from_value(arguments)
-            .map(|React { emoji }| ToolCall::React { emoji })
-            .map_err(bad),
-        "save" => serde_json::from_value(arguments)
-            .map(|Save { items, note }| ToolCall::Save { items, note })
-            .map_err(bad),
-        _ => Err(format!("unknown tool {name}")),
+        "react" => serde_json::from_value(arguments).map(ToolCall::React),
+        "save" => serde_json::from_value(arguments).map(ToolCall::Save),
+        _ => return Err(format!("unknown tool {name}")),
     }
+    .map_err(bad)
 }
 
 #[cfg(test)]
@@ -103,26 +95,26 @@ mod tests {
     fn parses_string_and_object_arguments() {
         assert_eq!(
             parse("react", &json!(r#"{"emoji":"👍"}"#)),
-            Ok(ToolCall::React {
+            Ok(ToolCall::React(React {
                 emoji: Tapback::Like
-            })
+            }))
         );
         assert_eq!(
             parse(
                 "save",
                 &json!({ "items": ["L1"], "note": "wifi pw is on the fridge" })
             ),
-            Ok(ToolCall::Save {
+            Ok(ToolCall::Save(Save {
                 items: vec!["L1".into()],
                 note: Some("wifi pw is on the fridge".into())
-            })
+            }))
         );
         assert_eq!(
             parse("save", &json!({ "note": "x" })),
-            Ok(ToolCall::Save {
+            Ok(ToolCall::Save(Save {
                 items: vec![],
                 note: Some("x".into())
-            })
+            }))
         );
     }
 

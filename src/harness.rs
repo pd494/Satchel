@@ -2,7 +2,7 @@ use crate::agent::{Agent, ToolExecutor};
 use crate::db::{Db, Pending};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Media, Note};
-use crate::tools::{Tapback, ToolCall, ToolResult};
+use crate::tools::{React, Save, Tapback, ToolCall, ToolResult};
 use worker::{console_error, Env, Error, Result, SqlStorage};
 
 /// Failed model calls or sends before a message gets `SORRY` instead.
@@ -12,8 +12,8 @@ const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 
 enum Reply {
     Text(String),
-    /// Already sent by the `react` tool.
-    Tapback(Tapback),
+    /// The emoji the `react` tool already sent.
+    Tapback(&'static str),
 }
 
 const GREETING: &str =
@@ -52,23 +52,23 @@ impl Harness {
             } else {
                 let result: Result<Reply> = async {
                     let context = self.db.load_history(message.id, 6)?;
+                    let labels = label(&message.content);
+                    let listed: String = labels
+                        .iter()
+                        .map(|(label, part)| format!("\n[{label}] {}", part.content()))
+                        .collect();
                     let mut turn = Turn {
                         db: &self.db,
                         linq: &self.linq,
                         message: &message,
-                        labels: label(&message.content),
+                        labels,
                         tapback: None,
                     };
-                    let labels: String = turn
-                        .labels
-                        .iter()
-                        .map(|(label, part)| format!("\n[{label}] {}", part.content()))
-                        .collect();
-                    let text = self.agent.response(&context, &labels, &mut turn).await?;
+                    let text = self.agent.response(&context, &listed, &mut turn).await?;
                     match (text.is_empty(), turn.tapback) {
                         _ if context.len() == 1 => Ok(Reply::Text(GREETING.to_string())),
                         (false, _) => Ok(Reply::Text(text)),
-                        (true, Some(tapback)) => Ok(Reply::Tapback(tapback)),
+                        (true, Some(tapback)) => Ok(Reply::Tapback(tapback.emoji())),
                         (true, None) => Err(Error::RustError("model sent no reply".into())),
                     }
                 }
@@ -83,7 +83,7 @@ impl Harness {
                     let sent = self.send_text(space_id, &message.event_id, &text).await;
                     (text, sent)
                 }
-                Reply::Tapback(tapback) => (tapback.emoji().to_string(), Ok(())),
+                Reply::Tapback(emoji) => (emoji.to_string(), Ok(())),
             };
             if sent.is_err() && message.attempts < MAX_ATTEMPTS {
                 self.db.record_failure(&message.event_id)?;
@@ -149,8 +149,8 @@ struct Turn<'a> {
 impl ToolExecutor for Turn<'_> {
     async fn execute(&mut self, call: ToolCall) -> ToolResult {
         match call {
-            ToolCall::React { emoji } => self.react(emoji).await,
-            ToolCall::Save { items, note } => self.save(&items, note),
+            ToolCall::React(React { emoji }) => self.react(emoji).await,
+            ToolCall::Save(Save { items, note }) => self.save(&items, note),
         }
     }
 }

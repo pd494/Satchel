@@ -98,7 +98,7 @@ async fn run<F: Future<Output = Result<Value>>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::Tapback;
+    use crate::tools::{React, Save, Tapback};
     use futures::executor::block_on;
 
     #[derive(Default)]
@@ -109,7 +109,7 @@ mod tests {
     impl ToolExecutor for Fake {
         async fn execute(&mut self, call: ToolCall) -> ToolResult {
             let result = match &call {
-                ToolCall::Save { items, .. } if items.iter().any(|item| item == "L9") => {
+                ToolCall::Save(Save { items, .. }) if items.iter().any(|item| item == "L9") => {
                     Err("unknown label L9".into())
                 }
                 _ => Ok("ok".into()),
@@ -144,15 +144,15 @@ mod tests {
     }
 
     fn save(items: &[&str], note: Option<&str>) -> ToolCall {
-        ToolCall::Save {
+        ToolCall::Save(Save {
             items: items.iter().map(|item| item.to_string()).collect(),
             note: note.map(str::to_string),
-        }
+        })
     }
 
-    const LIKE: ToolCall = ToolCall::React {
+    const LIKE: ToolCall = ToolCall::React(React {
         emoji: Tapback::Like,
-    };
+    });
 
     #[test]
     fn bare_link_is_saved_and_liked() {
@@ -220,9 +220,9 @@ mod tests {
         )]);
         assert_eq!(
             calls,
-            vec![ToolCall::React {
+            vec![ToolCall::React(React {
                 emoji: Tapback::Love
-            }]
+            })]
         );
     }
 
