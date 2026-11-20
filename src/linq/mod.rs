@@ -1,3 +1,4 @@
+use crate::tools::Tapback;
 use serde_json::{json, Value};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
@@ -7,6 +8,7 @@ pub use webhook::{LinqRequestOutcome, LinqWebhook};
 const API: &str = "https://api.linqapp.com/api/partner/v3";
 
 pub struct LinqClient {
+    api: String,
     api_key: String,
 }
 
@@ -18,9 +20,14 @@ pub enum Part {
 }
 
 impl LinqClient {
+    /// `LINQ_API` overrides the Linq URL. The end-to-end tests point it at a fake Linq.
     pub fn from_env(env: &Env) -> Result<Self> {
+        let api = match env.var("LINQ_API") {
+            Ok(api) => api.to_string(),
+            Err(_) => API.to_string(),
+        };
         let api_key = env.secret("LINQ_API_KEY")?.to_string();
-        Ok(Self { api_key })
+        Ok(Self { api, api_key })
     }
 
     /// Linq drops a repeated `idempotency_key`. A voice memo goes to its own endpoint.
@@ -41,8 +48,16 @@ impl LinqClient {
             .await
     }
 
-    pub async fn like(&self, message_id: &str) -> Result<()> {
-        let body = json!({ "operation": "add", "type": "like" });
+    pub async fn react(&self, message_id: &str, tapback: Tapback) -> Result<()> {
+        let kind = match tapback {
+            Tapback::Like => "like",
+            Tapback::Love => "love",
+            Tapback::Dislike => "dislike",
+            Tapback::Laugh => "laugh",
+            Tapback::Emphasize => "emphasize",
+            Tapback::Question => "question",
+        };
+        let body = json!({ "operation": "add", "type": kind });
         self.post(&format!("messages/{message_id}/reactions"), Some(body))
             .await
     }
@@ -59,7 +74,7 @@ impl LinqClient {
         init.with_method(Method::Post)
             .with_headers(headers)
             .with_body(body.map(|body| body.to_string().into()));
-        let url = format!("{API}/{path}");
+        let url = format!("{}/{path}", self.api);
         let mut response = Fetch::Request(Request::new_with_init(&url, &init)?)
             .send()
             .await?;

@@ -1,8 +1,10 @@
 mod file;
 mod link;
+mod note;
 
 pub use file::{File, Kind};
 pub use link::Link;
+pub use note::Note;
 use serde_json::{json, Value};
 
 pub trait Media {

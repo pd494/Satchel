@@ -6,6 +6,7 @@ property evidenceDir : "/tmp/satchel-verify"
 
 on allCases()
 	return {¬
+		{"reset", "reset", "text", "Satchel"}, ¬
 		{"chat", "hi", "text", ""}, ¬
 		{"save-link-scheme", "https://www.rust-lang.org/learn", "tapback", ""}, ¬
 		{"save-link-bare", "example.com/apartments", "tapback", ""}, ¬
@@ -30,7 +31,10 @@ on allCases()
 		{"recall-location", "send me that location", "attachment", ""}, ¬
 		{"save-file", "file:~/Pictures/satchel-test/sample-file.pdf", "tapback", ""}, ¬
 		{"recall-file", "send me that pdf", "attachment", ""}, ¬
-		{"question-not-saved", "send me the chili recipe", "text-only", ""}}
+		{"question-not-saved", "send me the chili recipe", "text-only", ""}, ¬
+		{"link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""}, ¬
+		{"save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"}, ¬
+		{"recall-after-answer", "what was that book link?", "text-only", "doc.rust-lang.org"}}
 end allCases
 
 on run argv

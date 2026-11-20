@@ -90,7 +90,7 @@ impl DurableObject for User {
             .get(SPACE_ID_KEY)
             .await?
             .ok_or_else(|| Error::RustError(format!("missing {SPACE_ID_KEY}")))?;
-        self.harness.answer_pending(&space_id).await?;
+        self.harness.inbox(&space_id).await?;
         Response::ok("ok")
     }
 }

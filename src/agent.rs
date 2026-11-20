@@ -1,97 +1,108 @@
 use crate::db::Row;
-use crate::media::Link;
+use crate::tools::ToolCall;
 use serde::Serialize;
-use serde_json::{json, Map, Value};
-use wasm_bindgen::JsValue;
-use worker::{Ai, Error, Result};
+use serde_json::{json, Value};
+use wasm_bindgen::prelude::*;
+use worker::js_sys::Promise;
+use worker::wasm_bindgen_futures::JsFuture;
+use worker::{Ai, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
-const CLEF: &str = "@cf/cloudflare/clef-flash";
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
+/// Parsed tool calls. A call that fails to parse holds the error text for the model.
+pub type Calls = Vec<std::result::Result<ToolCall, String>>;
 
-// TODO: tools (Rig) go here later
+const JSON: serde_wasm_bindgen::Serializer = serde_wasm_bindgen::Serializer::json_compatible();
+
+#[wasm_bindgen]
+extern "C" {
+    type AiBinding;
+
+    /// `Ai::run` has no options argument, which AI Gateway routing needs.
+    #[wasm_bindgen(method, catch)]
+    fn run(
+        this: &AiBinding,
+        model: &str,
+        input: JsValue,
+        options: JsValue,
+    ) -> std::result::Result<Promise, JsValue>;
+}
 
 pub struct Agent {
-    ai: Ai,
-}
-
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    messages: Vec<ChatMessage<'a>>,
-    chat_template_kwargs: ChatTemplateKwargs,
-}
-
-#[derive(Serialize)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Serialize)]
-struct Js(#[serde(with = "serde_wasm_bindgen::preserve")] JsValue);
-
-#[derive(Serialize)]
-struct ChatTemplateKwargs {
-    enable_thinking: bool,
+    ai: AiBinding,
+    tools: Value,
+    options: JsValue,
 }
 
 impl Agent {
-    pub fn new(ai: Ai) -> Self {
-        Self { ai }
+    pub fn new(ai: Ai) -> Result<Self> {
+        Ok(Self {
+            ai: ai.unchecked_into(),
+            tools: ToolCall::definitions(),
+            options: json!({ "gateway": { "id": "satchel" } }).serialize(&JSON)?,
+        })
     }
 
-    pub async fn response(&self, history: &[Row]) -> Result<String> {
-        let system = ChatMessage {
-            role: "system",
-            content: SYSTEM_PROMPT,
-        };
-        let mut messages = vec![system];
-        messages.extend(history.iter().map(|row| ChatMessage {
-            role: &row.role,
-            content: &row.content,
-        }));
-        let request = ChatRequest {
-            messages,
-            chat_template_kwargs: ChatTemplateKwargs {
-                enable_thinking: false,
-            },
-        };
-        let response: Value = self.ai.run(MODEL, request).await?;
-
-        response["choices"][0]["message"]["content"]
-            .as_str()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| Error::RustError(format!("no reply text in {response}")))
-    }
-
-    async fn ask_clef(&self, state: &str, questions: Value) -> Result<Value> {
-        let request = json!({ "model": "clef-flash", "state": state, "questions": questions })
-            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())?;
-        let mut out: Value = self.ai.run(CLEF, Js(request)).await?;
-        Ok(out["answers"].take())
-    }
-
-    pub async fn website_odds(&self, content: &str, links: &[Link]) -> Result<Vec<Option<f64>>> {
-        let questions: Map<String, Value> = links
-            .iter()
-            .enumerate()
-            .filter(|(_, link)| link.suspicious)
-            .map(|(i, link)| {
-                let instructions = format!("Is `{}` meant as a website address?", link.typed);
-                (
-                    format!("link.{i}"),
-                    json!({ "type": "noul", "instructions": instructions }),
-                )
-            })
-            .collect();
-        if questions.is_empty() {
-            return Ok(vec![None; links.len()]);
+    /// The system prompt followed by `history`.
+    pub fn context(history: &[Row]) -> Vec<Value> {
+        let mut context = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+        for row in history {
+            context.push(json!({ "role": row.role, "content": row.content }));
         }
-        let answers = self.ask_clef(content, Value::Object(questions)).await?;
-        Ok((0..links.len())
-            .map(|i| answers[format!("link.{i}").as_str()]["noul"].as_f64())
-            .collect())
+        context
+    }
+
+    /// Calls the model once through AI Gateway and adds its message to `context`. Returns its
+    /// trimmed text and its tool calls.
+    pub async fn run_model(&self, context: &mut Vec<Value>) -> Result<(String, Calls)> {
+        let input = json!({
+            "messages": context,
+            "tools": self.tools,
+            "chat_template_kwargs": { "enable_thinking": false },
+        })
+        .serialize(&JSON)?;
+        let output = JsFuture::from(self.ai.run(MODEL, input, self.options.clone())?).await?;
+        let response =
+            serde_wasm_bindgen::from_value::<Value>(output)?["choices"][0]["message"].take();
+        let text = Self::clean(response["content"].as_str().unwrap_or_default());
+        let calls = response["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|call| ToolCall::parse(&call["function"]).map_err(|error| error.to_string()))
+            .collect();
+        context.push(response);
+        Ok((text, calls))
+    }
+
+    /// Adds one tool message per result, matched to the tool call ids in the last response.
+    pub fn push_results(context: &mut Vec<Value>, results: Vec<String>) {
+        let mut ids = Vec::new();
+        if let Some(last) = context.last() {
+            if let Some(tool_calls) = last["tool_calls"].as_array() {
+                for call in tool_calls {
+                    ids.push(call["id"].clone());
+                }
+            }
+        }
+        for (id, content) in ids.into_iter().zip(results) {
+            context.push(json!({ "role": "tool", "tool_call_id": id, "content": content }));
+        }
+    }
+
+    /// Removes what Gemma sometimes leaks into its text: a thinking block before `<channel|>`,
+    /// special tokens like `<|file_separator|>`, and zero-width characters.
+    fn clean(text: &str) -> String {
+        let mut text = text.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "");
+        if let Some(end) = text.rfind("<channel|>") {
+            text = text[end + "<channel|>".len()..].to_string();
+        }
+        while let Some(start) = text.find("<|") {
+            let Some(len) = text[start..].find('>') else {
+                break;
+            };
+            text.replace_range(start..=start + len, "");
+        }
+        text.trim().to_string()
     }
 }

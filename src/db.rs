@@ -2,13 +2,13 @@ use crate::media::Media;
 use serde::Deserialize;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
-/// +----+-----------+------------------+----------+----------+----------+------------+
-/// | id | role      | content          | event_id | reply_to | attempts | created_at |
-/// +----+-----------+------------------+----------+----------+----------+------------+
-/// | 1  | user      | "what was that…" | evt_1    | NULL     | 0        | 1761600000 |
-/// +----+-----------+------------------+----------+----------+----------+------------+
-/// | 2  | assistant | "Sunset Lofts…"  | NULL     | evt_1    | 0        | 1761600002 |
-/// +----+-----------+------------------+----------+----------+----------+------------+
+/// +----+-----------+------------------+----------+----------+----------+------+------------+
+/// | id | role      | content          | event_id | reply_to | attempts | sent | created_at |
+/// +----+-----------+------------------+----------+----------+----------+------+------------+
+/// | 1  | user      | "what was that…" | evt_1    | NULL     | 1        | 0    | 1761600000 |
+/// +----+-----------+------------------+----------+----------+----------+------+------------+
+/// | 2  | assistant | "Sunset Lofts…"  | NULL     | evt_1    | 0        | 1    | 1761600002 |
+/// +----+-----------+------------------+----------+----------+----------+------+------------+
 /// ```
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS messages (
     event_id   TEXT UNIQUE,
     reply_to   TEXT UNIQUE REFERENCES messages(event_id),
     attempts   INTEGER NOT NULL DEFAULT 0,
+    sent       INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     CHECK ((role = 'user') = (event_id IS NOT NULL)),
     CHECK ((role = 'assistant') = (reply_to IS NOT NULL))
@@ -48,12 +49,14 @@ pub struct Row {
 }
 
 #[derive(Deserialize)]
-pub struct Pending {
+pub struct UnansweredMessage {
     pub id: i64,
     pub event_id: String,
     pub content: String,
-    /// Failed model calls or sends so far.
+    /// Runs started so far.
     pub attempts: i64,
+    /// The stored reply that failed to send, if any.
+    pub response: Option<String>,
 }
 
 impl Db {
@@ -77,6 +80,7 @@ impl Db {
     }
 
     /// Inserts the assistant's reply, linked to the user message it answers via `reply_to`.
+    /// The reply is unsent until `mark_sent`, and `inbox` sends it again until then.
     pub fn save_agent_message(&self, reply_to: &str, content: &str) -> Result<()> {
         let insert_query =
             "INSERT INTO messages (role, reply_to, content) VALUES ('assistant', ?, ?)";
@@ -87,6 +91,12 @@ impl Db {
                 SqlStorageValue::String(content.to_string()),
             ]),
         )?;
+        Ok(())
+    }
+
+    pub fn mark_sent(&self, reply_to: &str) -> Result<()> {
+        let update_query = "UPDATE messages SET sent = 1 WHERE reply_to = ?";
+        self.sql.exec(update_query, Some(vec![reply_to.into()]))?;
         Ok(())
     }
 
@@ -110,20 +120,20 @@ impl Db {
         Ok(rows)
     }
 
-    /// Counts one failed model call or send for the user message `event_id`.
-    pub fn record_failure(&self, event_id: &str) -> Result<()> {
+    /// Counts one run for the user message `event_id`, before the run starts.
+    pub fn record_attempt(&self, event_id: &str) -> Result<()> {
         let update_query = "UPDATE messages SET attempts = attempts + 1 WHERE event_id = ?";
         self.sql.exec(update_query, Some(vec![event_id.into()]))?;
         Ok(())
     }
 
-    /// Returns the oldest user message that has no reply yet.
-    pub fn next_unanswered(&self) -> Result<Option<Pending>> {
-        let select_query =
-            "SELECT id, event_id, content, attempts FROM messages AS m WHERE role = 'user' \
-            AND NOT EXISTS (SELECT 1 FROM messages WHERE reply_to = m.event_id) \
-            ORDER BY id LIMIT 1";
-        let mut rows: Vec<Pending> = self.sql.exec(select_query, None)?.to_array()?;
+    /// Returns the oldest user message that has no reply yet, or whose reply is unsent.
+    pub fn next_unanswered(&self) -> Result<Option<UnansweredMessage>> {
+        let select_query = "SELECT u.id, u.event_id, u.content, u.attempts, a.content AS response \
+            FROM messages AS u LEFT JOIN messages AS a ON a.reply_to = u.event_id \
+            WHERE u.role = 'user' AND (a.id IS NULL OR a.sent = 0) \
+            ORDER BY u.id LIMIT 1";
+        let mut rows: Vec<UnansweredMessage> = self.sql.exec(select_query, None)?.to_array()?;
         Ok(rows.pop())
     }
 
