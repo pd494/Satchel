@@ -1,5 +1,5 @@
 // End-to-end test for Satchel with a fake Linq and the real model. It is not a PR check: the
-// model varies from run to run. run.mjs is the PR check.
+// model varies from run to run. run.mjs is the PR check. eval.yml runs this one nightly.
 //
 // It runs the Worker with `wrangler dev`, points `LINQ_API` at a fake Linq server, and sends
 // signed webhooks into one chat. Each case checks what Satchel sent back to the fake Linq.
