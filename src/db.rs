@@ -107,34 +107,35 @@ impl Db {
         self.sql.exec(&select_query, None)?.to_array()
     }
 
-    /// Sets the next fire time of saved item `id`. `None` ends the reminder.
-    pub fn reschedule(&self, id: i64, due_at: Option<i64>) -> Result<()> {
-        let update_query = "UPDATE saved SET due_at = ? WHERE id = ?";
-        self.sql
-            .exec(update_query, Some(vec![due_at.into(), id.into()]))?;
-        Ok(())
+    /// Returns the newest pending reminder whose note is `note`, ignoring case.
+    pub fn pending_reminder(&self, note: &str) -> Result<Option<Reminder>> {
+        let select_query = format!(
+            "{SELECT_REMINDERS} WHERE r.due_at IS NOT NULL AND lower(r.content) = lower(?) \
+            ORDER BY r.id DESC LIMIT 1"
+        );
+        let mut rows: Vec<Reminder> = self
+            .sql
+            .exec(&select_query, Some(vec![note.into()]))?
+            .to_array()?;
+        Ok(rows.pop())
     }
 
-    /// Makes the note `content` from message `message_id` a reminder. A second call replaces
-    /// the first.
+    /// Sets when saved item `id` fires and how it repeats. A `None` time ends the reminder.
     pub fn set_reminder(
         &self,
-        message_id: i64,
-        content: &str,
-        due_at: i64,
+        id: i64,
+        due_at: Option<i64>,
         repeat: Option<String>,
         until_at: Option<i64>,
     ) -> Result<()> {
-        let update_query = "UPDATE saved SET due_at = ?, repeat = ?, until_at = ? \
-            WHERE message_id = ? AND content = ?";
+        let update_query = "UPDATE saved SET due_at = ?, repeat = ?, until_at = ? WHERE id = ?";
         self.sql.exec(
             update_query,
             Some(vec![
                 due_at.into(),
                 repeat.into(),
                 until_at.into(),
-                message_id.into(),
-                content.into(),
+                id.into(),
             ]),
         )?;
         Ok(())
@@ -226,23 +227,31 @@ impl Db {
         Ok(rows.pop())
     }
 
-    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<()> {
+    /// Saves `item` and returns its row id. Saving the same item from the same message again
+    /// keeps the first row.
+    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<i64> {
         let data = serde_json::to_string(&item.data())?;
         let insert_query =
-            "INSERT OR IGNORE INTO saved (message_id, media, content, title, description, data) \
-            VALUES (?, ?, ?, ?, ?, ?)";
-        self.sql.exec(
-            insert_query,
-            Some(vec![
-                SqlStorageValue::Integer(message_id),
-                SqlStorageValue::String(item.get_type().to_string()),
-                SqlStorageValue::String(item.content()),
-                opt_sql(item.title()),
-                opt_sql(item.description()),
-                SqlStorageValue::String(data),
-            ]),
-        )?;
-        Ok(())
+            "INSERT INTO saved (message_id, media, content, title, description, data) \
+            VALUES (?, ?, ?, ?, ?, ?) \
+            ON CONFLICT (message_id, content) DO UPDATE SET content = content RETURNING id";
+        let row: serde_json::Value = self
+            .sql
+            .exec(
+                insert_query,
+                Some(vec![
+                    SqlStorageValue::Integer(message_id),
+                    SqlStorageValue::String(item.get_type().to_string()),
+                    SqlStorageValue::String(item.content()),
+                    opt_sql(item.title()),
+                    opt_sql(item.description()),
+                    SqlStorageValue::String(data),
+                ]),
+            )?
+            .one()?;
+        Ok(row["id"]
+            .as_i64()
+            .ok_or_else(|| "insert_saved returned no id".to_string())?)
     }
 }
 

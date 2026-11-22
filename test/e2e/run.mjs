@@ -63,6 +63,7 @@ const CASES = [
   ["remind-in", "remind me in 60 seconds to drink water", "text-only", ""],
   ["remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"],
   ["remind-set", "pst", "text-only", ""],
+  ["remind-correct", "no, make it 10 am", "text-only", ""],
   ["remind-fires", null, "text-only", "water"],
 ];
 
@@ -278,10 +279,15 @@ function checkSaved() {
   const db = new DatabaseSync(databases[0], { readOnly: true });
   const rows = db.prepare("SELECT media, content FROM saved").all();
   const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value;
+  const pending = db.prepare("SELECT content, due_at FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
   db.close();
 
   const failures = [];
   if (zone !== TIME_ZONE) failures.push(`time zone is ${zone}, not ${TIME_ZONE}`);
+  const stretch = pending.filter((row) => row.content.toLowerCase().includes("stretch"));
+  const hour = (row) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: TIME_ZONE, hour: "numeric", hourCycle: "h23" });
+  if (stretch.length !== 1) failures.push(`expected 1 stretch reminder, found ${stretch.length}`);
+  else if (hour(stretch[0]) !== "10") failures.push(`stretch reminder is at hour ${hour(stretch[0])}, not 10`);
   const contents = [];
   let noteFound = false;
   for (const row of rows) {

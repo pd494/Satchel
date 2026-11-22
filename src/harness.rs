@@ -53,8 +53,12 @@ impl Harness {
                 content.push_str(urls);
             }
             self.db.save_user_message(&event_id, &content)?;
-            self.db
-                .reschedule(reminder.id, Self::next_fire(&reminder, &zone)?)?;
+            self.db.set_reminder(
+                reminder.id,
+                Self::next_fire(&reminder, &zone)?,
+                reminder.repeat.clone(),
+                reminder.until_at,
+            )?;
         }
         Ok(())
     }
@@ -194,7 +198,7 @@ impl Harness {
                         match File::parse(link.url.as_str()) {
                             Some(file) => self.db.insert_saved(message.id, &file)?,
                             None => self.db.insert_saved(message.id, link)?,
-                        }
+                        };
                     }
                     if let Some(note) = note {
                         self.db.insert_saved(message.id, &Note(note.clone()))?;
@@ -225,18 +229,27 @@ impl Harness {
                 }) => match Self::reminder_times(*at, *after, *repeat, *until, time_zone) {
                     Err(error) => format!("error: {error}"),
                     Ok((due_at, until_at)) => {
-                        self.db.insert_saved(message.id, &Note(note.clone()))?;
-                        self.db.set_reminder(
-                            message.id,
-                            note,
-                            due_at,
-                            repeat.map(|repeat| repeat.to_string()),
-                            until_at,
-                        )?;
+                        let repeat = repeat.map(|repeat| repeat.to_string());
+                        let reply = match self.db.pending_reminder(note)? {
+                            Some(old) => {
+                                self.db
+                                    .set_reminder(old.id, Some(due_at), repeat, until_at)?;
+                                format!(
+                                    "ok, moved the earlier \"{note}\" reminder from {} to {}. Tell the user you changed it.",
+                                    Self::local_time(old.due_at, time_zone)?,
+                                    Self::local_time(due_at, time_zone)?
+                                )
+                            }
+                            None => {
+                                let id = self.db.insert_saved(message.id, &Note(note.clone()))?;
+                                self.db.set_reminder(id, Some(due_at), repeat, until_at)?;
+                                "ok".to_string()
+                            }
+                        };
                         if at.is_some() {
                             self.db.set_time_zone(time_zone)?;
                         }
-                        "ok".to_string()
+                        reply
                     }
                 },
             };
@@ -252,6 +265,15 @@ impl Harness {
         Ok(Some(
             TimeZone::get(&name).map_err(|error| error.to_string())?,
         ))
+    }
+
+    fn local_time(at: i64, time_zone: &str) -> Result<String> {
+        let zone = TimeZone::get(time_zone).map_err(|error| error.to_string())?;
+        let at = Timestamp::from_second(at).map_err(|error| error.to_string())?;
+        Ok(at
+            .to_zoned_datetime(zone)
+            .strftime("%a %b %-d %-I:%M %p %Z")
+            .to_string())
     }
 
     fn reminder_times(

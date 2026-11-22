@@ -38,6 +38,7 @@ on allCases()
 		{"remind-in", "remind me in 60 seconds to drink water", "text-only", ""}, ¬
 		{"remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"}, ¬
 		{"remind-set", "pst", "text-only", ""}, ¬
+		{"remind-correct", "no, make it 10 am", "text-only", ""}, ¬
 		{"remind-fires", "", "text-only", "water"}}
 end allCases
 
