@@ -163,16 +163,23 @@ impl Harness {
         links: &[Link],
         saved: &mut bool,
     ) -> Result<Vec<String>> {
-        let has_save = calls
-            .iter()
-            .any(|call| matches!(call, Ok(ToolCall::Save { urls, .. }) if !urls.is_empty()));
-        let mut results = Vec::new();
-        for call in calls {
-            let result = match call {
+        // Saves run first. A 👍 then goes out only after a save works.
+        let mut results = vec![String::new(); calls.len()];
+        for (result, call) in results.iter_mut().zip(calls) {
+            if let Ok(ToolCall::Save { urls, note }) = call {
+                *result = self.save(message.id, urls, note.as_deref(), links)?;
+                if *result == "ok" && !urls.is_empty() {
+                    *saved = true;
+                }
+            }
+        }
+        for (result, call) in results.iter_mut().zip(calls) {
+            *result = match call {
+                Ok(ToolCall::Save { .. }) => continue,
                 Err(error) => format!("error: {error}"),
                 Ok(ToolCall::React {
                     emoji: Tapback::Like,
-                }) if !links.is_empty() && !*saved && !has_save => {
+                }) if !links.is_empty() && !*saved => {
                     "error: save the links or files from the newest message before reacting with 👍"
                         .to_string()
                 }
@@ -180,16 +187,8 @@ impl Harness {
                     self.linq.react(&message.event_id, *emoji).await?;
                     "ok".to_string()
                 }
-                Ok(ToolCall::Save { urls, note }) => {
-                    let result = self.save(message.id, urls, note.as_deref(), links)?;
-                    if result == "ok" && !urls.is_empty() {
-                        *saved = true;
-                    }
-                    result
-                }
                 Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
             };
-            results.push(result);
         }
         Ok(results)
     }
