@@ -63,7 +63,8 @@ const call = (...calls) => ({
   })),
 });
 
-/** The fake model's replies, by user message. Entry n answers step n of the tool loop. */
+/** The fake model's replies, by user message. Entry n answers step n of the tool loop. An entry
+ * can be a function, called when the request arrives. */
 const script = new Map();
 /** Every request Satchel makes to the fake model. */
 const modelRequests = [];
@@ -76,7 +77,7 @@ const model = createServer(async (req, res) => {
   modelRequests.push({ text, messages });
 
   let reply = script.get(text)?.[step];
-  if (typeof reply === "function") reply = reply();
+  if (typeof reply === "function") reply = await reply();
   // A due reminder comes back as a nudge with its links and files.
   if (text.startsWith("Reminder due: ")) reply = say(`nudge: ${text.slice(14).replaceAll("\n", " ")}`);
   if (!reply) return res.writeHead(500).end(`no scripted reply for ${JSON.stringify(text)} step ${step}`);
@@ -185,13 +186,11 @@ function eventOf(request) {
 /** Linq requests already checked by a case. */
 let checked = 0;
 
-/** Waits up to `timeout` for new Linq requests, then until they stop. Returns them. */
-async function nextRequests(timeout) {
+/** Waits up to `timeout` for at least `min` new Linq requests, then until they stop. Returns them. */
+async function nextRequests(timeout, min = 1) {
   const deadline = Date.now() + timeout;
-  while (linqRequests.length === checked) {
-    if (Date.now() > deadline) return [];
-    await sleep(50);
-  }
+  while (linqRequests.length - checked < min && Date.now() < deadline) await sleep(50);
+  if (linqRequests.length === checked) return [];
   let count;
   do {
     count = linqRequests.length;
@@ -263,7 +262,10 @@ function localTime(ms, zone) {
 const photo = file("photo.jpg");
 const memo = file("memo.m4a");
 const receipt = file("receipt.jpg");
-const SAVED = "https://example.com/apartments";
+const listing = "https://example.com/listing";
+// The first clock-time reminder saves this zone. Later cases use it.
+const ZONE = "Asia/Tokyo";
+const SAVED = ["https://example.com/apartments", listing];
 const NOT_SAVED = ["https://example.com/unsaved", "https://example.com/wrong"];
 
 // Each case returns a failure, or nothing when it passes. Reminder cases run last, one at a time.
@@ -320,6 +322,30 @@ const CASES = [
     if (!ok) return `sent ${describe(reply)}`;
   }],
 
+  // Texts sent fast, without waiting, each get one reply, in order. The model sees the earlier
+  // texts and their replies, and never a later text.
+  ["burst", async () => {
+    const texts = ["first thing", "second thing", "third thing"];
+    texts.forEach((text, i) => script.set(text, [say(`reply ${i + 1}`)]));
+    // The first answer takes 1 second. The other texts arrive and wait while it runs.
+    script.set(texts[0], [async () => (await sleep(1_000), say("reply 1"))]);
+    const events = [];
+    for (const text of texts) {
+      const { eventId, response } = await webhook(text);
+      if (!response.ok) return `webhook returned ${response.status}`;
+      events.push(eventId);
+    }
+    const requests = await nextRequests(REPLY_TIMEOUT_MS, texts.length);
+    const replies = requests.map((request) => `${eventOf(request)} ${request.body?.message?.parts[0].value}`);
+    const expected = events.map((event, i) => `${event} reply ${i + 1}`);
+    if (replies.join() !== expected.join()) return `replies were ${JSON.stringify(replies)}`;
+    for (const [i, text] of texts.entries()) {
+      const seen = modelRequests.findLast((request) => request.text === text).messages.map((message) => message.content);
+      if (texts.slice(i + 1).some((later) => seen.includes(later))) return `the model saw a later text while answering "${text}"`;
+      if (i > 0 && !seen.includes(`reply ${i}`)) return `the model did not see "reply ${i}" while answering "${text}"`;
+    }
+  }],
+
   ["reminder-fires", async () => {
     script.set(receipt.url, [
       call(["save", { urls: [receipt.url] }], ["remind", { note: "check receipt", after: "PT2S" }]),
@@ -334,24 +360,9 @@ const CASES = [
     if (await nudge(1_500)) return "sent a second nudge";
   }],
 
-  // The correction moves the reminder. Nothing fires at the old time.
-  ["reminder-moves", async () => {
-    script.set("remind me to stretch", [call(["remind", { note: "stretch", after: "PT5S" }]), say("set")]);
-    script.set("make it later", [call(["remind", { note: "Stretch", after: "PT12S" }]), say("moved")]);
-    if ((await turn("remind me to stretch")).text !== "set") return "first reminder not set";
-    const corrected = Date.now();
-    const reply = await turn("make it later");
-    if (reply.text !== "moved") return `sent ${describe(reply)}`;
-    const nudged = await nudge(20_000);
-    if (!nudged?.text.includes("stretch")) return `nudge was ${describe(nudged)}`;
-    const elapsed = nudged.at - corrected;
-    if (elapsed < 9_000) return `fired ${elapsed} ms after the correction, before the new time`;
-    if (await nudge(1_500)) return "sent a second nudge";
-  }],
-
   // The first clock-time reminder saves the zone and asks the model to work out the time again.
   ["reminder-at-clock-time", async () => {
-    const zone = "Asia/Tokyo";
+    const zone = ZONE;
     const message = "remind me to call mom";
     const remind = () => call(["remind", { note: "call mom", at: localTime(Date.now() + 4_000, zone), time_zone: zone }]);
     script.set(message, [remind, remind, say("set")]);
@@ -366,6 +377,28 @@ const CASES = [
     const due = modelRequests.findLast((request) => request.text.startsWith("Reminder due: call mom"));
     if (!due.messages[0].content.includes(zone)) return "the model was not told the saved time zone";
   }],
+  // A link sent after a reminder is saved on its own. The correction after it moves the reminder
+  // to a clock time in the saved zone. The nudge fires once, at the new time, without the link.
+  ["reminder-link-then-correct", async () => {
+    script.set("remind me to call the landlord", [call(["remind", { note: "call the landlord", after: "PT5S" }]), say("set")]);
+    script.set(listing, [call(["save", { urls: [listing] }], ["react", { emoji: "👍" }])]);
+    const correction = "nvm change it to 5 pm instead";
+    const at = () => localTime(Date.now() + 12_000, ZONE);
+    script.set(correction, [() => call(["remind", { note: "Call the landlord", at: at(), time_zone: ZONE }]), say("moved")]);
+    if ((await turn("remind me to call the landlord")).text !== "set") return "reminder not set";
+    const link = await turn(listing);
+    if (link.reactions.join() !== "like" || link.texts.length > 0) return `link got ${describe(link)}`;
+    const corrected = Date.now();
+    const reply = await turn(correction);
+    if (reply.text !== "moved") return `sent ${describe(reply)}`;
+    const nudged = await nudge(20_000);
+    if (!nudged?.text.includes("call the landlord")) return `nudge was ${describe(nudged)}`;
+    if (nudged.links.length + nudged.files.length > 0) return `nudge carried ${describe(nudged)}`;
+    const elapsed = nudged.at - corrected;
+    if (elapsed < 9_000) return `fired ${elapsed} ms after the correction, before the new time`;
+    if (await nudge(1_500)) return "sent a second nudge";
+  }],
+
 ];
 
 /** Nothing reads `saved` yet, so this reads the table: saved once, and never the unsaved links. */
@@ -378,7 +411,7 @@ function checkSaved() {
   db.close();
   const count = (url) => contents.filter((content) => content === url).length;
   const failures = [];
-  if (count(SAVED) !== 1) failures.push(`${SAVED} saved ${count(SAVED)} times, not once`);
+  for (const url of SAVED) if (count(url) !== 1) failures.push(`${url} saved ${count(url)} times, not once`);
   for (const url of NOT_SAVED) if (count(url) > 0) failures.push(`saved by mistake: ${url}`);
   return failures;
 }
