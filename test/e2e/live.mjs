@@ -1,10 +1,10 @@
-// End-to-end test for Satchel with a fake Linq and the real model. It is not a PR check: the
-// model varies from run to run. run.mjs is the PR check. eval.yml runs this one nightly.
+// Eval of Satchel with the real model and a fake Linq. It is not a PR check: the model varies from
+// run to run. run.mjs is the PR check. eval.yml runs this one nightly.
 //
-// It runs the Worker with `wrangler dev`, points `LINQ_API` at a fake Linq server, and sends
-// signed webhooks into one chat. Each case checks what Satchel sent back to the fake Linq.
-// At the end it reads the Durable Object's `saved` table. The model is the real one.
-// `wrangler dev` needs a Cloudflare login or `CLOUDFLARE_API_TOKEN`.
+// Each scenario runs in its own chat, from a new sender. History stays short, and a failure in one
+// scenario does not change the next. Each case checks what Satchel sent back to the fake Linq.
+// After all scenarios, the run reads each chat's Durable Object: what it saved, its reminders, and
+// its time zone. `wrangler dev` needs a Cloudflare login or `CLOUDFLARE_API_TOKEN`.
 //
 // Each model call goes through AI Gateway with the run id in `eval_run` metadata. With
 // `CLOUDFLARE_API_TOKEN` (AI Gateway Edit), the run then marks each call 👍 or 👎 by its case.
@@ -24,10 +24,11 @@ const WORKER_PORT = 8787;
 const LINQ_PORT = 8788;
 const WEBHOOK_KEY = Buffer.from("satchel-e2e-webhook-key");
 const BUILD_TIMEOUT_MS = 15 * 60_000;
-const REPLY_TIMEOUT_MS = 120_000;
+const REPLY_TIMEOUT_MS = 180_000;
 const QUIET_MS = 5_000;
 const RUN = process.env.EVAL_RUN ?? `local-${new Date().toISOString()}`;
 const RUN_STARTED = new Date().toISOString();
+const LA = "America/Los_Angeles";
 
 function file(name) {
   const id = randomUUID();
@@ -39,64 +40,161 @@ const contact = file("contact.vcf");
 const pin = file("CL.loc.vcf");
 const lease = file("lease.pdf");
 
-// [name, message, expected kind, needle]
+// A case is [name, message, expected kind, needle]. Names are unique across scenarios.
 // tapback: a reaction and no text. text-only: text, no reaction, no file.
 // text: text, reaction allowed. The needle must be in the text, not only in a link.
 // file: the file with the needle as its id is sent back. voice: the same, as a voice memo.
 // A null message sends nothing. The case waits for a reminder to fire.
-const CASES = [
-  ["greeting", "reset", "text", "Satchel"],
-  ["save-link-scheme", "https://www.rust-lang.org/learn", "tapback", ""],
-  ["save-link-bare", "example.com/apartments", "tapback", ""],
-  ["save-link-with-comment", "check this place out https://www.zillow.com/homes/austin looks nice", "tapback", ""],
-  ["save-two-links", "tour at example.org, details at example.org/tour", "tapback", ""],
-  ["not-a-link", "node.js is my favorite runtime", "text-only", ""],
-  ["file-like-not-link", "the readme.md has the setup steps", "text-only", ""],
-  ["remember-note", "remember my gate code is 4521", "text-only", ""],
-  ["recall-note", "what's my gate code?", "text-only", "4521"],
-  ["save-image", photo.url, "tapback", ""],
-  ["recall-image", "send me that picture", "file", photo.id],
-  ["save-voice", memo.url, "tapback", ""],
-  ["recall-voice", "send me that voice memo", "voice", memo.id],
-  ["save-contact", contact.url, "tapback", ""],
-  ["save-location", pin.url, "tapback", ""],
-  ["recall-location", "send me that location", "file", pin.id],
-  ["save-file", lease.url, "tapback", ""],
-  ["recall-file", "send me that pdf", "file", lease.id],
-  ["question-not-saved", "send me the chili recipe", "text-only", ""],
-  ["link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""],
-  ["save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"],
-  ["recall-after-answer", "what was that book link?", "text-only", ""],
-  ["remind-in", "remind me in 2 minutes to drink water", "text-only", ""],
-  ["remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"],
-  ["remind-set", "pst", "text-only", ""],
-  ["remind-correct", "no, make it 10 am", "text-only", ""],
-  ["remind-fires", null, "text-only", "water"],
-  ["remind-rent", "remind me friday at 3 pm to pay rent", "text-only", ""],
-  ["save-after-reminder", "https://example.com/rent-portal", "tapback", ""],
-  ["remind-change-pm", "nvm change it to 5 pm instead", "text-only", ""],
+//
+// After the scenario, its Durable Object must hold:
+// - saved: exactly these links and files, once each.
+// - notes: a saved note containing each of these.
+// - zone: this time zone, or none.
+// - reminders: exactly these pending reminders, one per word. Each is at `hour` in the saved
+//   zone, on `weekday` if given, repeating if `repeat`, `days` away if given, and carrying the
+//   links in `urls`.
+const SCENARIOS = [
+  {
+    name: "links",
+    cases: [
+      ["save-link-scheme", "https://www.rust-lang.org/learn", "tapback", ""],
+      ["save-link-bare", "example.com/apartments", "tapback", ""],
+      ["save-link-with-comment", "check this place out https://www.zillow.com/homes/austin looks nice", "tapback", ""],
+      ["save-two-links", "tour at example.org, details at example.org/tour", "tapback", ""],
+    ],
+    saved: ["https://www.rust-lang.org/learn", "https://example.com/apartments", "https://www.zillow.com/homes/austin", "https://example.org/", "https://example.org/tour"],
+  },
+  {
+    name: "files",
+    cases: [
+      ["save-image", photo.url, "tapback", ""],
+      ["save-voice", memo.url, "tapback", ""],
+      ["save-contact", contact.url, "tapback", ""],
+      ["save-location", pin.url, "tapback", ""],
+      ["save-file", lease.url, "tapback", ""],
+      ["recall-image", "send me that picture", "file", photo.id],
+      ["recall-voice", "send me that voice memo", "voice", memo.id],
+      ["recall-location", "send me that location", "file", pin.id],
+      ["recall-file", "send me that pdf", "file", lease.id],
+    ],
+    saved: [photo.url, memo.url, contact.url, pin.url, lease.url],
+  },
+  {
+    name: "not-saved",
+    cases: [
+      ["not-a-link", "node.js is my favorite runtime", "text-only", ""],
+      ["file-like-not-link", "the readme.md has the setup steps", "text-only", ""],
+      ["question-not-saved", "send me the chili recipe", "text-only", ""],
+      ["link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""],
+      ["off-topic", "write me a poem about my cat", "text-only", ""],
+      ["small-talk", "ok thanks", "text-only", ""],
+    ],
+    saved: [],
+  },
+  {
+    name: "notes",
+    cases: [
+      ["remember-gate", "remember my gate code is 4521", "text-only", ""],
+      ["remember-wifi", "the wifi password is sunflower88, don't forget it", "text-only", ""],
+      ["recall-gate", "what's my gate code?", "text-only", "4521"],
+      ["recall-wifi", "whats the wifi pw again", "text-only", "sunflower88"],
+    ],
+    saved: [],
+    notes: ["4521", "sunflower88"],
+  },
+  {
+    name: "save-and-answer",
+    cases: [
+      ["save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"],
+      ["recall-after-answer", "what was that book link?", "text-only", ""],
+    ],
+    saved: ["https://doc.rust-lang.org/book"],
+  },
+  {
+    name: "reminder-fires",
+    cases: [
+      ["remind-in", "remind me in 2 minutes to drink water", "text-only", ""],
+      ["remind-fires", null, "text-only", "water"],
+    ],
+  },
+  {
+    name: "zone-then-correct",
+    cases: [
+      ["remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"],
+      ["remind-set", "pst", "text-only", ""],
+      ["remind-correct", "no, make it 10 am", "text-only", ""],
+    ],
+    zone: LA,
+    reminders: [{ word: "stretch", hour: 10 }],
+  },
+  {
+    name: "link-then-correct",
+    cases: [
+      ["remind-rent", "remind me friday at 3 pm pacific time to pay rent", "text-only", ""],
+      ["save-after-reminder", "https://example.com/rent-portal", "tapback", ""],
+      ["remind-change-pm", "nvm change it to 5 pm instead", "text-only", ""],
+    ],
+    saved: ["https://example.com/rent-portal"],
+    zone: LA,
+    reminders: [{ word: "rent", hour: 17, weekday: "Fri" }],
+  },
+  {
+    name: "link-in-reminder",
+    cases: [["remind-with-link", "remind me tomorrow at 9 am pacific time to read this https://example.com/article", "text-only", ""]],
+    saved: ["https://example.com/article"],
+    zone: LA,
+    reminders: [{ word: "read", hour: 9, urls: ["https://example.com/article"] }],
+  },
+  {
+    name: "repeat",
+    cases: [["remind-weekly", "every monday at 9 am pacific time remind me to take out the trash", "text-only", ""]],
+    zone: LA,
+    reminders: [{ word: "trash", hour: 9, weekday: "Mon", repeat: true }],
+  },
+  {
+    name: "push-back",
+    cases: [
+      ["remind-bank", "remind me tomorrow at 4 pm pacific time to call the bank", "text-only", ""],
+      ["remind-push-back", "push it back an hour", "text-only", ""],
+    ],
+    zone: LA,
+    reminders: [{ word: "bank", hour: 17 }],
+  },
+  {
+    name: "change-day",
+    cases: [
+      ["remind-laundry", "remind me thursday at 6 pm pacific time to pick up laundry", "text-only", ""],
+      ["remind-change-day", "actually make it friday", "text-only", ""],
+    ],
+    zone: LA,
+    reminders: [{ word: "laundry", hour: 18, weekday: "Fri" }],
+  },
+  {
+    name: "months-away",
+    cases: [["remind-months", "remind me in 3 months to renew my passport", "text-only", ""]],
+    reminders: [{ word: "passport", days: [88, 93] }],
+  },
+  {
+    name: "other-zone",
+    cases: [
+      ["remind-plants", "remind me tomorrow at 8 am pacific time to water the plants", "text-only", ""],
+      ["remind-tokyo", "also remind me tomorrow at 9 am tokyo time to call kenji", "text-only", ""],
+    ],
+    zone: LA,
+    // 9 am in Tokyo is 4 pm the day before in Los Angeles.
+    reminders: [{ word: "plants", hour: 8 }, { word: "kenji", hour: 16 }],
+  },
+  {
+    name: "moved",
+    cases: [
+      ["remind-before-move", "remind me tomorrow at 8 am pacific time to feed the cat", "text-only", ""],
+      ["remind-after-move", "i just moved to new york. remind me tomorrow at 9 am to call mom", "text-only", ""],
+    ],
+    // The earlier reminder keeps its time. The new one uses the new zone.
+    zone: "America/New_York",
+    reminders: [{ word: "cat" }, { word: "mom", hour: 9 }],
+  },
 ];
-
-// `remind-set` must save this zone.
-const TIME_ZONE = "America/Los_Angeles";
-
-// The `saved` table must hold exactly these items, matched in full.
-const SAVED = [
-  "https://www.rust-lang.org/learn",
-  "https://example.com/apartments",
-  "https://www.zillow.com/homes/austin",
-  "https://example.org/",
-  "https://example.org/tour",
-  "https://doc.rust-lang.org/book",
-  photo.url,
-  memo.url,
-  contact.url,
-  pin.url,
-  lease.url,
-  "https://example.com/rent-portal",
-];
-// One saved note must contain this.
-const NOTE = "4521";
 
 /** Every request Satchel makes to the fake Linq, except marking the chat read. */
 const linqRequests = [];
@@ -164,11 +262,8 @@ async function waitForWorker() {
   throw new Error("wrangler dev did not start");
 }
 
-const sender = `+1555${Math.floor(Math.random() * 1e7)}`;
-const chat = `e2e-${randomUUID()}`;
-
-/** Sends `message` as a signed Linq webhook for case `name`. Returns its event id. */
-async function send(name, message) {
+/** Sends `message` from `user` as a signed Linq webhook for case `name`. Returns its event id. */
+async function send(user, name, message) {
   const eventId = `eval:${name}:${randomUUID()}`;
   const part = message.startsWith("https://cdn.linqapp.com/")
     ? { type: "media", url: message }
@@ -177,8 +272,8 @@ async function send(name, message) {
     event_type: "message.received",
     data: {
       id: eventId,
-      chat: { id: chat, is_group: false },
-      sender_handle: { handle: sender },
+      chat: { id: user.chat, is_group: false },
+      sender_handle: { handle: user.sender },
       parts: [part],
     },
   });
@@ -229,7 +324,8 @@ function summarize(requests, eventId) {
   const summary = { reactions: [], texts: [], links: [], files: [], voices: [], late: 0 };
   for (const request of requests) {
     const event = eventOf(request);
-    if (event !== null && event !== eventId && !event.startsWith(`${eventId}:`)) {
+    const isReminder = eventId === "reminder" && event?.startsWith("reminder:");
+    if (event !== null && event !== eventId && !isReminder) {
       summary.late += 1;
       continue;
     }
@@ -280,57 +376,71 @@ function describe(summary) {
   return items.join(" ") || "(nothing)";
 }
 
-/** Compares the Durable Object's `saved` table with `SAVED` and `NOTE`. Returns the failures. */
-function checkSaved() {
-  const databases = [];
+/** Each chat's Durable Object database, found by a message only that chat sent. */
+function databaseFor(scenario) {
+  const first = scenario.cases.find(([, message]) => message !== null)[1];
   for (const path of readdirSync(storage, { recursive: true })) {
-    const isUser = path.includes("User") && path.endsWith(".sqlite") && !path.endsWith("metadata.sqlite");
-    if (isUser) databases.push(join(storage, path));
+    if (!path.includes("User") || !path.endsWith(".sqlite") || path.endsWith("metadata.sqlite")) continue;
+    const db = new DatabaseSync(join(storage, path), { readOnly: true });
+    if (db.prepare("SELECT 1 FROM messages WHERE content = ?").get(first)) return db;
+    db.close();
   }
-  if (databases.length !== 1) return [`expected 1 User database, found ${databases.length}`];
-  const db = new DatabaseSync(databases[0], { readOnly: true });
-  const rows = db.prepare("SELECT media, content FROM saved").all();
-  const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value;
-  const pending = db.prepare("SELECT content, due_at FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
-  db.close();
+  return null;
+}
+
+/** Compares a scenario's Durable Object with what it must hold. Returns the failures. */
+function checkState(scenario) {
+  const db = databaseFor(scenario);
+  if (!db) return ["no database for this chat"];
+  const saved = db.prepare("SELECT content FROM saved WHERE media != 'note'").all().map((row) => row.content);
+  const notes = db.prepare("SELECT content FROM saved WHERE media = 'note'").all().map((row) => row.content);
+  const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value ?? null;
+  const pending = db.prepare("SELECT id, message_id, content, due_at, repeat FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
+  const urlsOf = (row) => db.prepare("SELECT content FROM saved WHERE message_id = ? AND media != 'note'").all(row.message_id).map((url) => url.content);
 
   const failures = [];
-  if (zone !== TIME_ZONE) failures.push(`time zone is ${zone}, not ${TIME_ZONE}`);
-  const hour = (row) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: TIME_ZONE, hour: "numeric", hourCycle: "h23" });
-  // Each correction moves its reminder: one row, at the corrected hour.
-  for (const [word, want] of [["stretch", "10"], ["rent", "17"]]) {
-    const found = pending.filter((row) => row.content.toLowerCase().includes(word));
-    if (found.length !== 1) failures.push(`expected 1 ${word} reminder, found ${found.length}`);
-    else if (hour(found[0]) !== want) failures.push(`${word} reminder is at hour ${hour(found[0])}, not ${want}`);
+  const want = scenario.saved ?? [];
+  for (const url of want) {
+    const count = saved.filter((content) => content === url).length;
+    if (count !== 1) failures.push(`${url} saved ${count} times, not once`);
   }
-  const contents = [];
-  let noteFound = false;
-  for (const row of rows) {
-    if (row.media === "note") {
-      if (row.content.includes(NOTE)) noteFound = true;
-    } else {
-      contents.push(row.content);
+  for (const content of saved) if (!want.includes(content)) failures.push(`saved by mistake: ${content}`);
+  for (const note of scenario.notes ?? []) {
+    if (!notes.some((content) => content.includes(note))) failures.push(`no note with "${note}"`);
+  }
+  if (zone !== (scenario.zone ?? null)) failures.push(`time zone is ${zone}, not ${scenario.zone ?? null}`);
+
+  const reminders = scenario.reminders ?? [];
+  if (pending.length !== reminders.length) failures.push(`${pending.length} pending reminders, not ${reminders.length}`);
+  const local = (row, options) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: zone ?? "UTC", ...options });
+  for (const reminder of reminders) {
+    const found = pending.filter((row) => row.content.toLowerCase().includes(reminder.word));
+    if (found.length !== 1) {
+      failures.push(`expected 1 ${reminder.word} reminder, found ${found.length}`);
+      continue;
+    }
+    const [row] = found;
+    const hour = Number(local(row, { hour: "numeric", hourCycle: "h23" }));
+    const weekday = local(row, { weekday: "short" });
+    const days = (row.due_at * 1000 - Date.now()) / 86_400_000;
+    if (reminder.hour !== undefined && hour !== reminder.hour) failures.push(`${reminder.word} reminder is at hour ${hour}, not ${reminder.hour}`);
+    if (reminder.weekday && weekday !== reminder.weekday) failures.push(`${reminder.word} reminder is on ${weekday}, not ${reminder.weekday}`);
+    if (reminder.repeat && !row.repeat) failures.push(`${reminder.word} reminder does not repeat`);
+    if (reminder.days && (days < reminder.days[0] || days > reminder.days[1])) failures.push(`${reminder.word} reminder is ${days.toFixed(1)} days away`);
+    for (const url of reminder.urls ?? []) {
+      if (!urlsOf(row).includes(url)) failures.push(`${reminder.word} reminder does not carry ${url}`);
     }
   }
-  if (!noteFound) failures.push(`no note with "${NOTE}"`);
-  for (const item of SAVED) {
-    if (!contents.includes(item)) failures.push(`not saved: ${item}`);
-  }
-  for (const content of contents) {
-    if (!SAVED.includes(content)) failures.push(`saved by mistake: ${content}`);
-  }
+  db.close();
   return failures;
 }
 
-/** The case that caused a saved table failure. */
-function blame(failure) {
-  if (failure.includes("stretch")) return "remind-correct";
-  if (failure.includes("rent reminder")) return "remind-change-pm";
-  if (failure.includes("time zone")) return "remind-set";
-  if (failure.includes(NOTE)) return "remember-note";
-  const url = failure.slice(failure.indexOf(": ") + 2);
-  const bare = url.replace(/^https:\/\//, "").replace(/\/$/, "");
-  return CASES.find(([, message]) => message?.includes(bare))?.[0] ?? "unknown";
+/** The case that caused a state failure: the case that sent its link, or the scenario's last case. */
+function blame(scenario, failure) {
+  const url = failure.match(/https:\/\/\S+/)?.[0];
+  const bare = url?.replace(/^https:\/\//, "").replace(/\/$/, "");
+  const sender = bare && scenario.cases.find(([, message]) => message?.includes(bare));
+  return (sender ?? scenario.cases.at(-1))[0];
 }
 
 /** Marks each AI Gateway log from this run 👍 or 👎 by its case. A due reminder belongs to `remind-fires`. */
@@ -367,26 +477,39 @@ async function markLogs() {
 
 const failedCases = new Set();
 let failures = 0;
+let total = 0;
 try {
   await new Promise((resolve) => linq.listen(LINQ_PORT, "127.0.0.1", resolve));
   await waitForWorker();
-  for (const [name, message, kind, needle] of CASES) {
-    const start = linqRequests.length;
-    const eventId = message === null ? "reminder" : await send(name, message);
-    const summary = summarize(await reply(start), eventId);
-    const failure = check(kind, needle, summary);
-    if (failure) failures += 1;
-    if (failure) failedCases.add(name);
-    console.log(`${failure ? "FAIL" : "PASS"}  ${name}${failure ? ` (${failure})` : ""}\n      ${describe(summary)}`);
+  for (const scenario of SCENARIOS) {
+    const user = { sender: `+1555${Math.floor(Math.random() * 1e7)}`, chat: `eval-${randomUUID()}` };
+    console.log(`\n# ${scenario.name}`);
+    // The first text in a chat always gets the greeting.
+    for (const [name, message, kind, needle] of [[`${scenario.name}-greeting`, "hi", "text", "Satchel"], ...scenario.cases]) {
+      const start = linqRequests.length;
+      const eventId = message === null ? "reminder" : await send(user, name, message);
+      const summary = summarize(await reply(start), eventId);
+      const failure = check(kind, needle, summary);
+      total += 1;
+      if (failure) {
+        failures += 1;
+        failedCases.add(name);
+      }
+      console.log(`${failure ? "FAIL" : "PASS"}  ${name}${failure ? ` (${failure})` : ""}\n      ${describe(summary)}`);
+    }
   }
-  const savedFailures = checkSaved();
-  for (const failure of savedFailures) {
-    console.log(`FAIL  saved table (${failure})`);
-    failedCases.add(blame(failure));
+  console.log("\n# state");
+  for (const scenario of SCENARIOS) {
+    const stateFailures = checkState(scenario);
+    total += 1;
+    for (const failure of stateFailures) {
+      console.log(`FAIL  ${scenario.name} state (${failure})`);
+      failedCases.add(blame(scenario, failure));
+    }
+    if (stateFailures.length === 0) console.log(`PASS  ${scenario.name} state`);
+    else failures += 1;
   }
-  if (savedFailures.length === 0) console.log(`PASS  saved table (${SAVED.length} items, the note, and the time zone)`);
-  failures += savedFailures.length;
-  console.log(failures ? `\n${failures} failure(s)` : `\nall ${CASES.length} cases and the saved table passed`);
+  console.log(`\n${total - failures} of ${total} checks passed`);
 } catch (error) {
   console.error(error);
   failures += 1;
