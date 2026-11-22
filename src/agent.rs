@@ -43,9 +43,9 @@ impl Agent {
         })
     }
 
-    /// The system prompt followed by `history`.
-    pub fn context(history: &[Row]) -> Vec<Value> {
-        let mut context = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+    pub fn context(history: &[Row], now: &str) -> Vec<Value> {
+        let system = format!("{SYSTEM_PROMPT}\n\n{now}");
+        let mut context = vec![json!({ "role": "system", "content": system })];
         for row in history {
             context.push(json!({ "role": row.role, "content": row.content }));
         }

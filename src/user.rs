@@ -91,6 +91,9 @@ impl DurableObject for User {
             .await?
             .ok_or_else(|| Error::RustError(format!("missing {SPACE_ID_KEY}")))?;
         self.harness.inbox(&space_id).await?;
+        if let Some(wait) = self.harness.next_alarm()? {
+            self.state.storage().set_alarm(wait).await?;
+        }
         Response::ok("ok")
     }
 }

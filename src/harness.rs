@@ -1,8 +1,10 @@
 use crate::agent::{Agent, Calls};
-use crate::db::{Db, UnansweredMessage};
+use crate::db::{Db, Reminder, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note};
 use crate::tools::ToolCall;
+use jiff::{civil::DateTime, tz::TimeZone, SignedDuration, Span, Timestamp};
+use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
 /// Past messages the model sees with each new message.
@@ -12,6 +14,10 @@ const HISTORY_LIMIT: usize = 40;
 const MAX_ATTEMPTS: i64 = 3;
 
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
+
+const REMINDER_EVENT_PREFIX: &str = "reminder:";
+
+const MIN_REPEAT: SignedDuration = SignedDuration::from_mins(5);
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
@@ -37,6 +43,58 @@ impl Harness {
         Ok(())
     }
 
+    fn queue_due_reminders(&self) -> Result<()> {
+        let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
+        for reminder in self.db.due_reminders()? {
+            let event_id = format!("{REMINDER_EVENT_PREFIX}{}:{}", reminder.id, reminder.due_at);
+            let mut content = format!("Reminder due: {}", reminder.content);
+            if let Some(urls) = &reminder.urls {
+                content.push('\n');
+                content.push_str(urls);
+            }
+            self.db.save_user_message(&event_id, &content)?;
+            self.db
+                .reschedule(reminder.id, Self::next_fire(&reminder, &zone)?)?;
+        }
+        Ok(())
+    }
+
+    fn next_fire(reminder: &Reminder, zone: &TimeZone) -> Result<Option<i64>> {
+        let Some(repeat) = &reminder.repeat else {
+            return Ok(None);
+        };
+        let repeat: Span = repeat
+            .parse()
+            .map_err(|error: jiff::Error| error.to_string())?;
+        let now = Timestamp::now().as_second();
+        let mut next = Timestamp::from_second(reminder.due_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone());
+        loop {
+            next = next
+                .checked_add(repeat)
+                .map_err(|error| error.to_string())?;
+            let next_at = next.timestamp().as_second();
+            if reminder.until_at.is_some_and(|until_at| next_at > until_at) {
+                return Ok(None);
+            }
+            if next_at > now {
+                return Ok(Some(next_at));
+            }
+        }
+    }
+
+    pub fn next_alarm(&self) -> Result<Option<Duration>> {
+        if self.db.next_unanswered()?.is_some() {
+            return Ok(Some(Duration::ZERO));
+        }
+        let now = Timestamp::now().as_second();
+        Ok(self
+            .db
+            .next_due_at()?
+            .map(|due_at| Duration::from_secs(due_at.saturating_sub(now).max(0) as u64)))
+    }
+
     /// Replies to every unanswered message, oldest first. A reply is stored before it is sent,
     /// so a failed send only resends it. After `MAX_ATTEMPTS` runs, a message gets `SORRY`,
     /// and it is marked sent even if that send fails.
@@ -45,6 +103,7 @@ impl Harness {
         if let Err(error) = self.linq.mark_read(space_id).await {
             console_error!("mark read failed: {error}");
         }
+        self.queue_due_reminders()?;
         while let Some(message) = self.db.next_unanswered()? {
             // Count this attempt before the run. A crash mid-run still counts toward
             // `MAX_ATTEMPTS`.
@@ -71,10 +130,12 @@ impl Harness {
         if let Some(text) = &message.response {
             return Ok(text.clone());
         }
-        let text = if last_try {
-            SORRY.to_string()
-        } else {
+        let text = if !last_try {
             self.run_agent(message).await?
+        } else if message.event_id.starts_with(REMINDER_EVENT_PREFIX) {
+            message.content.clone()
+        } else {
+            SORRY.to_string()
         };
         self.db.save_agent_message(&message.event_id, &text)?;
         Ok(text)
@@ -86,7 +147,8 @@ impl Harness {
     async fn run_agent(&self, message: &UnansweredMessage) -> Result<String> {
         let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
         let links = Link::find_all(&message.content);
-        let mut context = Agent::context(&history);
+        let now = Self::now_line(self.time_zone()?.as_ref());
+        let mut context = Agent::context(&history, &now);
         let text = loop {
             let (text, calls) = self.agent.run_model(&mut context).await?;
             if calls.is_empty() {
@@ -139,10 +201,97 @@ impl Harness {
                     }
                     "ok".to_string()
                 }
+                Ok(ToolCall::Remind {
+                    at: Some(_),
+                    time_zone,
+                    ..
+                }) if self.db.time_zone()?.is_none() => match TimeZone::get(time_zone) {
+                    Err(error) => format!("error: {error}"),
+                    Ok(zone) => {
+                        self.db.set_time_zone(time_zone)?;
+                        format!(
+                            "error: the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
+                            Self::now_line(Some(&zone))
+                        )
+                    }
+                },
+                Ok(ToolCall::Remind {
+                    note,
+                    at,
+                    after,
+                    repeat,
+                    until,
+                    time_zone,
+                }) => match Self::reminder_times(*at, *after, *repeat, *until, time_zone) {
+                    Err(error) => format!("error: {error}"),
+                    Ok((due_at, until_at)) => {
+                        self.db.insert_saved(message.id, &Note(note.clone()))?;
+                        self.db.set_reminder(
+                            message.id,
+                            note,
+                            due_at,
+                            repeat.map(|repeat| repeat.to_string()),
+                            until_at,
+                        )?;
+                        self.db.set_time_zone(time_zone)?;
+                        "ok".to_string()
+                    }
+                },
             };
             results.push(result);
         }
         Ok(results)
+    }
+
+    fn time_zone(&self) -> Result<Option<TimeZone>> {
+        let Some(name) = self.db.time_zone()? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            TimeZone::get(&name).map_err(|error| error.to_string())?,
+        ))
+    }
+
+    fn reminder_times(
+        at: Option<DateTime>,
+        after: Option<Span>,
+        repeat: Option<Span>,
+        until: Option<DateTime>,
+        time_zone: &str,
+    ) -> std::result::Result<(i64, Option<i64>), String> {
+        let zone = TimeZone::get(time_zone).map_err(|error| error.to_string())?;
+        let due = match (at, after) {
+            (Some(at), None) => at.to_zoned_datetime(zone),
+            (None, Some(after)) => Timestamp::now().to_zoned_datetime(zone).checked_add(after),
+            _ => return Err("send exactly one of at or after".to_string()),
+        }
+        .map_err(|error| error.to_string())?;
+        if due.timestamp() <= Timestamp::now() {
+            return Err("that time has already passed".to_string());
+        }
+        let until_at = until
+            .map(|until| until.to_zoned_datetime(due.time_zone().clone()))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .map(|until| until.timestamp().as_second());
+        if let Some(repeat) = repeat {
+            let next = due.checked_add(repeat).map_err(|error| error.to_string())?;
+            if due.duration_until(&next) < MIN_REPEAT {
+                return Err(format!(
+                    "a reminder can repeat at most every {MIN_REPEAT:#}"
+                ));
+            }
+        }
+        Ok((due.timestamp().as_second(), until_at))
+    }
+
+    fn now_line(time_zone: Option<&TimeZone>) -> String {
+        let now = Timestamp::now().to_zoned_datetime(time_zone.cloned().unwrap_or(TimeZone::UTC));
+        let mut line = format!("Now: {}.", now.strftime("%A, %Y-%m-%d %H:%M:%S in %Q"));
+        if time_zone.is_none() {
+            line.push_str(" The user's time zone is unknown.");
+        }
+        line
     }
 
     /// Sends each part of `text` as its own message. Linq requires a link or media part to be

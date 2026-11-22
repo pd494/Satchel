@@ -34,7 +34,15 @@ CREATE TABLE IF NOT EXISTS saved (
     data        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)),
     attempts    INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    due_at      INTEGER,
+    repeat      TEXT,
+    until_at    INTEGER,
     UNIQUE (message_id, content)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 ) STRICT;
 "#;
 
@@ -59,10 +67,91 @@ pub struct UnansweredMessage {
     pub response: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct Setting {
+    value: String,
+}
+
+#[derive(Deserialize)]
+pub struct Reminder {
+    pub id: i64,
+    pub content: String,
+    pub due_at: i64,
+    pub repeat: Option<String>,
+    pub until_at: Option<i64>,
+    pub urls: Option<String>,
+}
+
+const SELECT_REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at, \
+    (SELECT group_concat(u.content, char(10)) FROM saved AS u \
+    WHERE u.message_id = r.message_id AND u.media != 'note') AS urls FROM saved AS r";
+
 impl Db {
     pub fn open(sql: SqlStorage) -> Result<Self> {
         sql.exec(SCHEMA, None)?;
         Ok(Self { sql })
+    }
+
+    /// Returns the earliest reminder time, or `None` if no reminder is pending.
+    pub fn next_due_at(&self) -> Result<Option<i64>> {
+        let select_query =
+            format!("{SELECT_REMINDERS} WHERE r.due_at IS NOT NULL ORDER BY r.due_at LIMIT 1");
+        let mut rows: Vec<Reminder> = self.sql.exec(&select_query, None)?.to_array()?;
+        Ok(rows.pop().map(|row| row.due_at))
+    }
+
+    /// Returns every reminder whose time has come, oldest first.
+    pub fn due_reminders(&self) -> Result<Vec<Reminder>> {
+        let select_query =
+            format!("{SELECT_REMINDERS} WHERE r.due_at <= unixepoch() ORDER BY r.due_at");
+        self.sql.exec(&select_query, None)?.to_array()
+    }
+
+    /// Sets the next fire time of saved item `id`. `None` ends the reminder.
+    pub fn reschedule(&self, id: i64, due_at: Option<i64>) -> Result<()> {
+        let update_query = "UPDATE saved SET due_at = ? WHERE id = ?";
+        self.sql
+            .exec(update_query, Some(vec![due_at.into(), id.into()]))?;
+        Ok(())
+    }
+
+    /// Makes the note `content` from message `message_id` a reminder. A second call replaces
+    /// the first.
+    pub fn set_reminder(
+        &self,
+        message_id: i64,
+        content: &str,
+        due_at: i64,
+        repeat: Option<String>,
+        until_at: Option<i64>,
+    ) -> Result<()> {
+        let update_query = "UPDATE saved SET due_at = ?, repeat = ?, until_at = ? \
+            WHERE message_id = ? AND content = ?";
+        self.sql.exec(
+            update_query,
+            Some(vec![
+                due_at.into(),
+                repeat.into(),
+                until_at.into(),
+                message_id.into(),
+                content.into(),
+            ]),
+        )?;
+        Ok(())
+    }
+
+    /// Returns the user's IANA time zone name, if they gave one.
+    pub fn time_zone(&self) -> Result<Option<String>> {
+        let select_query = "SELECT value FROM settings WHERE key = 'time_zone'";
+        let mut rows: Vec<Setting> = self.sql.exec(select_query, None)?.to_array()?;
+        Ok(rows.pop().map(|row| row.value))
+    }
+
+    pub fn set_time_zone(&self, name: &str) -> Result<()> {
+        let upsert_query = "INSERT INTO settings (key, value) VALUES ('time_zone', ?) \
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value";
+        self.sql.exec(upsert_query, Some(vec![name.into()]))?;
+        Ok(())
     }
 
     /// Inserts the user's message; returns `false` if `event_id` was already saved.
