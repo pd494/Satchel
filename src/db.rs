@@ -82,42 +82,19 @@ pub struct Reminder {
     pub urls: Option<String>,
 }
 
-const SELECT_REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at, \
-    (SELECT group_concat(u.content, char(10)) FROM saved AS u \
-    WHERE u.message_id = r.message_id AND u.media != 'note') AS urls FROM saved AS r";
-
 impl Db {
     pub fn open(sql: SqlStorage) -> Result<Self> {
         sql.exec(SCHEMA, None)?;
         Ok(Self { sql })
     }
 
-    /// Returns the earliest reminder time, or `None` if no reminder is pending.
-    pub fn next_due_at(&self) -> Result<Option<i64>> {
-        let select_query =
-            format!("{SELECT_REMINDERS} WHERE r.due_at IS NOT NULL ORDER BY r.due_at LIMIT 1");
-        let mut rows: Vec<Reminder> = self.sql.exec(&select_query, None)?.to_array()?;
-        Ok(rows.pop().map(|row| row.due_at))
-    }
-
-    /// Returns every reminder whose time has come, oldest first.
-    pub fn due_reminders(&self) -> Result<Vec<Reminder>> {
-        let select_query =
-            format!("{SELECT_REMINDERS} WHERE r.due_at <= unixepoch() ORDER BY r.due_at");
-        self.sql.exec(&select_query, None)?.to_array()
-    }
-
-    /// Returns the newest pending reminder whose note is `note`, ignoring case.
-    pub fn pending_reminder(&self, note: &str) -> Result<Option<Reminder>> {
-        let select_query = format!(
-            "{SELECT_REMINDERS} WHERE r.due_at IS NOT NULL AND lower(r.content) = lower(?) \
-            ORDER BY r.id DESC LIMIT 1"
-        );
-        let mut rows: Vec<Reminder> = self
-            .sql
-            .exec(&select_query, Some(vec![note.into()]))?
-            .to_array()?;
-        Ok(rows.pop())
+    /// Returns every pending reminder, soonest first.
+    pub fn reminders(&self) -> Result<Vec<Reminder>> {
+        let select_query = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at, \
+            (SELECT group_concat(u.content, char(10)) FROM saved AS u \
+            WHERE u.message_id = r.message_id AND u.media != 'note') AS urls \
+            FROM saved AS r WHERE r.due_at IS NOT NULL ORDER BY r.due_at";
+        self.sql.exec(select_query, None)?.to_array()
     }
 
     /// Sets when saved item `id` fires and how it repeats. A `None` time ends the reminder.

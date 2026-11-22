@@ -45,7 +45,13 @@ impl Harness {
 
     fn queue_due_reminders(&self) -> Result<()> {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
-        for reminder in self.db.due_reminders()? {
+        let now = Timestamp::now().as_second();
+        let due = self
+            .db
+            .reminders()?
+            .into_iter()
+            .take_while(|reminder| reminder.due_at <= now);
+        for reminder in due {
             let event_id = format!("{REMINDER_EVENT_PREFIX}{}:{}", reminder.id, reminder.due_at);
             let mut content = format!("Reminder due: {}", reminder.content);
             if let Some(urls) = &reminder.urls {
@@ -95,8 +101,9 @@ impl Harness {
         let now = Timestamp::now().as_second();
         Ok(self
             .db
-            .next_due_at()?
-            .map(|due_at| Duration::from_secs(due_at.saturating_sub(now).max(0) as u64)))
+            .reminders()?
+            .first()
+            .map(|reminder| Duration::from_secs(reminder.due_at.saturating_sub(now).max(0) as u64)))
     }
 
     /// Replies to every unanswered message, oldest first. A reply is stored before it is sent,
@@ -230,7 +237,13 @@ impl Harness {
                     Err(error) => format!("error: {error}"),
                     Ok((due_at, until_at)) => {
                         let repeat = repeat.map(|repeat| repeat.to_string());
-                        let reply = match self.db.pending_reminder(note)? {
+                        let earlier = self
+                            .db
+                            .reminders()?
+                            .into_iter()
+                            .filter(|reminder| reminder.content.eq_ignore_ascii_case(note))
+                            .max_by_key(|reminder| reminder.id);
+                        let reply = match earlier {
                             Some(old) => {
                                 self.db
                                     .set_reminder(old.id, Some(due_at), repeat, until_at)?;
