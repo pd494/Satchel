@@ -268,15 +268,39 @@ function describe(summary) {
   return items.join(" ") || "(nothing)";
 }
 
-/** Compares the Durable Object's `saved` table with `SAVED` and `NOTE`. Returns the failures. */
-function checkSaved() {
+/** Opens the user's Durable Object database read-only, or returns an error string. */
+function openUserDb() {
   const databases = [];
   for (const path of readdirSync(storage, { recursive: true })) {
     const isUser = path.includes("User") && path.endsWith(".sqlite") && !path.endsWith("metadata.sqlite");
     if (isUser) databases.push(join(storage, path));
   }
-  if (databases.length !== 1) return [`expected 1 User database, found ${databases.length}`];
-  const db = new DatabaseSync(databases[0], { readOnly: true });
+  if (databases.length !== 1) return `expected 1 User database, found ${databases.length}`;
+  return new DatabaseSync(databases[0], { readOnly: true });
+}
+
+/** Checks that exactly one pending stretch reminder is set for 10 am. Returns the failure. */
+function checkStretch(pending) {
+  const stretch = pending.filter((row) => row.content.toLowerCase().includes("stretch"));
+  const hour = (row) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: TIME_ZONE, hour: "numeric", hourCycle: "h23" });
+  if (stretch.length !== 1) return `expected 1 stretch reminder, found ${stretch.length}`;
+  if (hour(stretch[0]) !== "10") return `stretch reminder is at hour ${hour(stretch[0])}, not 10`;
+  return "";
+}
+
+/** Reads the pending reminders, soonest first, or returns an error string. */
+function pendingReminders() {
+  const db = openUserDb();
+  if (typeof db === "string") return db;
+  const pending = db.prepare("SELECT content, due_at FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
+  db.close();
+  return pending;
+}
+
+/** Compares the Durable Object's `saved` table with `SAVED` and `NOTE`. Returns the failures. */
+function checkSaved() {
+  const db = openUserDb();
+  if (typeof db === "string") return [db];
   const rows = db.prepare("SELECT media, content FROM saved").all();
   const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value;
   const pending = db.prepare("SELECT content, due_at FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
@@ -284,10 +308,8 @@ function checkSaved() {
 
   const failures = [];
   if (zone !== TIME_ZONE) failures.push(`time zone is ${zone}, not ${TIME_ZONE}`);
-  const stretch = pending.filter((row) => row.content.toLowerCase().includes("stretch"));
-  const hour = (row) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: TIME_ZONE, hour: "numeric", hourCycle: "h23" });
-  if (stretch.length !== 1) failures.push(`expected 1 stretch reminder, found ${stretch.length}`);
-  else if (hour(stretch[0]) !== "10") failures.push(`stretch reminder is at hour ${hour(stretch[0])}, not 10`);
+  const stretchFailure = checkStretch(pending);
+  if (stretchFailure) failures.push(stretchFailure);
   const contents = [];
   let noteFound = false;
   for (const row of rows) {
@@ -315,7 +337,12 @@ try {
     const start = linqRequests.length;
     const eventId = message === null ? "reminder" : await send(message);
     const summary = summarize(await reply(start), eventId);
-    const failure = check(kind, needle, summary);
+    let failure = check(kind, needle, summary);
+    // A reply can say "updated!" without moving the reminder, so check the table here.
+    if (!failure && name === "remind-correct") {
+      const pending = pendingReminders();
+      failure = typeof pending === "string" ? pending : checkStretch(pending);
+    }
     if (failure) failures += 1;
     console.log(`${failure ? "FAIL" : "PASS"}  ${name}${failure ? ` (${failure})` : ""}\n      ${describe(summary)}`);
   }

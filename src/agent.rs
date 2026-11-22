@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use worker::js_sys::Promise;
 use worker::wasm_bindgen_futures::JsFuture;
-use worker::{Ai, Result};
+use worker::{console_log, Ai, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
@@ -69,7 +69,10 @@ impl Agent {
             .as_array()
             .into_iter()
             .flatten()
-            .map(|call| ToolCall::parse(&call["function"]).map_err(|error| error.to_string()))
+            .map(|call| {
+                console_log!("tool call: {}", call["function"]);
+                ToolCall::parse(&call["function"]).map_err(|error| error.to_string())
+            })
             .collect();
         context.push(response);
         Ok((text, calls))

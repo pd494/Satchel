@@ -5,7 +5,7 @@ use crate::media::{File, Kind, Link, Note};
 use crate::tools::{Remind, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
 use std::time::Duration;
-use worker::{console_error, Env, Result, SqlStorage};
+use worker::{console_error, console_log, Env, Result, SqlStorage};
 
 /// Past messages the model sees with each new message.
 const HISTORY_LIMIT: usize = 40;
@@ -16,6 +16,12 @@ const MAX_ATTEMPTS: i64 = 3;
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 
 const REMINDER_EVENT_PREFIX: &str = "reminder:";
+
+/// Words in a reply that say a reminder changed.
+const CHANGE_WORDS: [&str; 4] = ["updated", "moved", "changed", "rescheduled"];
+
+/// Sent to the model when its reply says a reminder changed but no `remind` call worked.
+const CHANGE_NUDGE: &str = "Satchel: your reply says a reminder changed, but no `remind` call worked, so nothing changed. Call `remind` with the reminder's `id` from \"Pending reminders\" and the new time, then reply.";
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
@@ -133,14 +139,29 @@ impl Harness {
         let state = self.prompt_context()?;
         let mut context = Agent::context(&history, &state);
         let mut saved = false;
+        let mut reminded = false;
+        let mut nudged = false;
 
         let text = loop {
             let (text, calls) = self.agent.run_model(&mut context).await?;
             if calls.is_empty() {
+                // The model sometimes says a reminder moved without calling `remind`. Ask it
+                // once to make the call.
+                if !reminded && !nudged && self.claims_change(message, &text)? {
+                    console_log!("reply claims a reminder change with no remind call: {text}");
+                    nudged = true;
+                    context.push(serde_json::json!({ "role": "user", "content": CHANGE_NUDGE }));
+                    continue;
+                }
                 break text;
             }
 
             let results = self.run_tools(&calls, message, &links, &mut saved).await?;
+            for (call, result) in calls.iter().zip(&results) {
+                if matches!(call, Ok(ToolCall::Remind(_))) && !result.starts_with("error") {
+                    reminded = true;
+                }
+            }
             let failed = results.iter().any(|result| result.starts_with("error"));
             if Self::reacted(&calls) && !failed {
                 break String::new();
@@ -152,6 +173,18 @@ impl Harness {
             return Ok(GREETING.to_string());
         }
         Ok(text)
+    }
+
+    /// Whether `text`, the reply to a user's `message`, says a pending reminder changed.
+    fn claims_change(&self, message: &UnansweredMessage, text: &str) -> Result<bool> {
+        if message.event_id.starts_with(REMINDER_EVENT_PREFIX) {
+            return Ok(false);
+        }
+        let text = text.to_lowercase();
+        if !CHANGE_WORDS.iter().any(|word| text.contains(word)) {
+            return Ok(false);
+        }
+        Ok(!self.db.reminders()?.is_empty())
     }
 
     /// Runs each tool call and returns one result per call: "ok", or an error the model can
@@ -189,6 +222,9 @@ impl Harness {
                 }
                 Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
             };
+        }
+        for result in &results {
+            console_log!("tool result: {result}");
         }
         Ok(results)
     }
@@ -240,12 +276,23 @@ impl Harness {
             return Ok("error: that time has already passed".to_string());
         }
 
-        let earlier = self
-            .db
-            .reminders()?
-            .into_iter()
-            .filter(|reminder| reminder.content.eq_ignore_ascii_case(&remind.note))
-            .max_by_key(|reminder| reminder.id);
+        // Move the reminder the model named by id. Without an id, move one with the same note,
+        // so a repeated request does not add a second reminder.
+        let pending = self.db.reminders()?;
+        let earlier = match remind.id {
+            Some(id) => match pending.into_iter().find(|reminder| reminder.id == id) {
+                Some(reminder) => Some(reminder),
+                None => {
+                    return Ok(format!(
+                        "error: there is no pending reminder #{id}. Use an id from \"Pending reminders\", or omit `id` for a new reminder."
+                    ))
+                }
+            },
+            None => pending
+                .into_iter()
+                .filter(|reminder| reminder.content.eq_ignore_ascii_case(&remind.note))
+                .max_by_key(|reminder| reminder.id),
+        };
 
         let (id, reply) = match earlier {
             Some(old) => {
@@ -256,8 +303,8 @@ impl Harness {
                 (
                     old.id,
                     format!(
-                        "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it.",
-                        remind.note,
+                        "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it, such as \"updated! sunday 9 pm instead 📖\".",
+                        old.content,
                         Self::local_time(old.schedule.due_at, &zone)?,
                         Self::local_time(remind.schedule.due_at, &zone)?
                     ),
@@ -306,7 +353,10 @@ impl Harness {
             text.push_str("\nPending reminders:");
             for reminder in reminders {
                 let due = Self::local_time(reminder.schedule.due_at, &zone)?;
-                text.push_str(&format!("\n- \"{}\" ({due})", reminder.content));
+                text.push_str(&format!(
+                    "\n- #{} \"{}\" ({due})",
+                    reminder.id, reminder.content
+                ));
             }
         }
         Ok(text)

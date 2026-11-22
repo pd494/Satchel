@@ -37,6 +37,7 @@ const MIN_REPEAT: SignedDuration = SignedDuration::from_mins(5);
 
 #[derive(Deserialize)]
 struct RawRemind {
+    id: Option<i64>,
     note: String,
     at: Option<DateTime>,
     after: Option<Span>,
@@ -48,6 +49,8 @@ struct RawRemind {
 #[derive(Deserialize)]
 #[serde(try_from = "RawRemind")]
 pub struct Remind {
+    /// The pending reminder to move, from the prompt's "Pending reminders" list.
+    pub id: Option<i64>,
     pub note: String,
     pub at: bool,
     pub time_zone: Option<TimeZone>,
@@ -96,6 +99,7 @@ impl TryFrom<RawRemind> for Remind {
         }
 
         Ok(Self {
+            id: raw.id,
             note: raw.note,
             at: raw.at.is_some(),
             time_zone,
@@ -138,8 +142,9 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "remind",
-                "description": "Set a reminder.",
+                "description": "Set a reminder, or move a pending one to a new time.",
                 "parameters": { "type": "object", "required": ["note"], "properties": {
+                    "id": { "type": "integer", "description": "To change a pending reminder: its number from the \"Pending reminders\" list, such as 12 for #12. Omit for a new reminder." },
                     "note": { "type": "string", "description": "What to remind the user about, in their words." },
                     "at": { "type": "string", "description": "For a clock time or date (\"at 3\", \"friday 9 am\"): the local date and time to fire, no offset, such as 2026-11-24T09:00:00. Send exactly one of `at` or `after`." },
                     "after": { "type": "string", "description": "For an amount of time from now (\"in 1 minute\", \"in 3 months\"): an ISO 8601 duration. PT30S = 30 seconds, PT1M = 1 minute, PT2H = 2 hours, P3D = 3 days, P3M = 3 months. Send exactly one of `at` or `after`." },
