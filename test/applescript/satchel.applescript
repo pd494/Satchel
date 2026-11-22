@@ -35,7 +35,7 @@ on allCases()
 		{"link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""}, ¬
 		{"save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"}, ¬
 		{"recall-after-answer", "what was that book link?", "text-only", "doc.rust-lang.org"}, ¬
-		{"remind-in", "remind me in 60 seconds to drink water", "text-only", ""}, ¬
+		{"remind-in", "remind me in 2 minutes to drink water", "text-only", ""}, ¬
 		{"remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"}, ¬
 		{"remind-set", "pst", "text-only", ""}, ¬
 		{"remind-correct", "no, make it 10 am", "text-only", ""}, ¬

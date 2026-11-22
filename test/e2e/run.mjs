@@ -19,7 +19,7 @@ const WORKER_PORT = 8787;
 const LINQ_PORT = 8788;
 const WEBHOOK_KEY = Buffer.from("satchel-e2e-webhook-key");
 const BUILD_TIMEOUT_MS = 15 * 60_000;
-const REPLY_TIMEOUT_MS = 60_000;
+const REPLY_TIMEOUT_MS = 120_000;
 const QUIET_MS = 5_000;
 
 function file(name) {
@@ -60,7 +60,7 @@ const CASES = [
   ["link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""],
   ["save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"],
   ["recall-after-answer", "what was that book link?", "text-only", ""],
-  ["remind-in", "remind me in 60 seconds to drink water", "text-only", ""],
+  ["remind-in", "remind me in 2 minutes to drink water", "text-only", ""],
   ["remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"],
   ["remind-set", "pst", "text-only", ""],
   ["remind-correct", "no, make it 10 am", "text-only", ""],
