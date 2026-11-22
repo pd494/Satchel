@@ -1,9 +1,9 @@
 use crate::agent::{Agent, Calls};
-use crate::db::{Db, Reminder, UnansweredMessage};
+use crate::db::{Db, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note};
-use crate::tools::ToolCall;
-use jiff::{tz::TimeZone, Span, Timestamp};
+use crate::tools::{Remind, Tapback, ToolCall};
+use jiff::{tz::TimeZone, Timestamp};
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -48,48 +48,25 @@ impl Harness {
             .db
             .reminders()?
             .into_iter()
-            .take_while(|reminder| reminder.due_at <= now);
+            .take_while(|reminder| reminder.schedule.due_at <= now);
+
         for reminder in due {
-            let event_id = format!("{REMINDER_EVENT_PREFIX}{}:{}", reminder.id, reminder.due_at);
+            let event_id = format!(
+                "{REMINDER_EVENT_PREFIX}{}:{}",
+                reminder.id, reminder.schedule.due_at
+            );
             let mut content = format!("Reminder due: {}", reminder.content);
             if let Some(urls) = &reminder.urls {
                 content.push('\n');
                 content.push_str(urls);
             }
-            self.db.save_user_message(&event_id, &content)?;
-            self.db.set_reminder(
-                reminder.id,
-                Self::next_fire(&reminder, &zone)?,
-                reminder.repeat.clone(),
-                reminder.until_at,
-            )?;
-        }
-        Ok(())
-    }
 
-    fn next_fire(reminder: &Reminder, zone: &TimeZone) -> Result<Option<i64>> {
-        let Some(repeat) = &reminder.repeat else {
-            return Ok(None);
-        };
-        let repeat: Span = repeat
-            .parse()
-            .map_err(|error: jiff::Error| error.to_string())?;
-        let now = Timestamp::now().as_second();
-        let mut next = Timestamp::from_second(reminder.due_at)
-            .map_err(|error| error.to_string())?
-            .to_zoned_datetime(zone.clone());
-        loop {
-            next = next
-                .checked_add(repeat)
-                .map_err(|error| error.to_string())?;
-            let next_at = next.timestamp().as_second();
-            if reminder.until_at.is_some_and(|until_at| next_at > until_at) {
-                return Ok(None);
-            }
-            if next_at > now {
-                return Ok(Some(next_at));
-            }
+            self.db.save_user_message(&event_id, &content)?;
+            let next = reminder.next_fire(&zone)?;
+            self.db.set_reminder(reminder.id, next.as_ref())?;
         }
+
+        Ok(())
     }
 
     /// Replies to every unanswered message, oldest first. A reply is stored before it is sent,
@@ -101,7 +78,9 @@ impl Harness {
         if let Err(error) = self.linq.mark_read(space_id).await {
             console_error!("mark read failed: {error}");
         }
+
         self.queue_due_reminders()?;
+
         while let Some(message) = self.db.next_unanswered()? {
             // Count this attempt before the run. A crash mid-run still counts toward
             // `MAX_ATTEMPTS`.
@@ -119,12 +98,11 @@ impl Harness {
             }
             sent?;
         }
+
         let now = Timestamp::now().as_second();
-        Ok(self
-            .db
-            .reminders()?
-            .first()
-            .map(|reminder| Duration::from_secs(reminder.due_at.saturating_sub(now).max(0) as u64)))
+        Ok(self.db.reminders()?.first().map(|reminder| {
+            Duration::from_secs(reminder.schedule.due_at.saturating_sub(now).max(0) as u64)
+        }))
     }
 
     /// Returns the stored unsent reply, or makes and stores a new one. The reply is empty if
@@ -133,6 +111,7 @@ impl Harness {
         if let Some(text) = &message.response {
             return Ok(text.clone());
         }
+
         let text = if !last_try {
             self.run_agent(message).await?
         } else if message.event_id.starts_with(REMINDER_EVENT_PREFIX) {
@@ -140,6 +119,7 @@ impl Harness {
         } else {
             SORRY.to_string()
         };
+
         self.db.save_agent_message(&message.event_id, &text)?;
         Ok(text)
     }
@@ -150,20 +130,24 @@ impl Harness {
     async fn run_agent(&self, message: &UnansweredMessage) -> Result<String> {
         let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
         let links = Link::find_all(&message.content);
-        let now = Self::now_line(self.time_zone()?.as_ref());
-        let mut context = Agent::context(&history, &now);
+        let state = self.prompt_context()?;
+        let mut context = Agent::context(&history, &state);
+        let mut saved = false;
+
         let text = loop {
             let (text, calls) = self.agent.run_model(&mut context).await?;
             if calls.is_empty() {
                 break text;
             }
-            let results = self.run_tools(&calls, message, &links).await?;
+
+            let results = self.run_tools(&calls, message, &links, &mut saved).await?;
             let failed = results.iter().any(|result| result.starts_with("error"));
             if Self::reacted(&calls) && !failed {
                 break String::new();
             }
             Agent::push_results(&mut context, results);
         };
+
         if history.len() == 1 {
             return Ok(GREETING.to_string());
         }
@@ -177,81 +161,124 @@ impl Harness {
         calls: &Calls,
         message: &UnansweredMessage,
         links: &[Link],
+        saved: &mut bool,
     ) -> Result<Vec<String>> {
+        let has_save = calls
+            .iter()
+            .any(|call| matches!(call, Ok(ToolCall::Save { urls, .. }) if !urls.is_empty()));
         let mut results = Vec::new();
         for call in calls {
             let result = match call {
                 Err(error) => format!("error: {error}"),
+                Ok(ToolCall::React {
+                    emoji: Tapback::Like,
+                }) if !links.is_empty() && !*saved && !has_save => {
+                    "error: save the links or files from the newest message before reacting with 👍"
+                        .to_string()
+                }
                 Ok(ToolCall::React { emoji }) => {
                     self.linq.react(&message.event_id, *emoji).await?;
                     "ok".to_string()
                 }
-                Ok(ToolCall::Save { urls, note }) => 'save: {
-                    for url in urls {
-                        let found = Link::find_all(url)
-                            .pop()
-                            .and_then(|wanted| links.iter().find(|link| link.url == wanted.url));
-                        let Some(link) = found else {
-                            break 'save format!("error: {url} is not in the newest message");
-                        };
-                        match File::parse(link.url.as_str()) {
-                            Some(file) => self.db.insert_saved(message.id, &file)?,
-                            None => self.db.insert_saved(message.id, link)?,
-                        };
+                Ok(ToolCall::Save { urls, note }) => {
+                    let result = self.save(message.id, urls, note.as_deref(), links)?;
+                    if result == "ok" && !urls.is_empty() {
+                        *saved = true;
                     }
-                    if let Some(note) = note {
-                        self.db.insert_saved(message.id, &Note(note.clone()))?;
-                    }
-                    "ok".to_string()
+                    result
                 }
-                Ok(ToolCall::Remind(remind))
-                    if remind.at.is_some() && self.db.time_zone()?.is_none() =>
-                {
-                    match TimeZone::get(&remind.time_zone) {
-                        Err(error) => format!("error: {error}"),
-                        Ok(zone) => {
-                            self.db.set_time_zone(&remind.time_zone)?;
-                            format!(
-                            "error: the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
-                            Self::now_line(Some(&zone))
-                        )
-                        }
-                    }
-                }
-                Ok(ToolCall::Remind(remind)) => {
-                    let repeat = remind.repeat.map(|repeat| repeat.to_string());
-                    let earlier = self
-                        .db
-                        .reminders()?
-                        .into_iter()
-                        .filter(|reminder| reminder.content.eq_ignore_ascii_case(&remind.note))
-                        .max_by_key(|reminder| reminder.id);
-                    let (id, reply) = match earlier {
-                        Some(old) => (
-                            old.id,
-                            format!(
-                                "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it.",
-                                remind.note,
-                                Self::local_time(old.due_at, &remind.time_zone)?,
-                                Self::local_time(remind.due_at, &remind.time_zone)?
-                            ),
-                        ),
-                        None => (
-                            self.db.insert_saved(message.id, &Note(remind.note.clone()))?,
-                            "ok".to_string(),
-                        ),
-                    };
-                    self.db
-                        .set_reminder(id, Some(remind.due_at), repeat, remind.until_at)?;
-                    if remind.at.is_some() {
-                        self.db.set_time_zone(&remind.time_zone)?;
-                    }
-                    reply
-                }
+                Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
             };
             results.push(result);
         }
         Ok(results)
+    }
+
+    fn save(
+        &self,
+        message_id: i64,
+        urls: &[String],
+        note: Option<&str>,
+        links: &[Link],
+    ) -> Result<String> {
+        for url in urls {
+            let found = Link::find_all(url)
+                .pop()
+                .and_then(|wanted| links.iter().find(|link| link.url == wanted.url));
+            let Some(link) = found else {
+                return Ok(format!("error: {url} is not in the newest message"));
+            };
+
+            match File::parse(link.url.as_str()) {
+                Some(file) => self.db.insert_saved(message_id, &file)?,
+                None => self.db.insert_saved(message_id, link)?,
+            };
+        }
+
+        if let Some(note) = note {
+            self.db.insert_saved(message_id, &Note(note.to_string()))?;
+        }
+
+        Ok("ok".to_string())
+    }
+
+    fn remind(&self, remind: &Remind, message_id: i64) -> Result<String> {
+        if remind.at && self.db.time_zone()?.is_none() {
+            let zone = remind
+                .time_zone
+                .as_ref()
+                .ok_or_else(|| "time_zone is required with at".to_string())?;
+            if let Some(name) = zone.iana_name() {
+                self.db.set_time_zone(name)?;
+            }
+            return Ok(format!(
+                "error: the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
+                Self::now_line(Some(zone))
+            ));
+        }
+
+        if remind.schedule.due_at <= Timestamp::now().as_second() {
+            return Ok("error: that time has already passed".to_string());
+        }
+
+        let earlier = self
+            .db
+            .reminders()?
+            .into_iter()
+            .filter(|reminder| reminder.content.eq_ignore_ascii_case(&remind.note))
+            .max_by_key(|reminder| reminder.id);
+
+        let (id, reply) = match earlier {
+            Some(old) => {
+                let zone = match &remind.time_zone {
+                    Some(zone) => zone.clone(),
+                    None => self.time_zone()?.unwrap_or(TimeZone::UTC),
+                };
+                (
+                    old.id,
+                    format!(
+                        "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it.",
+                        remind.note,
+                        Self::local_time(old.schedule.due_at, &zone)?,
+                        Self::local_time(remind.schedule.due_at, &zone)?
+                    ),
+                )
+            }
+            None => (
+                self.db
+                    .insert_saved(message_id, &Note(remind.note.clone()))?,
+                "ok".to_string(),
+            ),
+        };
+
+        self.db.set_reminder(id, Some(&remind.schedule))?;
+        if remind.at {
+            if let Some(name) = remind.time_zone.as_ref().and_then(TimeZone::iana_name) {
+                self.db.set_time_zone(name)?;
+            }
+        }
+
+        Ok(reply)
     }
 
     fn time_zone(&self) -> Result<Option<TimeZone>> {
@@ -263,13 +290,27 @@ impl Harness {
         ))
     }
 
-    fn local_time(at: i64, time_zone: &str) -> Result<String> {
-        let zone = TimeZone::get(time_zone).map_err(|error| error.to_string())?;
+    fn local_time(at: i64, zone: &TimeZone) -> Result<String> {
         let at = Timestamp::from_second(at).map_err(|error| error.to_string())?;
         Ok(at
-            .to_zoned_datetime(zone)
+            .to_zoned_datetime(zone.clone())
             .strftime("%a %b %-d %-I:%M %p %Z")
             .to_string())
+    }
+
+    fn prompt_context(&self) -> Result<String> {
+        let time_zone = self.time_zone()?;
+        let mut text = Self::now_line(time_zone.as_ref());
+        let reminders = self.db.reminders()?;
+        if !reminders.is_empty() {
+            let zone = time_zone.unwrap_or(TimeZone::UTC);
+            text.push_str("\nPending reminders:");
+            for reminder in reminders {
+                let due = Self::local_time(reminder.schedule.due_at, &zone)?;
+                text.push_str(&format!("\n- \"{}\" ({due})", reminder.content));
+            }
+        }
+        Ok(text)
     }
 
     fn now_line(time_zone: Option<&TimeZone>) -> String {
@@ -289,6 +330,7 @@ impl Harness {
         if !rest.is_empty() {
             parts.push(Part::Text(rest));
         }
+
         for url in urls {
             let part = match File::parse(&url) {
                 Some(File {
@@ -301,6 +343,7 @@ impl Harness {
             };
             parts.push(part);
         }
+
         for (i, part) in parts.into_iter().enumerate() {
             self.linq
                 .send(space_id, &format!("{event_id}:{i}"), part)

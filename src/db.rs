@@ -1,4 +1,5 @@
 use crate::media::Media;
+use jiff::{tz::TimeZone, Span, Timestamp};
 use serde::Deserialize;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
@@ -73,13 +74,57 @@ struct Setting {
 }
 
 #[derive(Deserialize)]
-pub struct Reminder {
-    pub id: i64,
-    pub content: String,
+pub struct Schedule {
     pub due_at: i64,
     pub repeat: Option<String>,
     pub until_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct Reminder {
+    pub id: i64,
+    pub content: String,
+    #[serde(flatten)]
+    pub schedule: Schedule,
     pub urls: Option<String>,
+}
+
+impl Reminder {
+    /// Returns the next schedule after this fire, or `None` if the reminder is done.
+    pub fn next_fire(&self, zone: &TimeZone) -> Result<Option<Schedule>> {
+        let Some(repeat) = &self.schedule.repeat else {
+            return Ok(None);
+        };
+        let repeat: Span = repeat
+            .parse()
+            .map_err(|error: jiff::Error| error.to_string())?;
+        let now = Timestamp::now().as_second();
+        let mut next = Timestamp::from_second(self.schedule.due_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone());
+
+        loop {
+            next = next
+                .checked_add(repeat)
+                .map_err(|error| error.to_string())?;
+            let next_at = next.timestamp().as_second();
+
+            if self
+                .schedule
+                .until_at
+                .is_some_and(|until_at| next_at > until_at)
+            {
+                return Ok(None);
+            }
+            if next_at > now {
+                return Ok(Some(Schedule {
+                    due_at: next_at,
+                    repeat: self.schedule.repeat.clone(),
+                    until_at: self.schedule.until_at,
+                }));
+            }
+        }
+    }
 }
 
 impl Db {
@@ -97,15 +142,17 @@ impl Db {
         self.sql.exec(select_query, None)?.to_array()
     }
 
-    /// Sets when saved item `id` fires and how it repeats. A `None` time ends the reminder.
-    pub fn set_reminder(
-        &self,
-        id: i64,
-        due_at: Option<i64>,
-        repeat: Option<String>,
-        until_at: Option<i64>,
-    ) -> Result<()> {
+    /// Sets when saved item `id` fires and how it repeats. A `None` schedule ends the reminder.
+    pub fn set_reminder(&self, id: i64, schedule: Option<&Schedule>) -> Result<()> {
         let update_query = "UPDATE saved SET due_at = ?, repeat = ?, until_at = ? WHERE id = ?";
+        let (due_at, repeat, until_at) = match schedule {
+            Some(schedule) => (
+                Some(schedule.due_at),
+                schedule.repeat.clone(),
+                schedule.until_at,
+            ),
+            None => (None, None, None),
+        };
         self.sql.exec(
             update_query,
             Some(vec![
