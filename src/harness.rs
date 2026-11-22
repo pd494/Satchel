@@ -3,7 +3,7 @@ use crate::db::{Db, Reminder, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note};
 use crate::tools::ToolCall;
-use jiff::{civil::DateTime, tz::TimeZone, SignedDuration, Span, Timestamp};
+use jiff::{tz::TimeZone, Span, Timestamp};
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -16,8 +16,6 @@ const MAX_ATTEMPTS: i64 = 3;
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 
 const REMINDER_EVENT_PREFIX: &str = "reminder:";
-
-const MIN_REPEAT: SignedDuration = SignedDuration::from_mins(5);
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
@@ -206,59 +204,50 @@ impl Harness {
                     }
                     "ok".to_string()
                 }
-                Ok(ToolCall::Remind {
-                    at: Some(_),
-                    time_zone,
-                    ..
-                }) if self.db.time_zone()?.is_none() => match TimeZone::get(time_zone) {
-                    Err(error) => format!("error: {error}"),
-                    Ok(zone) => {
-                        self.db.set_time_zone(time_zone)?;
-                        format!(
+                Ok(ToolCall::Remind(remind))
+                    if remind.at.is_some() && self.db.time_zone()?.is_none() =>
+                {
+                    match TimeZone::get(&remind.time_zone) {
+                        Err(error) => format!("error: {error}"),
+                        Ok(zone) => {
+                            self.db.set_time_zone(&remind.time_zone)?;
+                            format!(
                             "error: the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
                             Self::now_line(Some(&zone))
                         )
-                    }
-                },
-                Ok(ToolCall::Remind {
-                    note,
-                    at,
-                    after,
-                    repeat,
-                    until,
-                    time_zone,
-                }) => match Self::reminder_times(*at, *after, *repeat, *until, time_zone) {
-                    Err(error) => format!("error: {error}"),
-                    Ok((due_at, until_at)) => {
-                        let repeat = repeat.map(|repeat| repeat.to_string());
-                        let earlier = self
-                            .db
-                            .reminders()?
-                            .into_iter()
-                            .filter(|reminder| reminder.content.eq_ignore_ascii_case(note))
-                            .max_by_key(|reminder| reminder.id);
-                        let reply = match earlier {
-                            Some(old) => {
-                                self.db
-                                    .set_reminder(old.id, Some(due_at), repeat, until_at)?;
-                                format!(
-                                    "ok, moved the earlier \"{note}\" reminder from {} to {}. Tell the user you changed it.",
-                                    Self::local_time(old.due_at, time_zone)?,
-                                    Self::local_time(due_at, time_zone)?
-                                )
-                            }
-                            None => {
-                                let id = self.db.insert_saved(message.id, &Note(note.clone()))?;
-                                self.db.set_reminder(id, Some(due_at), repeat, until_at)?;
-                                "ok".to_string()
-                            }
-                        };
-                        if at.is_some() {
-                            self.db.set_time_zone(time_zone)?;
                         }
-                        reply
                     }
-                },
+                }
+                Ok(ToolCall::Remind(remind)) => {
+                    let repeat = remind.repeat.map(|repeat| repeat.to_string());
+                    let earlier = self
+                        .db
+                        .reminders()?
+                        .into_iter()
+                        .filter(|reminder| reminder.content.eq_ignore_ascii_case(&remind.note))
+                        .max_by_key(|reminder| reminder.id);
+                    let (id, reply) = match earlier {
+                        Some(old) => (
+                            old.id,
+                            format!(
+                                "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it.",
+                                remind.note,
+                                Self::local_time(old.due_at, &remind.time_zone)?,
+                                Self::local_time(remind.due_at, &remind.time_zone)?
+                            ),
+                        ),
+                        None => (
+                            self.db.insert_saved(message.id, &Note(remind.note.clone()))?,
+                            "ok".to_string(),
+                        ),
+                    };
+                    self.db
+                        .set_reminder(id, Some(remind.due_at), repeat, remind.until_at)?;
+                    if remind.at.is_some() {
+                        self.db.set_time_zone(&remind.time_zone)?;
+                    }
+                    reply
+                }
             };
             results.push(result);
         }
@@ -281,39 +270,6 @@ impl Harness {
             .to_zoned_datetime(zone)
             .strftime("%a %b %-d %-I:%M %p %Z")
             .to_string())
-    }
-
-    fn reminder_times(
-        at: Option<DateTime>,
-        after: Option<Span>,
-        repeat: Option<Span>,
-        until: Option<DateTime>,
-        time_zone: &str,
-    ) -> std::result::Result<(i64, Option<i64>), String> {
-        let zone = TimeZone::get(time_zone).map_err(|error| error.to_string())?;
-        let due = match (at, after) {
-            (Some(at), None) => at.to_zoned_datetime(zone),
-            (None, Some(after)) => Timestamp::now().to_zoned_datetime(zone).checked_add(after),
-            _ => return Err("send exactly one of at or after".to_string()),
-        }
-        .map_err(|error| error.to_string())?;
-        if due.timestamp() <= Timestamp::now() {
-            return Err("that time has already passed".to_string());
-        }
-        let until_at = until
-            .map(|until| until.to_zoned_datetime(due.time_zone().clone()))
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .map(|until| until.timestamp().as_second());
-        if let Some(repeat) = repeat {
-            let next = due.checked_add(repeat).map_err(|error| error.to_string())?;
-            if due.duration_until(&next) < MIN_REPEAT {
-                return Err(format!(
-                    "a reminder can repeat at most every {MIN_REPEAT:#}"
-                ));
-            }
-        }
-        Ok((due.timestamp().as_second(), until_at))
     }
 
     fn now_line(time_zone: Option<&TimeZone>) -> String {

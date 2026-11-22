@@ -1,4 +1,4 @@
-use jiff::{civil::DateTime, Span};
+use jiff::{civil::DateTime, tz::TimeZone, SignedDuration, Span, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -29,14 +29,56 @@ pub enum ToolCall {
         urls: Vec<String>,
         note: Option<String>,
     },
-    Remind {
-        note: String,
-        at: Option<DateTime>,
-        after: Option<Span>,
-        repeat: Option<Span>,
-        until: Option<DateTime>,
-        time_zone: String,
-    },
+    Remind(Remind),
+}
+
+const MIN_REPEAT: SignedDuration = SignedDuration::from_mins(5);
+
+#[derive(Deserialize)]
+pub struct Remind {
+    pub note: String,
+    pub at: Option<DateTime>,
+    pub after: Option<Span>,
+    pub repeat: Option<Span>,
+    pub until: Option<DateTime>,
+    pub time_zone: String,
+    /// Set by `parse`, in unix seconds.
+    #[serde(skip)]
+    pub due_at: i64,
+    #[serde(skip)]
+    pub until_at: Option<i64>,
+}
+
+impl Remind {
+    /// Checks the times and sets `due_at` and `until_at`.
+    fn parse(&mut self) -> Result<(), String> {
+        let zone = TimeZone::get(&self.time_zone).map_err(|error| error.to_string())?;
+        let due = match (self.at, self.after) {
+            (Some(at), None) => at.to_zoned_datetime(zone),
+            (None, Some(after)) => Timestamp::now().to_zoned_datetime(zone).checked_add(after),
+            _ => return Err("send exactly one of at or after".to_string()),
+        }
+        .map_err(|error| error.to_string())?;
+        if due.timestamp() <= Timestamp::now() {
+            return Err("that time has already passed".to_string());
+        }
+        self.until_at = self
+            .until
+            .map(|until| until.to_zoned_datetime(due.time_zone().clone()))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .map(|until| until.timestamp().as_second());
+        if let Some(repeat) = self.repeat {
+            let next = due.checked_add(repeat).map_err(|error| error.to_string())?;
+            if due.duration_until(&next) < MIN_REPEAT {
+                return Err(format!(
+                    "a reminder can repeat at most every {MIN_REPEAT:#}"
+                ));
+            }
+        }
+        self.due_at = due.timestamp().as_second();
+        Ok(())
+    }
 }
 
 impl ToolCall {
@@ -46,7 +88,12 @@ impl ToolCall {
             Value::String(text) => serde_json::from_str(text)?,
             other => other.clone(),
         };
-        serde_json::from_value(json!({ "name": function["name"], "arguments": arguments }))
+        let mut call =
+            serde_json::from_value(json!({ "name": function["name"], "arguments": arguments }))?;
+        if let Self::Remind(remind) = &mut call {
+            remind.parse().map_err(serde::de::Error::custom)?;
+        }
+        Ok(call)
     }
 
     pub fn definitions() -> Value {
