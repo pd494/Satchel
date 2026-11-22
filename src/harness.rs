@@ -134,8 +134,13 @@ impl Harness {
         let mut context = Agent::context(&history, &state);
         let mut saved = false;
 
+        let mut step = 0;
         let text = loop {
-            let (text, calls) = self.agent.run_model(&mut context).await?;
+            let (text, calls) = self
+                .agent
+                .run_model(&mut context, &message.event_id, step)
+                .await?;
+            step += 1;
             if calls.is_empty() {
                 break text;
             }

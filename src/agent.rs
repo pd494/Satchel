@@ -29,13 +29,15 @@ extern "C" {
 }
 
 enum Backend {
-    WorkersAi { ai: AiBinding, options: JsValue },
+    WorkersAi(AiBinding),
     Http(String),
 }
 
 pub struct Agent {
     backend: Backend,
     tools: Value,
+    /// `EVAL_RUN` tags each AI Gateway log with the eval run that made it.
+    eval_run: Option<String>,
 }
 
 impl Agent {
@@ -44,14 +46,12 @@ impl Agent {
     pub fn from_env(env: &Env) -> Result<Self> {
         let backend = match env.var("AI_API") {
             Ok(url) => Backend::Http(url.to_string()),
-            Err(_) => Backend::WorkersAi {
-                ai: env.ai("AI")?.unchecked_into(),
-                options: json!({ "gateway": { "id": "satchel" } }).serialize(&JSON)?,
-            },
+            Err(_) => Backend::WorkersAi(env.ai("AI")?.unchecked_into()),
         };
         Ok(Self {
             backend,
             tools: ToolCall::definitions(),
+            eval_run: env.var("EVAL_RUN").ok().map(|run| run.to_string()),
         })
     }
 
@@ -65,17 +65,28 @@ impl Agent {
     }
 
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
-    /// tool calls.
-    pub async fn run_model(&self, context: &mut Vec<Value>) -> Result<(String, Calls)> {
+    /// tool calls. The AI Gateway log gets the message's `event_id` and the tool loop `step`.
+    pub async fn run_model(
+        &self,
+        context: &mut Vec<Value>,
+        event_id: &str,
+        step: usize,
+    ) -> Result<(String, Calls)> {
         let input = json!({
             "messages": context,
             "tools": self.tools,
             "chat_template_kwargs": { "enable_thinking": false },
         });
         let mut output = match &self.backend {
-            Backend::WorkersAi { ai, options } => {
+            Backend::WorkersAi(ai) => {
+                let mut metadata = json!({ "event_id": event_id, "step": step });
+                if let Some(run) = &self.eval_run {
+                    metadata["eval_run"] = json!(run);
+                }
+                let options = json!({ "gateway": { "id": "satchel", "metadata": metadata } });
                 let input = input.serialize(&JSON)?;
-                let output = JsFuture::from(ai.run(MODEL, input, options.clone())?).await?;
+                let output =
+                    JsFuture::from(ai.run(MODEL, input, options.serialize(&JSON)?)?).await?;
                 serde_wasm_bindgen::from_value::<Value>(output)?
             }
             Backend::Http(url) => Self::post(url, &input).await?,

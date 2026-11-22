@@ -6,11 +6,15 @@
 // At the end it reads the Durable Object's `saved` table. The model is the real one.
 // `wrangler dev` needs a Cloudflare login or `CLOUDFLARE_API_TOKEN`.
 //
+// Each model call goes through AI Gateway with the run id in `eval_run` metadata. With
+// `CLOUDFLARE_API_TOKEN` (AI Gateway Edit), the run then marks each call 👍 or 👎 by its case.
+// To see where the model went wrong: AI Gateway > satchel > Logs, filter Feedback = 👎.
+//
 // Run: node test/e2e/live.mjs
 
 import { spawn } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +26,8 @@ const WEBHOOK_KEY = Buffer.from("satchel-e2e-webhook-key");
 const BUILD_TIMEOUT_MS = 15 * 60_000;
 const REPLY_TIMEOUT_MS = 120_000;
 const QUIET_MS = 5_000;
+const RUN = process.env.EVAL_RUN ?? `local-${new Date().toISOString()}`;
+const RUN_STARTED = new Date().toISOString();
 
 function file(name) {
   const id = randomUUID();
@@ -116,6 +122,7 @@ const worker = spawn(
     "--var", `LINQ_API:http://127.0.0.1:${LINQ_PORT}`,
     "--var", "LINQ_API_KEY:e2e",
     "--var", `LINQ_WEBHOOK_SECRET:whsec_${WEBHOOK_KEY.toString("base64")}`,
+    "--var", `EVAL_RUN:${RUN}`,
   ],
   {
     env: { ...process.env, CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
@@ -156,9 +163,9 @@ async function waitForWorker() {
 const sender = `+1555${Math.floor(Math.random() * 1e7)}`;
 const chat = `e2e-${randomUUID()}`;
 
-/** Sends `message` as a signed Linq webhook. Returns its event id. */
-async function send(message) {
-  const eventId = `e2e-${randomUUID()}`;
+/** Sends `message` as a signed Linq webhook for case `name`. Returns its event id. */
+async function send(name, message) {
+  const eventId = `eval:${name}:${randomUUID()}`;
   const part = message.startsWith("https://cdn.linqapp.com/")
     ? { type: "media", url: message }
     : { type: "text", value: message };
@@ -308,20 +315,67 @@ function checkSaved() {
   return failures;
 }
 
+/** The case that caused a saved table failure. */
+function blame(failure) {
+  if (failure.includes("stretch")) return "remind-correct";
+  if (failure.includes("time zone")) return "remind-set";
+  if (failure.includes(NOTE)) return "remember-note";
+  const url = failure.slice(failure.indexOf(": ") + 2);
+  const bare = url.replace(/^https:\/\//, "").replace(/\/$/, "");
+  return CASES.find(([, message]) => message?.includes(bare))?.[0] ?? "unknown";
+}
+
+/** Marks each AI Gateway log from this run 👍 or 👎 by its case. A due reminder belongs to `remind-fires`. */
+async function markLogs() {
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  if (!token) return console.log("no CLOUDFLARE_API_TOKEN: AI Gateway logs not marked");
+  const account = readFileSync(new URL("../../wrangler.jsonc", import.meta.url), "utf8").match(/"account_id":\s*"(\w+)"/)[1];
+  const api = `https://api.cloudflare.com/client/v4/accounts/${account}/ai-gateway/gateways/satchel/logs`;
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  await sleep(15_000); // Logs take a few seconds to show up.
+
+  const logs = [];
+  for (let page = 1; ; page++) {
+    const url = `${api}?start_date=${RUN_STARTED}&per_page=50&page=${page}&order_by=created_at&order_by_direction=asc`;
+    const response = await fetch(url, { headers });
+    const body = await response.json();
+    if (!body.success) return console.log(`AI Gateway logs not marked: ${JSON.stringify(body.errors)}`);
+    for (const log of body.result) {
+      const metadata = JSON.parse(log.metadata || "{}");
+      if (metadata.eval_run === RUN) logs.push({ id: log.id, event: String(metadata.event_id) });
+    }
+    if (body.result.length < 50) break;
+  }
+
+  let marked = 0;
+  for (const { id, event } of logs) {
+    const name = event.startsWith("reminder:") ? "remind-fires" : event.split(":")[1];
+    const feedback = failedCases.has(name) ? -1 : 1;
+    const response = await fetch(`${api}/${id}`, { method: "PATCH", headers, body: JSON.stringify({ feedback, metadata: { eval_run: RUN, case: name } }) });
+    if (response.ok) marked += 1;
+  }
+  console.log(`marked ${marked} of ${logs.length} AI Gateway logs for run ${RUN} (${failedCases.size} failed cases)`);
+}
+
+const failedCases = new Set();
 let failures = 0;
 try {
   await new Promise((resolve) => linq.listen(LINQ_PORT, "127.0.0.1", resolve));
   await waitForWorker();
   for (const [name, message, kind, needle] of CASES) {
     const start = linqRequests.length;
-    const eventId = message === null ? "reminder" : await send(message);
+    const eventId = message === null ? "reminder" : await send(name, message);
     const summary = summarize(await reply(start), eventId);
     const failure = check(kind, needle, summary);
     if (failure) failures += 1;
+    if (failure) failedCases.add(name);
     console.log(`${failure ? "FAIL" : "PASS"}  ${name}${failure ? ` (${failure})` : ""}\n      ${describe(summary)}`);
   }
   const savedFailures = checkSaved();
-  for (const failure of savedFailures) console.log(`FAIL  saved table (${failure})`);
+  for (const failure of savedFailures) {
+    console.log(`FAIL  saved table (${failure})`);
+    failedCases.add(blame(failure));
+  }
   if (savedFailures.length === 0) console.log(`PASS  saved table (${SAVED.length} items, the note, and the time zone)`);
   failures += savedFailures.length;
   console.log(failures ? `\n${failures} failure(s)` : `\nall ${CASES.length} cases and the saved table passed`);
@@ -331,5 +385,10 @@ try {
 } finally {
   linq.close();
   stopWorker();
+}
+try {
+  await markLogs();
+} catch (error) {
+  console.log(`AI Gateway logs not marked: ${error}`);
 }
 process.exit(failures ? 1 : 0);
