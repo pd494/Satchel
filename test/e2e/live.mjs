@@ -72,6 +72,9 @@ const CASES = [
   ["remind-set", "pst", "text-only", ""],
   ["remind-correct", "no, make it 10 am", "text-only", ""],
   ["remind-fires", null, "text-only", "water"],
+  ["remind-rent", "remind me friday at 3 pm to pay rent", "text-only", ""],
+  ["save-after-reminder", "https://example.com/rent-portal", "tapback", ""],
+  ["remind-change-pm", "nvm change it to 5 pm instead", "text-only", ""],
 ];
 
 // `remind-set` must save this zone.
@@ -90,6 +93,7 @@ const SAVED = [
   contact.url,
   pin.url,
   lease.url,
+  "https://example.com/rent-portal",
 ];
 // One saved note must contain this.
 const NOTE = "4521";
@@ -292,10 +296,13 @@ function checkSaved() {
 
   const failures = [];
   if (zone !== TIME_ZONE) failures.push(`time zone is ${zone}, not ${TIME_ZONE}`);
-  const stretch = pending.filter((row) => row.content.toLowerCase().includes("stretch"));
   const hour = (row) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: TIME_ZONE, hour: "numeric", hourCycle: "h23" });
-  if (stretch.length !== 1) failures.push(`expected 1 stretch reminder, found ${stretch.length}`);
-  else if (hour(stretch[0]) !== "10") failures.push(`stretch reminder is at hour ${hour(stretch[0])}, not 10`);
+  // Each correction moves its reminder: one row, at the corrected hour.
+  for (const [word, want] of [["stretch", "10"], ["rent", "17"]]) {
+    const found = pending.filter((row) => row.content.toLowerCase().includes(word));
+    if (found.length !== 1) failures.push(`expected 1 ${word} reminder, found ${found.length}`);
+    else if (hour(found[0]) !== want) failures.push(`${word} reminder is at hour ${hour(found[0])}, not ${want}`);
+  }
   const contents = [];
   let noteFound = false;
   for (const row of rows) {
@@ -318,6 +325,7 @@ function checkSaved() {
 /** The case that caused a saved table failure. */
 function blame(failure) {
   if (failure.includes("stretch")) return "remind-correct";
+  if (failure.includes("rent reminder")) return "remind-change-pm";
   if (failure.includes("time zone")) return "remind-set";
   if (failure.includes(NOTE)) return "remember-note";
   const url = failure.slice(failure.indexOf(": ") + 2);
