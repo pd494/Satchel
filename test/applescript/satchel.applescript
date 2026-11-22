@@ -34,7 +34,11 @@ on allCases()
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}, ¬
 		{"link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""}, ¬
 		{"save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"}, ¬
-		{"recall-after-answer", "what was that book link?", "text-only", "doc.rust-lang.org"}}
+		{"recall-after-answer", "what was that book link?", "text-only", "doc.rust-lang.org"}, ¬
+		{"remind-in", "remind me in 60 seconds to drink water", "text-only", ""}, ¬
+		{"remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"}, ¬
+		{"remind-set", "pst", "text-only", ""}, ¬
+		{"remind-fires", "", "text-only", "water"}}
 end allCases
 
 on run argv
@@ -100,10 +104,12 @@ on runCase(satchelNumber, caseText, wantKind, wantText)
 	if caseText starts with "file:~/" then
 		set toSend to POSIX file ((POSIX path of (path to home folder)) & (text 8 thru -1 of caseText))
 	end if
-	tell application "Messages"
-		set toSatchel to participant satchelNumber of (first account whose service type = iMessage)
-		send toSend to toSatchel
-	end tell
+	if caseText is not "" then
+		tell application "Messages"
+			set toSatchel to participant satchelNumber of (first account whose service type = iMessage)
+			send toSend to toSatchel
+		end tell
+	end if
 	set fromSatchel to "FROM message m JOIN handle h ON m.handle_id = h.ROWID WHERE h.id = '" & satchelNumber & "' AND m.is_from_me = 0 AND m.date > " & startDate
 	set countQuery to "SELECT coalesce(sum(m.associated_message_type = " & likeTapback & "), 0) || '|' || " & ¬
 		"coalesce(sum(m.associated_message_type = 0 AND (instr(lower(coalesce(m.text, '')), lower('" & wantText & "')) > 0" & ¬

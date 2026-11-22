@@ -36,6 +36,7 @@ const lease = file("lease.pdf");
 // tapback: a reaction and no text. text-only: text, no reaction, no file.
 // text: text, reaction allowed. The needle must be in the text, not only in a link.
 // file: the file with the needle as its id is sent back. voice: the same, as a voice memo.
+// A null message sends nothing. The case waits for a reminder to fire.
 const CASES = [
   ["greeting", "reset", "text", "Satchel"],
   ["save-link-scheme", "https://www.rust-lang.org/learn", "tapback", ""],
@@ -59,7 +60,14 @@ const CASES = [
   ["link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""],
   ["save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"],
   ["recall-after-answer", "what was that book link?", "text-only", ""],
+  ["remind-in", "remind me in 60 seconds to drink water", "text-only", ""],
+  ["remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"],
+  ["remind-set", "pst", "text-only", ""],
+  ["remind-fires", null, "text-only", "water"],
 ];
+
+// `remind-set` must save this zone.
+const TIME_ZONE = "America/Los_Angeles";
 
 // The `saved` table must hold exactly these items, matched in full.
 const SAVED = [
@@ -208,7 +216,7 @@ function summarize(requests, eventId) {
   const summary = { reactions: [], texts: [], links: [], files: [], voices: [], late: 0 };
   for (const request of requests) {
     const event = eventOf(request);
-    if (event !== null && event !== eventId) {
+    if (event !== null && event !== eventId && !event.startsWith(`${eventId}:`)) {
       summary.late += 1;
       continue;
     }
@@ -269,9 +277,11 @@ function checkSaved() {
   if (databases.length !== 1) return [`expected 1 User database, found ${databases.length}`];
   const db = new DatabaseSync(databases[0], { readOnly: true });
   const rows = db.prepare("SELECT media, content FROM saved").all();
+  const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value;
   db.close();
 
   const failures = [];
+  if (zone !== TIME_ZONE) failures.push(`time zone is ${zone}, not ${TIME_ZONE}`);
   const contents = [];
   let noteFound = false;
   for (const row of rows) {
@@ -297,7 +307,7 @@ try {
   await waitForWorker();
   for (const [name, message, kind, needle] of CASES) {
     const start = linqRequests.length;
-    const eventId = await send(message);
+    const eventId = message === null ? "reminder" : await send(message);
     const summary = summarize(await reply(start), eventId);
     const failure = check(kind, needle, summary);
     if (failure) failures += 1;
@@ -305,7 +315,7 @@ try {
   }
   const savedFailures = checkSaved();
   for (const failure of savedFailures) console.log(`FAIL  saved table (${failure})`);
-  if (savedFailures.length === 0) console.log(`PASS  saved table (${SAVED.length} items and the note)`);
+  if (savedFailures.length === 0) console.log(`PASS  saved table (${SAVED.length} items, the note, and the time zone)`);
   failures += savedFailures.length;
   console.log(failures ? `\n${failures} failure(s)` : `\nall ${CASES.length} cases and the saved table passed`);
 } catch (error) {

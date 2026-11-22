@@ -233,7 +233,9 @@ impl Harness {
                             repeat.map(|repeat| repeat.to_string()),
                             until_at,
                         )?;
-                        self.db.set_time_zone(time_zone)?;
+                        if at.is_some() {
+                            self.db.set_time_zone(time_zone)?;
+                        }
                         "ok".to_string()
                     }
                 },
