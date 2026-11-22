@@ -94,22 +94,11 @@ impl Harness {
         }
     }
 
-    pub fn next_alarm(&self) -> Result<Option<Duration>> {
-        if self.db.next_unanswered()?.is_some() {
-            return Ok(Some(Duration::ZERO));
-        }
-        let now = Timestamp::now().as_second();
-        Ok(self
-            .db
-            .reminders()?
-            .first()
-            .map(|reminder| Duration::from_secs(reminder.due_at.saturating_sub(now).max(0) as u64)))
-    }
-
     /// Replies to every unanswered message, oldest first. A reply is stored before it is sent,
     /// so a failed send only resends it. After `MAX_ATTEMPTS` runs, a message gets `SORRY`,
-    /// and it is marked sent even if that send fails.
-    pub async fn inbox(&self, space_id: &str) -> Result<()> {
+    /// and it is marked sent even if that send fails. Returns how long until the next
+    /// reminder, or `None` if none is pending.
+    pub async fn inbox(&self, space_id: &str) -> Result<Option<Duration>> {
         // Show the user that Satchel read the chat. A failure here does not stop the replies.
         if let Err(error) = self.linq.mark_read(space_id).await {
             console_error!("mark read failed: {error}");
@@ -132,7 +121,12 @@ impl Harness {
             }
             sent?;
         }
-        Ok(())
+        let now = Timestamp::now().as_second();
+        Ok(self
+            .db
+            .reminders()?
+            .first()
+            .map(|reminder| Duration::from_secs(reminder.due_at.saturating_sub(now).max(0) as u64)))
     }
 
     /// Returns the stored unsent reply, or makes and stores a new one. The reply is empty if
