@@ -30,7 +30,7 @@ impl Harness {
     pub fn new(sql: SqlStorage, env: &Env) -> Result<Self> {
         Ok(Self {
             db: Db::open(sql)?,
-            agent: Agent::new(env.ai("AI")?)?,
+            agent: Agent::from_env(env)?,
             linq: LinqClient::from_env(env)?,
         })
     }

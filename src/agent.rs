@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use worker::js_sys::Promise;
 use worker::wasm_bindgen_futures::JsFuture;
-use worker::{Ai, Result};
+use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
@@ -28,18 +28,30 @@ extern "C" {
     ) -> std::result::Result<Promise, JsValue>;
 }
 
+enum Backend {
+    WorkersAi { ai: AiBinding, options: JsValue },
+    Http(String),
+}
+
 pub struct Agent {
-    ai: AiBinding,
+    backend: Backend,
     tools: Value,
-    options: JsValue,
 }
 
 impl Agent {
-    pub fn new(ai: Ai) -> Result<Self> {
+    /// `AI_API` replaces Workers AI with a URL that takes the same request. The end-to-end
+    /// tests point it at a fake model.
+    pub fn from_env(env: &Env) -> Result<Self> {
+        let backend = match env.var("AI_API") {
+            Ok(url) => Backend::Http(url.to_string()),
+            Err(_) => Backend::WorkersAi {
+                ai: env.ai("AI")?.unchecked_into(),
+                options: json!({ "gateway": { "id": "satchel" } }).serialize(&JSON)?,
+            },
+        };
         Ok(Self {
-            ai: ai.unchecked_into(),
+            backend,
             tools: ToolCall::definitions(),
-            options: json!({ "gateway": { "id": "satchel" } }).serialize(&JSON)?,
         })
     }
 
@@ -52,18 +64,23 @@ impl Agent {
         context
     }
 
-    /// Calls the model once through AI Gateway and adds its message to `context`. Returns its
-    /// trimmed text and its tool calls.
+    /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
+    /// tool calls.
     pub async fn run_model(&self, context: &mut Vec<Value>) -> Result<(String, Calls)> {
         let input = json!({
             "messages": context,
             "tools": self.tools,
             "chat_template_kwargs": { "enable_thinking": false },
-        })
-        .serialize(&JSON)?;
-        let output = JsFuture::from(self.ai.run(MODEL, input, self.options.clone())?).await?;
-        let response =
-            serde_wasm_bindgen::from_value::<Value>(output)?["choices"][0]["message"].take();
+        });
+        let mut output = match &self.backend {
+            Backend::WorkersAi { ai, options } => {
+                let input = input.serialize(&JSON)?;
+                let output = JsFuture::from(ai.run(MODEL, input, options.clone())?).await?;
+                serde_wasm_bindgen::from_value::<Value>(output)?
+            }
+            Backend::Http(url) => Self::post(url, &input).await?,
+        };
+        let response = output["choices"][0]["message"].take();
         let text = Self::clean(response["content"].as_str().unwrap_or_default());
         let calls = response["tool_calls"]
             .as_array()
@@ -73,6 +90,25 @@ impl Agent {
             .collect();
         context.push(response);
         Ok((text, calls))
+    }
+
+    async fn post(url: &str, input: &Value) -> Result<Value> {
+        let headers = Headers::new();
+        headers.set("content-type", "application/json")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_headers(headers)
+            .with_body(Some(input.to_string().into()));
+        let mut response = Fetch::Request(Request::new_with_init(url, &init)?)
+            .send()
+            .await?;
+        if response.status_code() != 200 {
+            return Err(Error::RustError(format!(
+                "AI_API returned {}",
+                response.status_code()
+            )));
+        }
+        response.json().await
     }
 
     /// Adds one tool message per result, matched to the tool call ids in the last response.
