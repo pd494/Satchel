@@ -15,18 +15,12 @@
 //
 // Run: node test/e2e/live.mjs
 
-import { execSync, spawn } from "node:child_process";
-import { createHmac, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
-import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { describe, eventOf, file, linq, newUser, sleep, startWorker, stop, summarize, userDatabases, webhook } from "./harness.mjs";
 
-const WORKER_PORT = 8787;
-const LINQ_PORT = 8788;
-const WEBHOOK_KEY = Buffer.from("satchel-e2e-webhook-key");
-const BUILD_TIMEOUT_MS = 15 * 60_000;
 const REPLY_TIMEOUT_MS = 180_000;
 const QUIET_MS = 5_000;
 const RUN = process.env.EVAL_RUN ?? `local-${new Date().toISOString()}`;
@@ -37,10 +31,6 @@ const ACCOUNT = readFileSync(new URL("../../wrangler.jsonc", import.meta.url), "
 const EVAL_DB = "d3b42584-e526-46b4-8d38-f51fe8e2d3f9";
 const LA = "America/Los_Angeles";
 
-function file(name) {
-  const id = randomUUID();
-  return { id, url: `https://cdn.linqapp.com/attachments/partners/e2e/${id}/${name}` };
-}
 const photo = file("photo.jpg");
 const memo = file("memo.m4a");
 const pin = file("CL.loc.vcf");
@@ -211,111 +201,11 @@ const SCENARIOS = [
   },
 ];
 
-/** Every request Satchel makes to the fake Linq, except marking the chat read. */
-const linqRequests = [];
-
-const linq = createServer((req, res) => {
-  let body = "";
-  req.on("data", (chunk) => (body += chunk));
-  req.on("end", () => {
-    if (!req.url.endsWith("/read")) {
-      let parsed = null;
-      try {
-        parsed = JSON.parse(body);
-      } catch {}
-      linqRequests.push({ path: req.url, body: parsed });
-    }
-    res.writeHead(200, { "content-type": "application/json" }).end("{}");
-  });
-});
-
-const storage = mkdtempSync(join(tmpdir(), "satchel-e2e-"));
-const worker = spawn(
-  "npx",
-  [
-    "wrangler", "dev",
-    "--port", String(WORKER_PORT),
-    "--persist-to", storage,
-    "--var", `LINQ_API:http://127.0.0.1:${LINQ_PORT}`,
-    "--var", "LINQ_API_KEY:e2e",
-    "--var", `LINQ_WEBHOOK_SECRET:whsec_${WEBHOOK_KEY.toString("base64")}`,
-    "--var", `EVAL_RUN:${RUN}`,
-  ],
-  {
-    env: { ...process.env, CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
-    stdio: ["ignore", "inherit", "inherit"],
-    detached: true,
-  },
-);
-
-function stopWorker() {
-  try {
-    process.kill(-worker.pid);
-  } catch {}
-}
-process.on("SIGINT", () => {
-  stopWorker();
-  process.exit(130);
-});
-process.on("SIGTERM", () => {
-  stopWorker();
-  process.exit(143);
-});
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function waitForWorker() {
-  const deadline = Date.now() + BUILD_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (worker.exitCode !== null) throw new Error(`wrangler dev exited with ${worker.exitCode}`);
-    try {
-      const response = await fetch(`http://127.0.0.1:${WORKER_PORT}/`);
-      if ((await response.text()) === "hello world") return;
-    } catch {}
-    await sleep(2_000);
-  }
-  throw new Error("wrangler dev did not start");
-}
-
 /** Sends `message` from `user` as a signed Linq webhook for case `name`. Returns its event id. */
 async function send(user, name, message) {
-  const eventId = `eval:${name}:${randomUUID()}`;
-  const part = message.startsWith("https://cdn.linqapp.com/")
-    ? { type: "media", url: message }
-    : { type: "text", value: message };
-  const body = JSON.stringify({
-    event_type: "message.received",
-    data: {
-      id: eventId,
-      chat: { id: user.chat, is_group: false },
-      sender_handle: { handle: user.sender },
-      parts: [part],
-    },
-  });
-  const id = `msg_${randomUUID()}`;
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = createHmac("sha256", WEBHOOK_KEY).update(`${id}.${timestamp}.${body}`).digest("base64");
-  const response = await fetch(`http://127.0.0.1:${WORKER_PORT}/webhook`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "webhook-id": id,
-      "webhook-timestamp": timestamp,
-      "webhook-signature": `v1,${signature}`,
-    },
-    body,
-  });
+  const { eventId, response } = await webhook(user, message, { eventId: `eval:${name}:${randomUUID()}` });
   if (!response.ok) throw new Error(`webhook returned ${response.status}: ${await response.text()}`);
   return eventId;
-}
-
-/** The event a Linq request replies to. A voice memo request carries none. */
-function eventOf(request) {
-  const reaction = request.path.match(/\/messages\/([^/]+)\/reactions$/);
-  if (reaction) return reaction[1];
-  const key = request.body?.message?.idempotency_key;
-  if (key) return key.slice(0, key.lastIndexOf(":"));
-  return null;
 }
 
 /** Waits until Satchel stops making Linq requests, and returns the ones after `start`. */
@@ -325,42 +215,17 @@ async function reply(start) {
   let quietSince = Date.now();
   while (Date.now() < deadline) {
     await sleep(500);
-    if (linqRequests.length !== count) {
-      count = linqRequests.length;
+    if (linq.requests.length !== count) {
+      count = linq.requests.length;
       quietSince = Date.now();
     }
     if (count > start && Date.now() - quietSince >= QUIET_MS) break;
   }
-  return linqRequests.slice(start);
-}
-
-/** Reads the reactions, text, links, and files out of the requests for `eventId`. A reply to
- * another event goes in `late`, by event. */
-function summarize(requests, eventId) {
-  const summary = { reactions: [], texts: [], links: [], files: [], voices: [], late: [] };
-  for (const request of requests) {
-    const event = eventOf(request);
-    const isNudge = eventId === "reminder" && event?.startsWith("reminder:");
-    if (event !== null && event !== eventId && !isNudge) {
-      summary.late.push(event);
-      continue;
-    }
-    if (request.path.endsWith("/reactions")) {
-      summary.reactions.push(request.body.type);
-    } else if (request.path.endsWith("/voicememo")) {
-      summary.voices.push(request.body.attachment_id);
-    } else {
-      const part = request.body.message.parts[0];
-      if (part.type === "media") summary.files.push(part.attachment_id);
-      else if (part.type === "link") summary.links.push(part.value);
-      else summary.texts.push(part.value);
-    }
-  }
-  return summary;
+  return linq.requests.slice(start);
 }
 
 function check(kind, needle, summary) {
-  const text = summary.texts.join(" ");
+  const text = summary.text;
   const sentFile = summary.files.length + summary.voices.length > 0;
   if (kind === "tapback") {
     if (summary.reactions.length === 0) return "no tapback";
@@ -378,22 +243,18 @@ function check(kind, needle, summary) {
   return null;
 }
 
-function describe(summary) {
-  const items = [];
-  for (const reaction of summary.reactions) items.push(`[${reaction}]`);
-  for (const text of summary.texts) items.push(JSON.stringify(text));
-  for (const link of summary.links) items.push(`link ${link}`);
-  for (const id of summary.files) items.push(`file ${id}`);
-  for (const id of summary.voices) items.push(`voice ${id}`);
-  return items.join(" ") || "(nothing)";
-}
+/** The database path of the chat that sent each first text. */
+const databasePaths = new Map();
 
 /** Opens the Durable Object database of the chat that sent `text`. */
 function databaseWith(text) {
-  for (const path of readdirSync(storage, { recursive: true })) {
-    if (!path.includes("User") || !path.endsWith(".sqlite") || path.endsWith("metadata.sqlite")) continue;
-    const db = new DatabaseSync(join(storage, path), { readOnly: true });
-    if (db.prepare("SELECT 1 FROM messages WHERE content = ?").get(text)) return db;
+  if (databasePaths.has(text)) return new DatabaseSync(databasePaths.get(text), { readOnly: true });
+  for (const path of userDatabases()) {
+    const db = new DatabaseSync(path, { readOnly: true });
+    if (db.prepare("SELECT 1 FROM messages WHERE content = ?").get(text)) {
+      databasePaths.set(text, path);
+      return db;
+    }
     db.close();
   }
   return null;
@@ -474,8 +335,10 @@ function checkState(scenario) {
   return failures;
 }
 
-/** One result per case: its scenario, verdict, reason, reply, and the event it sent. */
+/** One result per case: its scenario, verdict, reason, and reply. */
 const results = new Map();
+/** The case each event belongs to, including the event of a reminder nudge. */
+const caseOf = new Map();
 
 function fail(name, reason, blocked) {
   const result = results.get(name);
@@ -484,7 +347,7 @@ function fail(name, reason, blocked) {
 }
 
 /** Lists this run's AI Gateway logs, marks each 👍 or 👎 by its case, and returns each case's last
- * log id. A due reminder belongs to `remind-fires`. */
+ * log id. */
 async function markLogs(api, headers) {
   await sleep(15_000); // Logs take a few seconds to show up.
   const logs = [];
@@ -495,17 +358,17 @@ async function markLogs(api, headers) {
     for (const log of body.result) {
       const metadata = typeof log.metadata === "string" ? JSON.parse(log.metadata || "{}") : (log.metadata ?? {});
       if (metadata.eval_run !== RUN) continue;
-      const event = String(metadata.event_id);
-      logs.push({ id: log.id, name: event.startsWith("reminder:") ? "remind-fires" : event.split(":")[1] });
+      logs.push({ id: log.id, name: caseOf.get(String(metadata.event_id)) });
     }
     if (body.result.length < 50) break;
   }
-  const lastLog = new Map();
-  for (const { id, name } of logs) {
-    lastLog.set(name, id);
-    const verdict = results.get(name)?.verdict;
-    const feedback = verdict === "fail" ? -1 : verdict === "pass" ? 1 : 0;
-    await fetch(`${api}/ai-gateway/gateways/satchel/logs/${id}`, { method: "PATCH", headers, body: JSON.stringify({ feedback }) });
+  const lastLog = new Map(logs.map(({ id, name }) => [name, id]));
+  for (let i = 0; i < logs.length; i += 10) {
+    await Promise.all(logs.slice(i, i + 10).map(({ id, name }) => {
+      const verdict = results.get(name)?.verdict;
+      const feedback = verdict === "fail" ? -1 : verdict === "pass" ? 1 : 0;
+      return fetch(`${api}/ai-gateway/gateways/satchel/logs/${id}`, { method: "PATCH", headers, body: JSON.stringify({ feedback }) });
+    }));
   }
   console.log(`marked ${logs.length} AI Gateway logs for run ${RUN}`);
   return lastLog;
@@ -525,26 +388,27 @@ async function writeResults(api, headers, lastLog) {
 
 let crashed = false;
 try {
-  await new Promise((resolve) => linq.listen(LINQ_PORT, "127.0.0.1", resolve));
-  await waitForWorker();
+  await startWorker(["--var", `EVAL_RUN:${RUN}`]);
   for (const scenario of SCENARIOS) {
-    const user = { sender: `+1555${Math.floor(Math.random() * 1e7)}`, chat: `eval-${randomUUID()}` };
-    const events = new Map();
+    const user = newUser();
     console.log(`\n# ${scenario.name}`);
     // The first text in a chat always gets the greeting, whatever the model says. It is not a check.
-    const greeted = linqRequests.length;
+    const greeted = linq.requests.length;
     await send(user, `${scenario.name}-greeting`, "hi");
     await reply(greeted);
     let broken = false;
     for (const [name, message, kind, needle, after] of scenario.cases) {
       results.set(name, { scenario: scenario.name, verdict: "pass", reason: null, reply: null });
-      const start = linqRequests.length;
-      const eventId = message === null ? "reminder" : await send(user, name, message);
-      events.set(eventId, name);
-      const summary = summarize(await reply(start), eventId);
+      const start = linq.requests.length;
+      const sent = message === null ? null : await send(user, name, message);
+      const requests = await reply(start);
+      // A nudge replies to the reminder's own event.
+      const eventId = sent ?? (requests[0] && eventOf(requests[0]));
+      caseOf.set(eventId, name);
+      const summary = summarize(requests, eventId);
       results.get(name).reply = describe(summary);
       for (const event of summary.late) {
-        if (events.has(event)) fail(events.get(event), "replied again after the turn ended", false);
+        if (caseOf.has(event)) fail(caseOf.get(event), "replied again after the turn ended", false);
       }
       const reason = check(kind, needle, summary) ?? checkAfter(after, message);
       if (reason) fail(name, reason, scenario.chain && broken);
@@ -564,8 +428,7 @@ try {
   console.error(error);
   crashed = true;
 } finally {
-  linq.close();
-  stopWorker();
+  stop();
 }
 
 const token = process.env.CLOUDFLARE_API_TOKEN;
