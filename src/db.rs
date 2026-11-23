@@ -11,6 +11,7 @@ use worker::{Result, SqlStorage, SqlStorageValue};
 /// | 2  | assistant | "Sunset Lofts…"  | NULL     | evt_1    | 0        | 1    | 1761600002 |
 /// +----+-----------+------------------+----------+----------+----------+------+------------+
 /// ```
+/// `sent` on a user message means it was answered, by its own reply or a later one.
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY,
@@ -32,6 +33,8 @@ CREATE TABLE IF NOT EXISTS saved (
     content     TEXT NOT NULL,
     title       TEXT,
     description TEXT,
+    context     TEXT,
+    vector      BLOB,
     data        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)),
     attempts    INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -65,8 +68,10 @@ struct NextDue {
 }
 
 #[derive(Deserialize)]
-struct SavedId {
-    id: i64,
+pub struct Saved {
+    pub id: i64,
+    /// The user's words about the item.
+    pub context: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +87,7 @@ pub struct UnansweredMessage {
     pub content: String,
     /// Runs started so far.
     pub attempts: i64,
+    pub created_at: i64,
     /// The stored reply that failed to send, if any.
     pub response: Option<String>,
 }
@@ -251,9 +257,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn mark_sent(&self, reply_to: &str) -> Result<()> {
-        let update_query = "UPDATE messages SET sent = 1 WHERE reply_to = ?";
-        self.sql.exec(update_query, Some(vec![reply_to.into()]))?;
+    /// Marks the user message `event_id` and its reply, if any, as sent.
+    pub fn mark_sent(&self, event_id: &str) -> Result<()> {
+        let update_query = "UPDATE messages SET sent = 1 WHERE ?1 IN (event_id, reply_to)";
+        self.sql.exec(update_query, Some(vec![event_id.into()]))?;
         Ok(())
     }
 
@@ -284,14 +291,33 @@ impl Db {
         Ok(())
     }
 
-    /// Returns the oldest user message that has no reply yet, or whose reply is unsent.
-    pub fn next_unanswered(&self) -> Result<Option<UnansweredMessage>> {
-        let select_query = "SELECT u.id, u.event_id, u.content, u.attempts, a.content AS response \
+    /// Returns every user message that is not answered yet, oldest first.
+    pub fn unanswered(&self) -> Result<Vec<UnansweredMessage>> {
+        let select_query = "SELECT u.id, u.event_id, u.content, u.attempts, u.created_at, \
+            a.content AS response \
             FROM messages AS u LEFT JOIN messages AS a ON a.reply_to = u.event_id \
-            WHERE u.role = 'user' AND (a.id IS NULL OR a.sent = 0) \
-            ORDER BY u.id LIMIT 1";
-        let mut rows: Vec<UnansweredMessage> = self.sql.exec(select_query, None)?.to_array()?;
-        Ok(rows.pop())
+            WHERE u.role = 'user' AND u.sent = 0 ORDER BY u.id";
+        self.sql.exec(select_query, None)?.to_array()
+    }
+
+    /// Adds the user's words to the newest item saved with `content`, unless a retry already
+    /// added them. Returns `None` if nothing was saved with `content`.
+    pub fn add_context(&self, content: &str, note: Option<&str>) -> Result<Option<Saved>> {
+        let update_query = "UPDATE saved SET context = \
+            CASE WHEN ?1 IS NULL OR instr(char(10) || context || char(10), char(10) || ?1 || char(10)) > 0 \
+            THEN context \
+            ELSE COALESCE(context || char(10), '') || ?1 END \
+            WHERE id = (SELECT max(id) FROM saved WHERE content = ?2) RETURNING id, context";
+        let values = vec![note.into(), content.into()];
+        Ok(self.sql.exec(update_query, Some(values))?.to_array()?.pop())
+    }
+
+    /// Stores the search text of saved item `id`, as its description, and its embedding.
+    pub fn set_read(&self, id: i64, text: &str, vector: Vec<u8>) -> Result<()> {
+        let update_query = "UPDATE saved SET description = ?, vector = ? WHERE id = ?";
+        let values = vec![text.into(), SqlStorageValue::Blob(vector), id.into()];
+        self.sql.exec(update_query, Some(values))?;
+        Ok(())
     }
 
     /// Saves `item` and returns its row id. Saving the same item from the same message again
@@ -302,26 +328,20 @@ impl Db {
             "INSERT INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?) \
             ON CONFLICT (message_id, content) DO UPDATE SET content = content RETURNING id";
-        let row: SavedId = self
+        let row: Saved = self
             .sql
             .exec(
                 insert_query,
                 Some(vec![
-                    SqlStorageValue::Integer(message_id),
-                    SqlStorageValue::String(item.get_type().to_string()),
-                    SqlStorageValue::String(item.content()),
-                    opt_sql(item.title()),
-                    opt_sql(item.description()),
-                    SqlStorageValue::String(data),
+                    message_id.into(),
+                    item.get_type().into(),
+                    item.content().into(),
+                    item.title().into(),
+                    item.description().into(),
+                    data.into(),
                 ]),
             )?
             .one()?;
         Ok(row.id)
     }
-}
-
-fn opt_sql(value: Option<&str>) -> SqlStorageValue {
-    value.map_or(SqlStorageValue::Null, |s| {
-        SqlStorageValue::String(s.to_string())
-    })
 }

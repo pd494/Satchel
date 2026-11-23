@@ -53,7 +53,7 @@ export const linq = {
       linq.refused += 1;
       return res.writeHead(500).end();
     }
-    if (!req.url.endsWith("/read")) linq.requests.push({ path: req.url, body, at: Date.now() });
+    if (!req.url.endsWith("/read") && !req.url.endsWith("/typing")) linq.requests.push({ path: req.url, body, at: Date.now() });
     res.writeHead(200, { "content-type": "application/json" }).end("{}");
   }),
 };

@@ -9,6 +9,7 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["User"] }],
   "ai": { "binding": "AI" },
+  "images": { "binding": "IMAGES" },
   "build": {
     "command": "cargo install -q \"worker-build@^0.8\" && worker-build --release"
   }

@@ -9,33 +9,59 @@ on allCases()
 		{"reset", "reset", "text", "Satchel"}, ¬
 		{"chat", "hi", "text", ""}, ¬
 		{"save-link-scheme", "https://www.rust-lang.org/learn", "tapback", ""}, ¬
-		{"save-link-bare", "example.com/apartments", "tapback", ""}, ¬
+		{"save-link-bare", "github.com/rust-lang/rust", "tapback", ""}, ¬
 		{"save-link-with-comment", "check this place out https://www.zillow.com/homes/austin looks nice", "tapback", ""}, ¬
 		{"save-two-links-prefix", "tour at example.org, details at example.org/tour", "tapback", ""}, ¬
 		{"save-link-duplicate", "https://www.rust-lang.org/learn", "tapback", ""}, ¬
+		{"recall-link", "what rust link did i save?", "text-only", "rust-lang.org"}, ¬
 		{"suspicious-not-link", "node.js is my favorite runtime", "text-only", ""}, ¬
 		{"file-like-not-link", "the readme.md has the setup steps", "text-only", ""}, ¬
 		{"remember-note", "remember my gate code is 4521", "text-only", ""}, ¬
 		{"remember-note-emoji", "remember the 🍜 pho place on 5th street is the best", "text-only", ""}, ¬
 		{"recall-note", "what's my gate code?", "text-only", "4521"}, ¬
-		{"recall-link", "what rust link did i save?", "text-only", "rust-lang.org"}, ¬
+		{"burst-note-correct", "remember my locker code is 1234||wait no, it's 5678", "text-only", ""}, ¬
+		{"recall-burst-correct", "what's my locker code?", "text-only", "5678"}, ¬
+		{"burst-note-add", "remember the wifi password is otter42||that's for the cabin", "text-only", ""}, ¬
+		{"recall-burst-add", "what's the cabin wifi password?", "text-only", "otter42"}, ¬
+		{"burst-unrelated-notes", "remember my passport number ends in 4417||also remember mom's birthday is june 3", "text-only", ""}, ¬
+		{"recall-unrelated-1", "what does my passport number end in?", "text-only", "4417"}, ¬
+		{"recall-unrelated-2", "when is mom's birthday?", "text-only", "june 3"}, ¬
+		{"burst-note-and-link", "remember the plumber is joe at 555-0199||https://github.com/cloudflare/workers-rs", "text", ""}, ¬
+		{"recall-burst-note", "who's the plumber?", "text-only", "joe"}, ¬
+		{"recall-burst-link", "what github repo did i save?", "text-only", "workers-rs"}, ¬
+		{"note-then-correct", "remember my bike lock code is 2468", "text-only", ""}, ¬
+		{"correct-after", "actually it's 1357", "text", ""}, ¬
+		{"recall-after-correct", "what's my bike lock code?", "text-only", "1357"}, ¬
+		{"note-then-add", "remember my dentist is dr. kim", "text-only", ""}, ¬
+		{"add-after", "she's on 5th street", "text", ""}, ¬
+		{"recall-after-add", "where's my dentist?", "text-only", "5th"}, ¬
 		{"save-image", "file:~/Pictures/satchel-test/sample-photo.jpg", "tapback", ""}, ¬
 		{"save-video", "file:~/Pictures/satchel-test/sample-video.mp4", "tapback", ""}, ¬
 		{"recall-image", "send me that picture", "attachment", ""}, ¬
 		{"recall-video", "send me that video", "attachment", ""}, ¬
 		{"save-voice", "file:~/Pictures/satchel-test/sample-voice.m4a", "tapback", ""}, ¬
+		{"save-heic", "file:~/Pictures/satchel-test/sample-photo.heic", "tapback", ""}, ¬
+		{"save-voice-caf", "file:~/Pictures/satchel-test/sample-voice.caf", "tapback", ""}, ¬
+		{"save-contact-photo", "file:~/Pictures/satchel-test/sample-contact-photo.vcf", "tapback", ""}, ¬
+		{"save-docx", "file:~/Pictures/satchel-test/sample-lease.docx", "tapback", ""}, ¬
+		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
+		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
+		{"link-then-words", "https://letterboxd.com/film/parasite-2019/", "tapback", ""}, ¬
+		{"words-after", "that's the movie for friday night", "tapback", ""}, ¬
+		{"save-tiktok-asks", "https://www.tiktok.com/@scout2015/video/6718335390845095173", "text-only", ""}, ¬
+		{"tiktok-answer", "it's a cute dog video", "tapback", ""}, ¬
 		{"recall-voice", "send me that voice memo", "attachment", ""}, ¬
 		{"save-contact", "file:~/Pictures/satchel-test/sample-contact.vcf", "tapback", ""}, ¬
 		{"recall-contact", "send me that contact", "attachment", ""}, ¬
 		{"save-location", "file:~/Pictures/satchel-test/sample-pin.loc.vcf", "tapback", ""}, ¬
 		{"recall-location", "send me that location", "attachment", ""}, ¬
-		{"save-file", "file:~/Pictures/satchel-test/sample-file.pdf", "tapback", ""}, ¬
+		{"save-file", "file:~/Pictures/satchel-test/sample-lease.pdf", "tapback", ""}, ¬
 		{"recall-file", "send me that pdf", "attachment", ""}, ¬
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}, ¬
 		{"link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""}, ¬
 		{"save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"}, ¬
 		{"recall-after-answer", "what was that book link?", "text-only", "doc.rust-lang.org"}, ¬
-		{"remind-in", "remind me in 2 minutes to drink water", "text-only", ""}, ¬
+		{"remind-in", "remind me in 1 minute to drink water", "text-only", ""}, ¬
 		{"remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"}, ¬
 		{"remind-set", "pst", "text-only", ""}, ¬
 		{"remind-correct", "no, make it 10 am", "text-only", ""}, ¬
@@ -101,18 +127,27 @@ end doctor
 
 on runCase(satchelNumber, caseText, wantKind, wantText)
 	set startDate to do shell script "echo $(( ($(date +%s) - 978307200) * 1000000000 ))"
-	set toSend to caseText
-	if caseText starts with "file:~/" then
-		set toSend to POSIX file ((POSIX path of (path to home folder)) & (text 8 thru -1 of caseText))
-	end if
 	if caseText is not "" then
+		if caseText starts with "file:~/" then
+			set toSend to {POSIX file ((POSIX path of (path to home folder)) & (text 8 thru -1 of caseText))}
+		else
+			-- "first||second" sends two texts one second apart, inside one debounce window.
+			set AppleScript's text item delimiters to "||"
+			set toSend to text items of caseText
+		end if
 		tell application "Messages"
 			set toSatchel to participant satchelNumber of (first account whose service type = iMessage)
-			send toSend to toSatchel
+			repeat with i from 1 to count of toSend
+				if i > 1 then delay 1
+				send (item i of toSend) to toSatchel
+			end repeat
 		end tell
 	end if
 	set fromSatchel to "FROM message m JOIN handle h ON m.handle_id = h.ROWID WHERE h.id = '" & satchelNumber & "' AND m.is_from_me = 0 AND m.date > " & startDate
-	set countQuery to "SELECT coalesce(sum(m.associated_message_type = " & likeTapback & "), 0) || '|' || " & ¬
+	-- Count only a tapback on the message this case sent. A late tapback on an earlier message must not pass it.
+	-- Outgoing rows can have handle_id 0, so find the sent message through the Satchel chat.
+	set sentGuid to "(SELECT s.guid FROM message s JOIN chat_message_join cm ON cm.message_id = s.ROWID JOIN chat_handle_join ch ON ch.chat_id = cm.chat_id WHERE ch.handle_id = h.ROWID AND s.is_from_me = 1 AND s.date > " & startDate & " ORDER BY s.ROWID DESC LIMIT 1)"
+	set countQuery to "SELECT coalesce(sum(m.associated_message_type = " & likeTapback & " AND m.associated_message_guid LIKE '%' || " & sentGuid & "), 0) || '|' || " & ¬
 		"coalesce(sum(m.associated_message_type = 0 AND (instr(lower(coalesce(m.text, '')), lower('" & wantText & "')) > 0" & ¬
 		" OR instr(hex(m.attributedBody), hex('" & wantText & "')) > 0)), 0) || '|' || " & ¬
 		"coalesce(sum(m.cache_has_attachments), 0) " & fromSatchel

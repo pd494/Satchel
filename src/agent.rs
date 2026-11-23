@@ -1,13 +1,21 @@
 use crate::db::Row;
 use crate::tools::ToolCall;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
-use worker::js_sys::Promise;
+use worker::js_sys::{Array, Object, Promise, Reflect, Uint8Array};
 use worker::wasm_bindgen_futures::JsFuture;
+use worker::web_sys::Blob;
 use worker::{Env, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
+const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
+/// The most characters one embedding reads. The model reads about 8,000 tokens.
+const MAX_TEXT: usize = 4_000;
+const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
+/// Vectors are stored at this size. Queries must use the same size.
+const DIMENSIONS: u32 = 512;
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
@@ -26,6 +34,13 @@ extern "C" {
         input: JsValue,
         options: JsValue,
     ) -> std::result::Result<Promise, JsValue>;
+
+    #[wasm_bindgen(method, catch, js_name = toMarkdown)]
+    fn to_markdown(
+        this: &AiBinding,
+        document: JsValue,
+        options: JsValue,
+    ) -> std::result::Result<Promise, JsValue>;
 }
 
 pub struct Agent {
@@ -39,7 +54,7 @@ impl Agent {
     /// Reads the `AI` binding. Any binding with a matching `run` method works, so this skips
     /// `Env::ai`, which accepts only the Workers AI type.
     pub fn from_env(env: &Env) -> Result<Self> {
-        let ai = worker::js_sys::Reflect::get(env, &JsValue::from_str("AI"))?;
+        let ai = Reflect::get(env, &"AI".into())?;
         if ai.is_undefined() {
             return Err("the AI binding is missing".into());
         }
@@ -77,20 +92,107 @@ impl Agent {
             metadata["eval_run"] = json!(run);
         }
         let options = json!({ "gateway": { "id": "satchel", "metadata": metadata } });
-        let output = self
-            .ai
-            .run(MODEL, input.serialize(&JSON)?, options.serialize(&JSON)?)?;
-        let mut output = serde_wasm_bindgen::from_value::<Value>(JsFuture::from(output).await?)?;
-        let response = output["choices"][0]["message"].take();
+        let mut output = self.call(MODEL, &input, Some(&options)).await?;
+        let mut response = output["choices"][0]["message"].take();
         let text = Self::clean(response["content"].as_str().unwrap_or_default());
-        let calls = response["tool_calls"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|call| ToolCall::parse(&call["function"]).map_err(|error| error.to_string()))
-            .collect();
+        let calls = Self::split_calls(&mut response);
         context.push(response);
         Ok((text, calls))
+    }
+
+    /// Gemma sometimes packs several calls into one, as JSON objects back to back, or sends
+    /// arguments that are not JSON. Splits them into one call each, with valid JSON, since the
+    /// model rejects a context that holds invalid arguments.
+    fn split_calls(response: &mut Value) -> Calls {
+        let mut split = Vec::new();
+        for call in response["tool_calls"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+        {
+            let arguments = &call["function"]["arguments"];
+            let parts: Vec<Value> = match arguments.as_str() {
+                Some(text) => serde_json::Deserializer::from_str(text)
+                    .into_iter()
+                    .collect::<serde_json::Result<Vec<Value>>>()
+                    .ok()
+                    .filter(|parts| !parts.is_empty())
+                    .unwrap_or_else(|| vec![json!({})]),
+                None => vec![arguments.clone()],
+            };
+            for (n, part) in parts.into_iter().enumerate() {
+                let mut one = call.clone();
+                one["id"] = json!(format!("{}-{n}", call["id"].as_str().unwrap_or_default()));
+                one["function"]["arguments"] = json!(part.to_string());
+                split.push(one);
+            }
+        }
+        let calls = split
+            .iter()
+            .map(|call| ToolCall::parse(&call["function"]).map_err(|error| error.to_string()))
+            .collect();
+        if !split.is_empty() {
+            response["tool_calls"] = json!(split);
+        }
+        calls
+    }
+
+    /// Embeds `text` (and optional media) as little-endian `f32` bytes.
+    pub async fn embed(&self, text: &str, media: Option<&(String, Vec<u8>)>) -> Result<Vec<u8>> {
+        // The model's document prefix. Queries use `task: search result | query: …`.
+        let text: String = text.chars().take(MAX_TEXT).collect();
+        let mut content =
+            vec![json!({ "type": "text", "text": format!("title: none | text: {text}") })];
+        if let Some((mime, bytes)) = media {
+            let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
+            let url = format!("data:{mime};base64,{}", BASE64.encode(bytes));
+            content.push(json!({ "type": kind, kind: { "url": url } }));
+        }
+        let input = json!({
+            "messages": [[{ "role": "user", "content": content }]],
+            "dimensions": DIMENSIONS,
+            "encoding_format": "base64",
+        });
+        let output = self.call(EMBED_MODEL, &input, None).await?;
+        let vector = output["data"][0]["embedding"]
+            .as_str()
+            .ok_or("the embedding is missing")?;
+        Ok(BASE64.decode(vector).map_err(|error| error.to_string())?)
+    }
+
+    pub async fn transcribe(&self, audio: &[u8]) -> Result<String> {
+        let input = json!({ "audio": BASE64.encode(audio) });
+        let output = self.call(TRANSCRIBE_MODEL, &input, None).await?;
+        Ok(output["text"].as_str().unwrap_or_default().into())
+    }
+
+    /// Extracts document text (PDF, DOCX, etc.). The blob needs its MIME type.
+    pub async fn read_document(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<String> {
+        let blob = Blob::new_with_u8_array_sequence(&Array::of1(&Uint8Array::from(bytes)))?
+            .slice_with_i32_and_i32_and_content_type(0, bytes.len() as i32, mime)?;
+        let doc = Object::new();
+        Reflect::set(&doc, &"name".into(), &name.into())?;
+        Reflect::set(&doc, &"blob".into(), &blob)?;
+        let options = json!({
+            "conversionOptions": { "pdf": { "metadata": false }, "output": { "format": "text" } },
+        });
+        let output = self.ai.to_markdown(doc.into(), options.serialize(&JSON)?)?;
+        let output: Value = serde_wasm_bindgen::from_value(JsFuture::from(output).await?)?;
+        let text = output["data"]
+            .as_str()
+            .ok_or_else(|| output["error"].to_string())?;
+        Ok(text.to_string())
+    }
+
+    /// `options` is `None` for media calls, which are too large for AI Gateway.
+    async fn call(&self, model: &str, input: &Value, options: Option<&Value>) -> Result<Value> {
+        let options = match options {
+            Some(options) => options.serialize(&JSON)?,
+            None => JsValue::UNDEFINED,
+        };
+        let output = self.ai.run(model, input.serialize(&JSON)?, options)?;
+        let output = JsFuture::from(output).await?;
+        Ok(serde_wasm_bindgen::from_value(output)?)
     }
 
     /// Adds one tool message per result, matched to the tool call ids in the last response.
@@ -111,7 +213,8 @@ impl Agent {
     /// Removes what Gemma sometimes leaks into its text: a thinking block before `<channel|>`,
     /// special tokens like `<|file_separator|>`, and zero-width characters.
     fn clean(text: &str) -> String {
-        let mut text = text.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "");
+        // U+200D stays: it joins emoji such as 🧘‍♀️.
+        let mut text = text.replace(['\u{200B}', '\u{200C}', '\u{FEFF}'], "");
         if let Some(end) = text.rfind("<channel|>") {
             text = text[end + "<channel|>".len()..].to_string();
         }

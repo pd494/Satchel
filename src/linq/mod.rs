@@ -66,12 +66,23 @@ impl LinqClient {
         self.post(&format!("chats/{space_id}/read"), None).await
     }
 
+    /// Shows or hides the typing indicator. Sending a message also hides it.
+    pub async fn typing(&self, space_id: &str, on: bool) -> Result<()> {
+        let method = if on { Method::Post } else { Method::Delete };
+        self.request(method, &format!("chats/{space_id}/typing"), None)
+            .await
+    }
+
     async fn post(&self, path: &str, body: Option<Value>) -> Result<()> {
+        self.request(Method::Post, path, body).await
+    }
+
+    async fn request(&self, method: Method, path: &str, body: Option<Value>) -> Result<()> {
         let headers = Headers::new();
         headers.set("Authorization", &format!("Bearer {}", self.api_key))?;
         headers.set("Content-Type", "application/json")?;
         let mut init = RequestInit::new();
-        init.with_method(Method::Post)
+        init.with_method(method)
             .with_headers(headers)
             .with_body(body.map(|body| body.to_string().into()));
         let url = format!("{}/{path}", self.api);
