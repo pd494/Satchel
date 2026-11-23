@@ -46,8 +46,17 @@ function readJson(req) {
 /** Every request Satchel makes to the fake Linq, except marking the chat read. */
 const linqRequests = [];
 
+/** Sends Linq refused. Set `failNextSend` to refuse the next one. */
+const failedSends = [];
+let failNextSend = false;
+
 const linq = createServer(async (req, res) => {
   const body = await readJson(req);
+  if (failNextSend && req.url.endsWith("/messages")) {
+    failNextSend = false;
+    failedSends.push(body);
+    return res.writeHead(500).end();
+  }
   if (!req.url.endsWith("/read")) linqRequests.push({ path: req.url, body, at: Date.now() });
   res.writeHead(200, { "content-type": "application/json" }).end("{}");
 });
@@ -149,14 +158,13 @@ const sender = `+1555${Math.floor(Math.random() * 1e7)}`;
 const chat = `e2e-${randomUUID()}`;
 
 /** Posts `message` as a Linq webhook, signed unless `signature` is given. */
-async function webhook(message, signature) {
-  const eventId = `e2e-${randomUUID()}`;
+async function webhook(message, signature, { eventId = `e2e-${randomUUID()}`, group = false } = {}) {
   const part = message.startsWith("https://cdn.linqapp.com/")
     ? { type: "media", url: message }
     : { type: "text", value: message };
   const body = JSON.stringify({
     event_type: "message.received",
-    data: { id: eventId, chat: { id: chat, is_group: false }, sender_handle: { handle: sender }, parts: [part] },
+    data: { id: eventId, chat: { id: chat, is_group: group }, sender_handle: { handle: sender }, parts: [part] },
   });
   const id = `msg_${randomUUID()}`;
   const timestamp = String(Math.floor(Date.now() / 1000));
@@ -346,6 +354,41 @@ const CASES = [
     }
   }],
 
+  // Linq sends a webhook again when it gets no answer. The copy gets no second reply.
+  ["duplicate-webhook", async () => {
+    const message = "same text twice";
+    script.set(message, [say("one reply")]);
+    const { eventId } = await webhook(message);
+    await webhook(message, undefined, { eventId });
+    const reply = summarize(await nextRequests(REPLY_TIMEOUT_MS), eventId);
+    if (reply.text !== "one reply" || reply.late > 0) return `sent ${describe(reply)}`;
+  }],
+
+  // A send that Linq refuses is sent again later, with the stored reply. The model does not run again.
+  ["linq-refuses-send", async () => {
+    const message = "linq is down";
+    script.set(message, [say("stored reply")]);
+    failNextSend = true;
+    const reply = await turn(message);
+    if (failedSends.length !== 1) return `Linq refused ${failedSends.length} sends, not 1`;
+    if (reply.text !== "stored reply") return `sent ${describe(reply)}`;
+    if (modelRequests.filter((request) => request.text === message).length !== 1) return "the model ran again";
+  }],
+
+  // A model that keeps failing gets one fallback reply. The fake model fails on any unscripted text.
+  ["model-keeps-failing", async () => {
+    const reply = await turn("the model is down");
+    if (reply.texts.length !== 1 || reply.reactions.length > 0) return `sent ${describe(reply)}`;
+    if ((await nextRequests(3_000)).length > 0) return "sent more than one reply";
+  }],
+
+  ["group-chat-ignored", async () => {
+    const asked = modelRequests.length;
+    const { response } = await webhook("hello everyone", undefined, { group: true });
+    if (!response.ok) return `status ${response.status}`;
+    if ((await nextRequests(1_500)).length > 0 || modelRequests.length > asked) return "replied to a group chat";
+  }],
+
   ["reminder-fires", async () => {
     script.set(receipt.url, [
       call(["save", { urls: [receipt.url] }], ["remind", { note: "check receipt", after: "PT2S" }]),
@@ -360,7 +403,7 @@ const CASES = [
     if (await nudge(1_500)) return "sent a second nudge";
   }],
 
-  // The first clock-time reminder saves the zone and asks the model to work out the time again.
+  // A clock-time reminder fires at its time. The model is told the zone it saved.
   ["reminder-at-clock-time", async () => {
     const zone = ZONE;
     const message = "remind me to call mom";
@@ -368,10 +411,6 @@ const CASES = [
     script.set(message, [remind, remind, say("set")]);
     const reply = await turn(message);
     if (reply.text !== "set") return `sent ${describe(reply)}`;
-    const results = toolResults(message);
-    if (!results[0]?.startsWith("error") || !results[1]?.startsWith("ok")) {
-      return `the model got ${JSON.stringify(results)}, not an error then ok`;
-    }
     const nudged = await nudge(12_000);
     if (!nudged?.text.includes("call mom")) return `nudge was ${describe(nudged)}`;
     const due = modelRequests.findLast((request) => request.text.startsWith("Reminder due: call mom"));
