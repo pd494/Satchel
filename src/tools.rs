@@ -49,8 +49,8 @@ struct RawRemind {
 #[serde(try_from = "RawRemind")]
 pub struct Remind {
     pub note: String,
-    pub at: bool,
-    pub time_zone: Option<TimeZone>,
+    /// The zone of a clock-time reminder (`at`). `None` for a duration (`after`).
+    pub at_zone: Option<TimeZone>,
     pub schedule: Schedule,
 }
 
@@ -97,11 +97,10 @@ impl TryFrom<RawRemind> for Remind {
 
         Ok(Self {
             note: raw.note,
-            at: raw.at.is_some(),
-            time_zone,
+            at_zone: raw.at.and(time_zone),
             schedule: Schedule {
                 due_at: due.timestamp().as_second(),
-                repeat: raw.repeat.map(|repeat| repeat.to_string()),
+                repeat: raw.repeat,
                 until_at,
             },
         })

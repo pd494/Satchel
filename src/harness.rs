@@ -1,5 +1,5 @@
 use crate::agent::{Agent, Calls};
-use crate::db::{Db, UnansweredMessage};
+use crate::db::{Db, Schedule, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note};
 use crate::tools::{Remind, Tapback, ToolCall};
@@ -44,13 +44,7 @@ impl Harness {
     fn queue_due_reminders(&self) -> Result<()> {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let now = Timestamp::now().as_second();
-        let due = self
-            .db
-            .reminders()?
-            .into_iter()
-            .take_while(|reminder| reminder.schedule.due_at <= now);
-
-        for reminder in due {
+        for reminder in self.db.due_reminders(now)? {
             let event_id = format!(
                 "{REMINDER_EVENT_PREFIX}{}:{}",
                 reminder.id, reminder.schedule.due_at
@@ -100,9 +94,10 @@ impl Harness {
         }
 
         let now = Timestamp::now().as_second();
-        Ok(self.db.reminders()?.first().map(|reminder| {
-            Duration::from_secs(reminder.schedule.due_at.saturating_sub(now).max(0) as u64)
-        }))
+        Ok(self
+            .db
+            .next_due()?
+            .map(|due_at| Duration::from_secs(due_at.saturating_sub(now).max(0) as u64)))
     }
 
     /// Returns the stored unsent reply, or makes and stores a new one. The reply is empty if
@@ -164,19 +159,19 @@ impl Harness {
         saved: &mut bool,
     ) -> Result<Vec<String>> {
         // Saves run first. A 👍 then goes out only after a save works.
+        let mut order: Vec<usize> = (0..calls.len()).collect();
+        order.sort_by_key(|&i| !matches!(calls[i], Ok(ToolCall::Save { .. })));
         let mut results = vec![String::new(); calls.len()];
-        for (result, call) in results.iter_mut().zip(calls) {
-            if let Ok(ToolCall::Save { urls, note }) = call {
-                *result = self.save(message.id, urls, note.as_deref(), links)?;
-                if *result == "ok" && !urls.is_empty() {
-                    *saved = true;
-                }
-            }
-        }
-        for (result, call) in results.iter_mut().zip(calls) {
-            *result = match call {
-                Ok(ToolCall::Save { .. }) => continue,
+        for i in order {
+            results[i] = match &calls[i] {
                 Err(error) => format!("error: {error}"),
+                Ok(ToolCall::Save { urls, note }) => {
+                    let result = self.save(message.id, urls, note.as_deref(), links)?;
+                    if result == "ok" && !urls.is_empty() {
+                        *saved = true;
+                    }
+                    result
+                }
                 Ok(ToolCall::React {
                     emoji: Tapback::Like,
                 }) if !links.is_empty() && !*saved => {
@@ -222,11 +217,8 @@ impl Harness {
     }
 
     fn remind(&self, remind: &Remind, message_id: i64) -> Result<String> {
-        if remind.at && self.db.time_zone()?.is_none() {
-            let zone = remind
-                .time_zone
-                .as_ref()
-                .ok_or_else(|| "time_zone is required with at".to_string())?;
+        let saved_zone = self.time_zone()?;
+        if let (Some(zone), None) = (&remind.at_zone, &saved_zone) {
             if let Some(name) = zone.iana_name() {
                 self.db.set_time_zone(name)?;
             }
@@ -240,26 +232,20 @@ impl Harness {
             return Ok("error: that time has already passed".to_string());
         }
 
-        let earlier = self
-            .db
-            .reminders()?
-            .into_iter()
-            .filter(|reminder| reminder.content.eq_ignore_ascii_case(&remind.note))
-            .max_by_key(|reminder| reminder.id);
-
-        let (id, reply) = match earlier {
+        let (id, reply) = match self.db.reminder_named(&remind.note)? {
             Some(old) => {
-                let zone = match &remind.time_zone {
-                    Some(zone) => zone.clone(),
-                    None => self.time_zone()?.unwrap_or(TimeZone::UTC),
-                };
+                let zone = remind
+                    .at_zone
+                    .clone()
+                    .or(saved_zone)
+                    .unwrap_or(TimeZone::UTC);
                 (
                     old.id,
                     format!(
                         "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it.",
                         remind.note,
-                        Self::local_time(old.schedule.due_at, &zone)?,
-                        Self::local_time(remind.schedule.due_at, &zone)?
+                        Self::local_time(&old.schedule, &zone)?,
+                        Self::local_time(&remind.schedule, &zone)?
                     ),
                 )
             }
@@ -271,10 +257,8 @@ impl Harness {
         };
 
         self.db.set_reminder(id, Some(&remind.schedule))?;
-        if remind.at {
-            if let Some(name) = remind.time_zone.as_ref().and_then(TimeZone::iana_name) {
-                self.db.set_time_zone(name)?;
-            }
+        if let Some(name) = remind.at_zone.as_ref().and_then(TimeZone::iana_name) {
+            self.db.set_time_zone(name)?;
         }
 
         Ok(reply)
@@ -289,10 +273,9 @@ impl Harness {
         ))
     }
 
-    fn local_time(at: i64, zone: &TimeZone) -> Result<String> {
-        let at = Timestamp::from_second(at).map_err(|error| error.to_string())?;
-        Ok(at
-            .to_zoned_datetime(zone.clone())
+    fn local_time(schedule: &Schedule, zone: &TimeZone) -> Result<String> {
+        Ok(schedule
+            .due(zone)?
             .strftime("%a %b %-d %-I:%M %p %Z")
             .to_string())
     }
@@ -305,7 +288,7 @@ impl Harness {
             let zone = time_zone.unwrap_or(TimeZone::UTC);
             text.push_str("\nPending reminders:");
             for reminder in reminders {
-                let due = Self::local_time(reminder.schedule.due_at, &zone)?;
+                let due = Self::local_time(&reminder.schedule, &zone)?;
                 text.push_str(&format!("\n- \"{}\" ({due})", reminder.content));
             }
         }

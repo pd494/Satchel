@@ -1,5 +1,5 @@
 use crate::media::Media;
-use jiff::{tz::TimeZone, Span, Timestamp};
+use jiff::{tz::TimeZone, Span, Timestamp, ZonedDateTime};
 use serde::Deserialize;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS saved (
     UNIQUE (message_id, content)
 ) STRICT;
 
+CREATE INDEX IF NOT EXISTS saved_due ON saved (due_at) WHERE due_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -49,6 +51,22 @@ CREATE TABLE IF NOT EXISTS settings (
 
 pub struct Db {
     sql: SqlStorage,
+}
+
+/// Every pending reminder, with the links and files saved from its message.
+const REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at, \
+    (SELECT group_concat(u.content, char(10)) FROM saved AS u \
+    WHERE u.message_id = r.message_id AND u.media != 'note') AS urls \
+    FROM saved AS r WHERE r.due_at IS NOT NULL";
+
+#[derive(Deserialize)]
+struct NextDue {
+    due_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SavedId {
+    id: i64,
 }
 
 #[derive(Deserialize)]
@@ -76,8 +94,17 @@ struct Setting {
 #[derive(Deserialize)]
 pub struct Schedule {
     pub due_at: i64,
-    pub repeat: Option<String>,
+    pub repeat: Option<Span>,
     pub until_at: Option<i64>,
+}
+
+impl Schedule {
+    /// When this schedule is due, in `zone`.
+    pub fn due(&self, zone: &TimeZone) -> Result<ZonedDateTime> {
+        Ok(Timestamp::from_second(self.due_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone()))
+    }
 }
 
 #[derive(Deserialize)]
@@ -92,16 +119,11 @@ pub struct Reminder {
 impl Reminder {
     /// Returns the next schedule after this fire, or `None` if the reminder is done.
     pub fn next_fire(&self, zone: &TimeZone) -> Result<Option<Schedule>> {
-        let Some(repeat) = &self.schedule.repeat else {
+        let Some(repeat) = self.schedule.repeat else {
             return Ok(None);
         };
-        let repeat: Span = repeat
-            .parse()
-            .map_err(|error: jiff::Error| error.to_string())?;
         let now = Timestamp::now().as_second();
-        let mut next = Timestamp::from_second(self.schedule.due_at)
-            .map_err(|error| error.to_string())?
-            .to_zoned_datetime(zone.clone());
+        let mut next = self.schedule.due(zone)?;
 
         loop {
             next = next
@@ -119,7 +141,7 @@ impl Reminder {
             if next_at > now {
                 return Ok(Some(Schedule {
                     due_at: next_at,
-                    repeat: self.schedule.repeat.clone(),
+                    repeat: self.schedule.repeat,
                     until_at: self.schedule.until_at,
                 }));
             }
@@ -135,24 +157,45 @@ impl Db {
 
     /// Returns every pending reminder, soonest first.
     pub fn reminders(&self) -> Result<Vec<Reminder>> {
-        let select_query = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at, \
-            (SELECT group_concat(u.content, char(10)) FROM saved AS u \
-            WHERE u.message_id = r.message_id AND u.media != 'note') AS urls \
-            FROM saved AS r WHERE r.due_at IS NOT NULL ORDER BY r.due_at";
-        self.sql.exec(select_query, None)?.to_array()
+        let select_query = format!("{REMINDERS} ORDER BY r.due_at");
+        self.sql.exec(&select_query, None)?.to_array()
+    }
+
+    /// Returns the reminders due at or before `now`, soonest first.
+    pub fn due_reminders(&self, now: i64) -> Result<Vec<Reminder>> {
+        let select_query = format!("{REMINDERS} AND r.due_at <= ? ORDER BY r.due_at");
+        self.sql
+            .exec(&select_query, Some(vec![now.into()]))?
+            .to_array()
+    }
+
+    /// Returns the newest pending reminder with this note, ignoring case.
+    pub fn reminder_named(&self, note: &str) -> Result<Option<Reminder>> {
+        let select_query =
+            format!("{REMINDERS} AND r.content = ? COLLATE NOCASE ORDER BY r.id DESC LIMIT 1");
+        let mut rows: Vec<Reminder> = self
+            .sql
+            .exec(&select_query, Some(vec![note.into()]))?
+            .to_array()?;
+        Ok(rows.pop())
+    }
+
+    /// Returns when the soonest pending reminder is due.
+    pub fn next_due(&self) -> Result<Option<i64>> {
+        let select_query = "SELECT min(due_at) AS due_at FROM saved WHERE due_at IS NOT NULL";
+        Ok(self.sql.exec(select_query, None)?.one::<NextDue>()?.due_at)
     }
 
     /// Sets when saved item `id` fires and how it repeats. A `None` schedule ends the reminder.
     pub fn set_reminder(&self, id: i64, schedule: Option<&Schedule>) -> Result<()> {
         let update_query = "UPDATE saved SET due_at = ?, repeat = ?, until_at = ? WHERE id = ?";
-        let (due_at, repeat, until_at) = match schedule {
-            Some(schedule) => (
+        let (due_at, repeat, until_at) = schedule.map_or((None, None, None), |schedule| {
+            (
                 Some(schedule.due_at),
-                schedule.repeat.clone(),
+                schedule.repeat.map(|repeat| repeat.to_string()),
                 schedule.until_at,
-            ),
-            None => (None, None, None),
-        };
+            )
+        });
         self.sql.exec(
             update_query,
             Some(vec![
@@ -259,7 +302,7 @@ impl Db {
             "INSERT INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?) \
             ON CONFLICT (message_id, content) DO UPDATE SET content = content RETURNING id";
-        let row: serde_json::Value = self
+        let row: SavedId = self
             .sql
             .exec(
                 insert_query,
@@ -273,9 +316,7 @@ impl Db {
                 ]),
             )?
             .one()?;
-        Ok(row["id"]
-            .as_i64()
-            .ok_or_else(|| "insert_saved returned no id".to_string())?)
+        Ok(row.id)
     }
 }
 
