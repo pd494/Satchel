@@ -1,4 +1,5 @@
 use crate::media::Media;
+use jiff::{tz::TimeZone, Span, Timestamp, ZonedDateTime};
 use serde::Deserialize;
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
@@ -34,12 +35,38 @@ CREATE TABLE IF NOT EXISTS saved (
     data        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)),
     attempts    INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+    due_at      INTEGER,
+    repeat      TEXT,
+    until_at    INTEGER,
     UNIQUE (message_id, content)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS saved_due ON saved (due_at) WHERE due_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 ) STRICT;
 "#;
 
 pub struct Db {
     sql: SqlStorage,
+}
+
+/// Every pending reminder, with the links and files saved from its message.
+const REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at, \
+    (SELECT group_concat(u.content, char(10)) FROM saved AS u \
+    WHERE u.message_id = r.message_id AND u.media != 'note') AS urls \
+    FROM saved AS r WHERE r.due_at IS NOT NULL";
+
+#[derive(Deserialize)]
+struct NextDue {
+    due_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SavedId {
+    id: i64,
 }
 
 #[derive(Deserialize)]
@@ -59,10 +86,140 @@ pub struct UnansweredMessage {
     pub response: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct Setting {
+    value: String,
+}
+
+#[derive(Deserialize)]
+pub struct Schedule {
+    pub due_at: i64,
+    pub repeat: Option<Span>,
+    pub until_at: Option<i64>,
+}
+
+impl Schedule {
+    /// When this schedule is due, in `zone`.
+    pub fn due(&self, zone: &TimeZone) -> Result<ZonedDateTime> {
+        Ok(Timestamp::from_second(self.due_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone()))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Reminder {
+    pub id: i64,
+    pub content: String,
+    #[serde(flatten)]
+    pub schedule: Schedule,
+    pub urls: Option<String>,
+}
+
+impl Reminder {
+    /// Returns the next schedule after this fire, or `None` if the reminder is done.
+    pub fn next_fire(&self, zone: &TimeZone) -> Result<Option<Schedule>> {
+        let Some(repeat) = self.schedule.repeat else {
+            return Ok(None);
+        };
+        let now = Timestamp::now().as_second();
+        let mut next = self.schedule.due(zone)?;
+
+        loop {
+            next = next
+                .checked_add(repeat)
+                .map_err(|error| error.to_string())?;
+            let next_at = next.timestamp().as_second();
+
+            if self
+                .schedule
+                .until_at
+                .is_some_and(|until_at| next_at > until_at)
+            {
+                return Ok(None);
+            }
+            if next_at > now {
+                return Ok(Some(Schedule {
+                    due_at: next_at,
+                    repeat: self.schedule.repeat,
+                    until_at: self.schedule.until_at,
+                }));
+            }
+        }
+    }
+}
+
 impl Db {
     pub fn open(sql: SqlStorage) -> Result<Self> {
         sql.exec(SCHEMA, None)?;
         Ok(Self { sql })
+    }
+
+    /// Returns every pending reminder, soonest first.
+    pub fn reminders(&self) -> Result<Vec<Reminder>> {
+        let select_query = format!("{REMINDERS} ORDER BY r.due_at");
+        self.sql.exec(&select_query, None)?.to_array()
+    }
+
+    /// Returns the reminders due at or before `now`, soonest first.
+    pub fn due_reminders(&self, now: i64) -> Result<Vec<Reminder>> {
+        let select_query = format!("{REMINDERS} AND r.due_at <= ? ORDER BY r.due_at");
+        self.sql
+            .exec(&select_query, Some(vec![now.into()]))?
+            .to_array()
+    }
+
+    /// Returns the newest pending reminder with this note, ignoring case.
+    pub fn reminder_named(&self, note: &str) -> Result<Option<Reminder>> {
+        let select_query =
+            format!("{REMINDERS} AND r.content = ? COLLATE NOCASE ORDER BY r.id DESC LIMIT 1");
+        let mut rows: Vec<Reminder> = self
+            .sql
+            .exec(&select_query, Some(vec![note.into()]))?
+            .to_array()?;
+        Ok(rows.pop())
+    }
+
+    /// Returns when the soonest pending reminder is due.
+    pub fn next_due(&self) -> Result<Option<i64>> {
+        let select_query = "SELECT min(due_at) AS due_at FROM saved WHERE due_at IS NOT NULL";
+        Ok(self.sql.exec(select_query, None)?.one::<NextDue>()?.due_at)
+    }
+
+    /// Sets when saved item `id` fires and how it repeats. A `None` schedule ends the reminder.
+    pub fn set_reminder(&self, id: i64, schedule: Option<&Schedule>) -> Result<()> {
+        let update_query = "UPDATE saved SET due_at = ?, repeat = ?, until_at = ? WHERE id = ?";
+        let (due_at, repeat, until_at) = schedule.map_or((None, None, None), |schedule| {
+            (
+                Some(schedule.due_at),
+                schedule.repeat.map(|repeat| repeat.to_string()),
+                schedule.until_at,
+            )
+        });
+        self.sql.exec(
+            update_query,
+            Some(vec![
+                due_at.into(),
+                repeat.into(),
+                until_at.into(),
+                id.into(),
+            ]),
+        )?;
+        Ok(())
+    }
+
+    /// Returns the user's IANA time zone name, if they gave one.
+    pub fn time_zone(&self) -> Result<Option<String>> {
+        let select_query = "SELECT value FROM settings WHERE key = 'time_zone'";
+        let mut rows: Vec<Setting> = self.sql.exec(select_query, None)?.to_array()?;
+        Ok(rows.pop().map(|row| row.value))
+    }
+
+    pub fn set_time_zone(&self, name: &str) -> Result<()> {
+        let upsert_query = "INSERT INTO settings (key, value) VALUES ('time_zone', ?) \
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value";
+        self.sql.exec(upsert_query, Some(vec![name.into()]))?;
+        Ok(())
     }
 
     /// Inserts the user's message; returns `false` if `event_id` was already saved.
@@ -137,23 +294,29 @@ impl Db {
         Ok(rows.pop())
     }
 
-    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<()> {
+    /// Saves `item` and returns its row id. Saving the same item from the same message again
+    /// keeps the first row.
+    pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<i64> {
         let data = serde_json::to_string(&item.data())?;
         let insert_query =
-            "INSERT OR IGNORE INTO saved (message_id, media, content, title, description, data) \
-            VALUES (?, ?, ?, ?, ?, ?)";
-        self.sql.exec(
-            insert_query,
-            Some(vec![
-                SqlStorageValue::Integer(message_id),
-                SqlStorageValue::String(item.get_type().to_string()),
-                SqlStorageValue::String(item.content()),
-                opt_sql(item.title()),
-                opt_sql(item.description()),
-                SqlStorageValue::String(data),
-            ]),
-        )?;
-        Ok(())
+            "INSERT INTO saved (message_id, media, content, title, description, data) \
+            VALUES (?, ?, ?, ?, ?, ?) \
+            ON CONFLICT (message_id, content) DO UPDATE SET content = content RETURNING id";
+        let row: SavedId = self
+            .sql
+            .exec(
+                insert_query,
+                Some(vec![
+                    SqlStorageValue::Integer(message_id),
+                    SqlStorageValue::String(item.get_type().to_string()),
+                    SqlStorageValue::String(item.content()),
+                    opt_sql(item.title()),
+                    opt_sql(item.description()),
+                    SqlStorageValue::String(data),
+                ]),
+            )?
+            .one()?;
+        Ok(row.id)
     }
 }
 
