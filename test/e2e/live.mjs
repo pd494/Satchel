@@ -116,6 +116,8 @@ const SCENARIOS = [
       ["remind-fires", null, "link", WATER],
     ],
     saved: [WATER],
+    // A fired reminder stays as a note. None is pending.
+    reminders: [],
   },
   {
     name: "zone-then-correct",
