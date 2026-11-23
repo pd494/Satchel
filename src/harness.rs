@@ -30,7 +30,7 @@ impl Harness {
     pub fn new(sql: SqlStorage, env: &Env) -> Result<Self> {
         Ok(Self {
             db: Db::open(sql)?,
-            agent: Agent::new(env.ai("AI")?)?,
+            agent: Agent::from_env(env)?,
             linq: LinqClient::from_env(env)?,
         })
     }
@@ -129,8 +129,13 @@ impl Harness {
         let mut context = Agent::context(&history, &state);
         let mut saved = false;
 
+        let mut step = 0;
         let text = loop {
-            let (text, calls) = self.agent.run_model(&mut context).await?;
+            let (text, calls) = self
+                .agent
+                .run_model(&mut context, &message.event_id, step)
+                .await?;
+            step += 1;
             if calls.is_empty() {
                 break text;
             }

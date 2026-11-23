@@ -14,8 +14,6 @@ concurrency:
 jobs:
   e2e:
     name: End-to-end with fake Linq
-    # Fork PRs get no secrets. The run needs the Cloudflare token for the AI binding.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -29,5 +27,3 @@ jobs:
           node-version: 24
       - run: npm install --no-save wrangler@4
       - run: node test/e2e/run.mjs
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

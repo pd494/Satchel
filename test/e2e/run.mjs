@@ -1,334 +1,310 @@
-// End-to-end test for Satchel with a fake Linq.
+// End-to-end test for Satchel with a fake Linq and a fake model. This is the PR check.
 //
-// It runs the Worker with `wrangler dev`, points `LINQ_API` at a fake Linq server, and sends
-// signed webhooks into one chat. Each case checks what Satchel sent back to the fake Linq.
-// At the end it reads the Durable Object's `saved` table. The model is the real one.
-// `wrangler dev` needs a Cloudflare login or `CLOUDFLARE_API_TOKEN`.
+// It runs the Worker with `wrangler dev --local`. `LINQ_API` points at a fake Linq, and `AI_API`
+// points at a fake model that returns scripted tool calls. Every run is the same.
+// Each case checks only what users can see: what Satchel sends to Linq, what it sends to the
+// model, and when a reminder fires. live.mjs runs the same Worker with the real model.
 //
 // Run: node test/e2e/run.mjs
 
-import { spawn } from "node:child_process";
-import { createHmac, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import {
+  describe, eventOf, file, linq, listen, newUser, readJson, sleep, startWorker, stop, summarize,
+  userDatabases, webhook,
+} from "./harness.mjs";
 
-const WORKER_PORT = 8787;
-const LINQ_PORT = 8788;
-const WEBHOOK_KEY = Buffer.from("satchel-e2e-webhook-key");
-const BUILD_TIMEOUT_MS = 15 * 60_000;
-const REPLY_TIMEOUT_MS = 120_000;
-const QUIET_MS = 5_000;
+const REPLY_TIMEOUT_MS = 20_000;
+const QUIET_MS = 300;
 
-function file(name) {
-  const id = randomUUID();
-  return { id, url: `https://cdn.linqapp.com/attachments/partners/e2e/${id}/${name}` };
+const say = (content) => ({ role: "assistant", content });
+const call = (...calls) => ({
+  role: "assistant",
+  content: "",
+  tool_calls: calls.map(([name, args], i) => ({
+    id: `call_${i}`,
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  })),
+});
+
+/** The fake model's replies, by user message. Entry n answers step n of the tool loop. An entry
+ * can be a function, called when the request arrives. */
+const script = new Map();
+/** Every request Satchel makes to the fake model. */
+const modelRequests = [];
+
+/** The messages after the newest user message: this turn's tool calls and results. */
+const thisTurn = (messages) => messages.slice(messages.findLastIndex((message) => message.role === "user") + 1);
+
+const model = createServer(async (req, res) => {
+  const { messages } = await readJson(req);
+  const text = messages.findLast((message) => message.role === "user").content;
+  const step = thisTurn(messages).filter((message) => message.role === "assistant").length;
+  modelRequests.push({ text, messages });
+
+  let reply = script.get(text)?.[step];
+  if (typeof reply === "function") reply = await reply();
+  // A due reminder comes back as a nudge with its links and files.
+  if (text.startsWith("Reminder due: ")) reply = say(`nudge: ${text.slice(14).replaceAll("\n", " ")}`);
+  if (!reply) return res.writeHead(500).end(`no scripted reply for ${JSON.stringify(text)} step ${step}`);
+  res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ choices: [{ message: reply }] }));
+});
+
+/** The latest request Satchel sent the model while answering `text`. */
+const lastModelRequest = (text) => modelRequests.findLast((request) => request.text === text);
+
+/** The tool results Satchel sent the model for its latest answer to `text`. */
+const toolResults = (text) => thisTurn(lastModelRequest(text).messages).filter((message) => message.role === "tool").map((message) => message.content);
+
+const user = newUser();
+
+/** Linq requests already checked by a case. */
+let checked = 0;
+
+/** Waits up to `timeout` for at least `min` new Linq requests, then until they stop. Returns them. */
+async function nextRequests(timeout, min = 1) {
+  const deadline = Date.now() + timeout;
+  while (linq.requests.length - checked < min && Date.now() < deadline) await sleep(50);
+  if (linq.requests.length === checked) return [];
+  let count;
+  do {
+    count = linq.requests.length;
+    await sleep(QUIET_MS);
+  } while (linq.requests.length !== count);
+  const requests = linq.requests.slice(checked);
+  checked = linq.requests.length;
+  return requests;
 }
+
+/** Sends `message` and returns Satchel's reply to it. */
+async function turn(message) {
+  const { eventId, response } = await webhook(user, message);
+  if (!response.ok) throw new Error(`webhook returned ${response.status}: ${await response.text()}`);
+  return summarize(await nextRequests(REPLY_TIMEOUT_MS), eventId);
+}
+
+/** Waits up to `timeout` for a reminder nudge. Returns null if none comes. */
+async function nudge(timeout) {
+  const requests = await nextRequests(timeout);
+  if (requests.length === 0) return null;
+  const event = eventOf(requests[0]) ?? "";
+  return { event, ...summarize(requests, event) };
+}
+
+/** Formats `ms` as a local time in `zone`, such as 2026-11-23T09:00:00. */
+function localTime(ms, zone) {
+  const format = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  });
+  return format.format(new Date(ms)).replace(" ", "T");
+}
+
 const photo = file("photo.jpg");
 const memo = file("memo.m4a");
-const contact = file("contact.vcf");
-const pin = file("CL.loc.vcf");
-const lease = file("lease.pdf");
+const receipt = file("receipt.jpg");
+const listing = "https://example.com/listing";
+// The first clock-time reminder saves this zone. Later cases use it.
+const ZONE = "Asia/Tokyo";
+const SAVED = ["https://example.com/apartments", listing];
+const NOT_SAVED = ["https://example.com/unsaved", "https://example.com/wrong"];
 
-// [name, message, expected kind, needle]
-// tapback: a reaction and no text. text-only: text, no reaction, no file.
-// text: text, reaction allowed. The needle must be in the text, not only in a link.
-// file: the file with the needle as its id is sent back. voice: the same, as a voice memo.
-// A null message sends nothing. The case waits for a reminder to fire.
+// Each case returns a failure, or nothing when it passes. Reminder cases run last, one at a time.
 const CASES = [
-  ["greeting", "reset", "text", "Satchel"],
-  ["save-link-scheme", "https://www.rust-lang.org/learn", "tapback", ""],
-  ["save-link-bare", "example.com/apartments", "tapback", ""],
-  ["save-link-with-comment", "check this place out https://www.zillow.com/homes/austin looks nice", "tapback", ""],
-  ["save-two-links", "tour at example.org, details at example.org/tour", "tapback", ""],
-  ["not-a-link", "node.js is my favorite runtime", "text-only", ""],
-  ["file-like-not-link", "the readme.md has the setup steps", "text-only", ""],
-  ["remember-note", "remember my gate code is 4521", "text-only", ""],
-  ["recall-note", "what's my gate code?", "text-only", "4521"],
-  ["save-image", photo.url, "tapback", ""],
-  ["recall-image", "send me that picture", "file", photo.id],
-  ["save-voice", memo.url, "tapback", ""],
-  ["recall-voice", "send me that voice memo", "voice", memo.id],
-  ["save-contact", contact.url, "tapback", ""],
-  ["save-location", pin.url, "tapback", ""],
-  ["recall-location", "send me that location", "file", pin.id],
-  ["save-file", lease.url, "tapback", ""],
-  ["recall-file", "send me that pdf", "file", lease.id],
-  ["question-not-saved", "send me the chili recipe", "text-only", ""],
-  ["link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""],
-  ["save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"],
-  ["recall-after-answer", "what was that book link?", "text-only", ""],
-  ["remind-in", "remind me in 2 minutes to drink water", "text-only", ""],
-  ["remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"],
-  ["remind-set", "pst", "text-only", ""],
-  ["remind-correct", "no, make it 10 am", "text-only", ""],
-  ["remind-fires", null, "text-only", "water"],
+  ["bad-signature", async () => {
+    const { response } = await webhook(user, "hello", { signature: "v1,bad" });
+    if (response.status !== 401) return `status ${response.status}, not 401`;
+    if (modelRequests.length > 0) return "called the model";
+  }],
+
+  ["greeting", async () => {
+    script.set("reset", [say("ignored")]);
+    const reply = await turn("reset");
+    if (!reply.text.includes("Satchel") || reply.text.includes("ignored")) return `sent ${describe(reply)}`;
+  }],
+
+  // A 👍 means saved. It must not go out when the save did not work.
+  ["no-tapback-without-save", async () => {
+    const message = NOT_SAVED[0];
+    script.set(message, [
+      call(["react", { emoji: "👍" }]),
+      call(["save", { urls: [NOT_SAVED[1]] }], ["react", { emoji: "👍" }]),
+      say("could not save"),
+    ]);
+    const reply = await turn(message);
+    if (reply.reactions.length > 0 || reply.text !== "could not save") return `sent ${describe(reply)}`;
+    const results = toolResults(message);
+    if (results.length !== 3 || !results.every((result) => result.startsWith("error"))) {
+      return `the model got ${JSON.stringify(results)}, not 3 errors`;
+    }
+  }],
+
+  ["tapback-after-save", async () => {
+    const message = "example.com/apartments";
+    script.set(message, [call(["react", { emoji: "👍" }], ["save", { urls: [message, message] }])]);
+    const reply = await turn(message);
+    if (reply.reactions.join() !== "like" || reply.texts.length + reply.links.length > 0) return `sent ${describe(reply)}`;
+  }],
+
+  // A bad tool call goes back to the model as an error. The reply is cleaned and split into parts.
+  ["reply-parts", async () => {
+    const message = "send everything";
+    script.set(message, [
+      call(["remind", { note: "x", after: "PT2S", repeat: "PT1M" }]),
+      say(`<thought>secret<channel|>check readme.md https://example.org/book ${photo.url} ${memo.url}<|end|>`),
+    ]);
+    const reply = await turn(message);
+    if (!toolResults(message)[0]?.startsWith("error")) return "the bad tool call got no error";
+    const ok = reply.reactions.length === 0
+      && reply.text === "check readme.md"
+      && reply.links.join() === "https://example.org/book"
+      && reply.files.join() === photo.id
+      && reply.voices.join() === memo.id;
+    if (!ok) return `sent ${describe(reply)}`;
+  }],
+
+  // Texts sent fast, without waiting, each get one reply, in order. The model sees the earlier
+  // texts and their replies, and never a later text.
+  ["burst", async () => {
+    const texts = ["first thing", "second thing", "third thing"];
+    texts.forEach((text, i) => script.set(text, [say(`reply ${i + 1}`)]));
+    // The first answer takes 1 second. The other texts arrive and wait while it runs.
+    script.set(texts[0], [async () => (await sleep(1_000), say("reply 1"))]);
+    const events = [];
+    for (const text of texts) {
+      const { eventId, response } = await webhook(user, text);
+      if (!response.ok) return `webhook returned ${response.status}`;
+      events.push(eventId);
+    }
+    const requests = await nextRequests(REPLY_TIMEOUT_MS, texts.length);
+    const replies = requests.map((request) => `${eventOf(request)} ${request.body?.message?.parts[0].value}`);
+    const expected = events.map((event, i) => `${event} reply ${i + 1}`);
+    if (replies.join() !== expected.join()) return `replies were ${JSON.stringify(replies)}`;
+    for (const [i, text] of texts.entries()) {
+      const seen = lastModelRequest(text).messages.map((message) => message.content);
+      if (texts.slice(i + 1).some((later) => seen.includes(later))) return `the model saw a later text while answering "${text}"`;
+      if (i > 0 && !seen.includes(`reply ${i}`)) return `the model did not see "reply ${i}" while answering "${text}"`;
+    }
+  }],
+
+  // Linq sends a webhook again when it gets no answer. The copy gets no second reply.
+  ["duplicate-webhook", async () => {
+    const message = "same text twice";
+    script.set(message, [say("one reply")]);
+    const { eventId } = await webhook(user, message);
+    await webhook(user, message, { eventId });
+    const reply = summarize(await nextRequests(REPLY_TIMEOUT_MS), eventId);
+    if (reply.text !== "one reply" || reply.late.length > 0) return `sent ${describe(reply)}`;
+  }],
+
+  // A send that Linq refuses is sent again later, with the stored reply. The model does not run again.
+  ["linq-refuses-send", async () => {
+    const message = "linq is down";
+    script.set(message, [say("stored reply")]);
+    linq.refuseNextSend = true;
+    const reply = await turn(message);
+    if (linq.refused !== 1) return `Linq refused ${linq.refused} sends, not 1`;
+    if (reply.text !== "stored reply") return `sent ${describe(reply)}`;
+    if (modelRequests.filter((request) => request.text === message).length !== 1) return "the model ran again";
+  }],
+
+  // A model that keeps failing gets one fallback reply. The fake model fails on any unscripted text.
+  ["model-keeps-failing", async () => {
+    const reply = await turn("the model is down");
+    if (reply.texts.length !== 1 || reply.reactions.length > 0) return `sent ${describe(reply)}`;
+    if ((await nextRequests(3_000)).length > 0) return "sent more than one reply";
+  }],
+
+  ["group-chat-ignored", async () => {
+    const asked = modelRequests.length;
+    const { response } = await webhook(user, "hello everyone", { group: true });
+    if (!response.ok) return `status ${response.status}`;
+    if ((await nextRequests(1_500)).length > 0 || modelRequests.length > asked) return "replied to a group chat";
+  }],
+
+  ["reminder-fires", async () => {
+    script.set(receipt.url, [
+      call(["save", { urls: [receipt.url] }], ["remind", { note: "check receipt", after: "PT2S" }]),
+      say("set"),
+    ]);
+    const reply = await turn(receipt.url);
+    if (reply.text !== "set" || reply.reactions.length > 0) return `sent ${describe(reply)}`;
+    const nudged = await nudge(10_000);
+    if (!nudged?.event.startsWith("reminder:") || !nudged.text.includes("check receipt") || nudged.files.join() !== receipt.id) {
+      return `nudge was ${describe(nudged)}`;
+    }
+    if (await nudge(1_500)) return "sent a second nudge";
+  }],
+
+  // A clock-time reminder fires at its time. The model is told the zone it saved.
+  ["reminder-at-clock-time", async () => {
+    const message = "remind me to call mom";
+    const remind = () => call(["remind", { note: "call mom", at: localTime(Date.now() + 4_000, ZONE), time_zone: ZONE }]);
+    script.set(message, [remind, remind, say("set")]);
+    const reply = await turn(message);
+    if (reply.text !== "set") return `sent ${describe(reply)}`;
+    const nudged = await nudge(12_000);
+    if (!nudged?.text.includes("call mom")) return `nudge was ${describe(nudged)}`;
+    const due = modelRequests.findLast((request) => request.text.startsWith("Reminder due: call mom"));
+    if (!due.messages[0].content.includes(ZONE)) return "the model was not told the saved time zone";
+  }],
+  // A link sent after a reminder is saved on its own. The correction after it moves the reminder
+  // to a clock time in the saved zone. The nudge fires once, at the new time, without the link.
+  ["reminder-link-then-correct", async () => {
+    script.set("remind me to call the landlord", [call(["remind", { note: "call the landlord", after: "PT5S" }]), say("set")]);
+    script.set(listing, [call(["save", { urls: [listing] }], ["react", { emoji: "👍" }])]);
+    const correction = "nvm change it to 5 pm instead";
+    const at = () => localTime(Date.now() + 12_000, ZONE);
+    script.set(correction, [() => call(["remind", { note: "Call the landlord", at: at(), time_zone: ZONE }]), say("moved")]);
+    if ((await turn("remind me to call the landlord")).text !== "set") return "reminder not set";
+    const link = await turn(listing);
+    if (link.reactions.join() !== "like" || link.texts.length > 0) return `link got ${describe(link)}`;
+    const corrected = Date.now();
+    const reply = await turn(correction);
+    if (reply.text !== "moved") return `sent ${describe(reply)}`;
+    const nudged = await nudge(20_000);
+    if (!nudged?.text.includes("call the landlord")) return `nudge was ${describe(nudged)}`;
+    if (nudged.links.length + nudged.files.length > 0) return `nudge carried ${describe(nudged)}`;
+    const elapsed = nudged.at - corrected;
+    if (elapsed < 9_000) return `fired ${elapsed} ms after the correction, before the new time`;
+    if (await nudge(1_500)) return "sent a second nudge";
+  }],
+
 ];
 
-// `remind-set` must save this zone.
-const TIME_ZONE = "America/Los_Angeles";
-
-// The `saved` table must hold exactly these items, matched in full.
-const SAVED = [
-  "https://www.rust-lang.org/learn",
-  "https://example.com/apartments",
-  "https://www.zillow.com/homes/austin",
-  "https://example.org/",
-  "https://example.org/tour",
-  "https://doc.rust-lang.org/book",
-  photo.url,
-  memo.url,
-  contact.url,
-  pin.url,
-  lease.url,
-];
-// One saved note must contain this.
-const NOTE = "4521";
-
-/** Every request Satchel makes to the fake Linq, except marking the chat read. */
-const linqRequests = [];
-
-const linq = createServer((req, res) => {
-  let body = "";
-  req.on("data", (chunk) => (body += chunk));
-  req.on("end", () => {
-    if (!req.url.endsWith("/read")) {
-      let parsed = null;
-      try {
-        parsed = JSON.parse(body);
-      } catch {}
-      linqRequests.push({ path: req.url, body: parsed });
-    }
-    res.writeHead(200, { "content-type": "application/json" }).end("{}");
-  });
-});
-
-const storage = mkdtempSync(join(tmpdir(), "satchel-e2e-"));
-const worker = spawn(
-  "npx",
-  [
-    "wrangler", "dev",
-    "--port", String(WORKER_PORT),
-    "--persist-to", storage,
-    "--var", `LINQ_API:http://127.0.0.1:${LINQ_PORT}`,
-    "--var", "LINQ_API_KEY:e2e",
-    "--var", `LINQ_WEBHOOK_SECRET:whsec_${WEBHOOK_KEY.toString("base64")}`,
-  ],
-  {
-    env: { ...process.env, CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
-    stdio: ["ignore", "inherit", "inherit"],
-    detached: true,
-  },
-);
-
-function stopWorker() {
-  try {
-    process.kill(-worker.pid);
-  } catch {}
-}
-process.on("SIGINT", () => {
-  stopWorker();
-  process.exit(130);
-});
-process.on("SIGTERM", () => {
-  stopWorker();
-  process.exit(143);
-});
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function waitForWorker() {
-  const deadline = Date.now() + BUILD_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (worker.exitCode !== null) throw new Error(`wrangler dev exited with ${worker.exitCode}`);
-    try {
-      const response = await fetch(`http://127.0.0.1:${WORKER_PORT}/`);
-      if ((await response.text()) === "hello world") return;
-    } catch {}
-    await sleep(2_000);
-  }
-  throw new Error("wrangler dev did not start");
-}
-
-const sender = `+1555${Math.floor(Math.random() * 1e7)}`;
-const chat = `e2e-${randomUUID()}`;
-
-/** Sends `message` as a signed Linq webhook. Returns its event id. */
-async function send(message) {
-  const eventId = `e2e-${randomUUID()}`;
-  const part = message.startsWith("https://cdn.linqapp.com/")
-    ? { type: "media", url: message }
-    : { type: "text", value: message };
-  const body = JSON.stringify({
-    event_type: "message.received",
-    data: {
-      id: eventId,
-      chat: { id: chat, is_group: false },
-      sender_handle: { handle: sender },
-      parts: [part],
-    },
-  });
-  const id = `msg_${randomUUID()}`;
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = createHmac("sha256", WEBHOOK_KEY).update(`${id}.${timestamp}.${body}`).digest("base64");
-  const response = await fetch(`http://127.0.0.1:${WORKER_PORT}/webhook`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "webhook-id": id,
-      "webhook-timestamp": timestamp,
-      "webhook-signature": `v1,${signature}`,
-    },
-    body,
-  });
-  if (!response.ok) throw new Error(`webhook returned ${response.status}: ${await response.text()}`);
-  return eventId;
-}
-
-/** The event a Linq request replies to. A voice memo request carries none. */
-function eventOf(request) {
-  const reaction = request.path.match(/\/messages\/([^/]+)\/reactions$/);
-  if (reaction) return reaction[1];
-  const key = request.body?.message?.idempotency_key;
-  if (key) return key.slice(0, key.lastIndexOf(":"));
-  return null;
-}
-
-/** Waits until Satchel stops making Linq requests, and returns the ones after `start`. */
-async function reply(start) {
-  const deadline = Date.now() + REPLY_TIMEOUT_MS;
-  let count = start;
-  let quietSince = Date.now();
-  while (Date.now() < deadline) {
-    await sleep(500);
-    if (linqRequests.length !== count) {
-      count = linqRequests.length;
-      quietSince = Date.now();
-    }
-    if (count > start && Date.now() - quietSince >= QUIET_MS) break;
-  }
-  return linqRequests.slice(start);
-}
-
-/** Reads the reactions, text, links, and files out of the requests for `eventId`. */
-function summarize(requests, eventId) {
-  const summary = { reactions: [], texts: [], links: [], files: [], voices: [], late: 0 };
-  for (const request of requests) {
-    const event = eventOf(request);
-    if (event !== null && event !== eventId && !event.startsWith(`${eventId}:`)) {
-      summary.late += 1;
-      continue;
-    }
-    if (request.path.endsWith("/reactions")) {
-      summary.reactions.push(request.body.type);
-    } else if (request.path.endsWith("/voicememo")) {
-      summary.voices.push(request.body.attachment_id);
-    } else {
-      const part = request.body.message.parts[0];
-      if (part.type === "media") summary.files.push(part.attachment_id);
-      else if (part.type === "link") summary.links.push(part.value);
-      else summary.texts.push(part.value);
-    }
-  }
-  return summary;
-}
-
-function check(kind, needle, summary) {
-  const text = summary.texts.join(" ");
-  const sentFile = summary.files.length + summary.voices.length > 0;
-  if (summary.late > 0) return "got a late reply to an earlier message";
-  if (kind === "tapback") {
-    if (summary.reactions.length === 0) return "no tapback";
-    if (text || summary.links.length > 0) return "sent text with the tapback";
-  }
-  if (kind === "text-only") {
-    if (!text && summary.links.length === 0) return "no text";
-    if (summary.reactions.length > 0) return "reacted";
-    if (sentFile) return "sent a file";
-  }
-  if (kind === "text" && !text) return "no text";
-  if (needle && (kind === "text" || kind === "text-only") && !text.toLowerCase().includes(needle.toLowerCase())) {
-    return `text lacks "${needle}"`;
-  }
-  if (kind === "file" && !summary.files.includes(needle)) return "did not send the saved file";
-  if (kind === "voice" && !summary.voices.includes(needle)) return "did not send the saved voice memo";
-  return null;
-}
-
-function describe(summary) {
-  const items = [];
-  for (const reaction of summary.reactions) items.push(`[${reaction}]`);
-  for (const text of summary.texts) items.push(JSON.stringify(text));
-  for (const link of summary.links) items.push(`link ${link}`);
-  for (const id of summary.files) items.push(`file ${id}`);
-  for (const id of summary.voices) items.push(`voice ${id}`);
-  if (summary.late > 0) items.push(`${summary.late} late`);
-  return items.join(" ") || "(nothing)";
-}
-
-/** Compares the Durable Object's `saved` table with `SAVED` and `NOTE`. Returns the failures. */
+/** Nothing reads `saved` yet, so this reads the table: saved once, and never the unsaved links. */
 function checkSaved() {
-  const databases = [];
-  for (const path of readdirSync(storage, { recursive: true })) {
-    const isUser = path.includes("User") && path.endsWith(".sqlite") && !path.endsWith("metadata.sqlite");
-    if (isUser) databases.push(join(storage, path));
-  }
+  const databases = userDatabases();
   if (databases.length !== 1) return [`expected 1 User database, found ${databases.length}`];
   const db = new DatabaseSync(databases[0], { readOnly: true });
-  const rows = db.prepare("SELECT media, content FROM saved").all();
-  const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value;
-  const pending = db.prepare("SELECT content, due_at FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
+  const contents = db.prepare("SELECT content FROM saved").all().map((row) => row.content);
   db.close();
-
+  const count = (url) => contents.filter((content) => content === url).length;
   const failures = [];
-  if (zone !== TIME_ZONE) failures.push(`time zone is ${zone}, not ${TIME_ZONE}`);
-  const stretch = pending.filter((row) => row.content.toLowerCase().includes("stretch"));
-  const hour = (row) => new Date(row.due_at * 1000).toLocaleString("en-US", { timeZone: TIME_ZONE, hour: "numeric", hourCycle: "h23" });
-  if (stretch.length !== 1) failures.push(`expected 1 stretch reminder, found ${stretch.length}`);
-  else if (hour(stretch[0]) !== "10") failures.push(`stretch reminder is at hour ${hour(stretch[0])}, not 10`);
-  const contents = [];
-  let noteFound = false;
-  for (const row of rows) {
-    if (row.media === "note") {
-      if (row.content.includes(NOTE)) noteFound = true;
-    } else {
-      contents.push(row.content);
-    }
-  }
-  if (!noteFound) failures.push(`no note with "${NOTE}"`);
-  for (const item of SAVED) {
-    if (!contents.includes(item)) failures.push(`not saved: ${item}`);
-  }
-  for (const content of contents) {
-    if (!SAVED.includes(content)) failures.push(`saved by mistake: ${content}`);
-  }
+  for (const url of SAVED) if (count(url) !== 1) failures.push(`${url} saved ${count(url)} times, not once`);
+  for (const url of NOT_SAVED) if (count(url) > 0) failures.push(`saved by mistake: ${url}`);
   return failures;
 }
 
 let failures = 0;
 try {
-  await new Promise((resolve) => linq.listen(LINQ_PORT, "127.0.0.1", resolve));
-  await waitForWorker();
-  for (const [name, message, kind, needle] of CASES) {
-    const start = linqRequests.length;
-    const eventId = message === null ? "reminder" : await send(message);
-    const summary = summarize(await reply(start), eventId);
-    const failure = check(kind, needle, summary);
+  await startWorker(["--local", "--var", `AI_API:http://127.0.0.1:${await listen(model)}/`]);
+  for (const [name, run] of CASES) {
+    const failure = await run();
     if (failure) failures += 1;
-    console.log(`${failure ? "FAIL" : "PASS"}  ${name}${failure ? ` (${failure})` : ""}\n      ${describe(summary)}`);
+    console.log(`${failure ? "FAIL" : "PASS"}  ${name}${failure ? ` (${failure})` : ""}`);
   }
   const savedFailures = checkSaved();
   for (const failure of savedFailures) console.log(`FAIL  saved table (${failure})`);
-  if (savedFailures.length === 0) console.log(`PASS  saved table (${SAVED.length} items, the note, and the time zone)`);
+  if (savedFailures.length === 0) console.log("PASS  saved table");
   failures += savedFailures.length;
   console.log(failures ? `\n${failures} failure(s)` : `\nall ${CASES.length} cases and the saved table passed`);
 } catch (error) {
   console.error(error);
   failures += 1;
 } finally {
-  linq.close();
-  stopWorker();
+  model.close();
+  stop();
 }
 process.exit(failures ? 1 : 0);
