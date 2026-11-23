@@ -1,5 +1,5 @@
 // Eval of Satchel with the real model and a fake Linq. It is not a PR check: the model varies from
-// run to run. run.mjs is the PR check. eval.yml runs this one nightly.
+// run to run. eval.yml runs this one nightly.
 //
 // Each scenario runs in its own chat, from a new sender. History stays short, and a failure in one
 // scenario does not change the next. Each case checks what Satchel sent back to the fake Linq and,
