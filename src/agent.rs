@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use worker::js_sys::Promise;
 use worker::wasm_bindgen_futures::JsFuture;
-use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
+use worker::{Env, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
@@ -28,28 +28,23 @@ extern "C" {
     ) -> std::result::Result<Promise, JsValue>;
 }
 
-enum Backend {
-    WorkersAi(AiBinding),
-    Http(String),
-}
-
 pub struct Agent {
-    backend: Backend,
+    ai: AiBinding,
     tools: Value,
     /// `EVAL_RUN` tags each AI Gateway log with the eval run that made it.
     eval_run: Option<String>,
 }
 
 impl Agent {
-    /// `AI_API` replaces Workers AI with a URL that takes the same request. The end-to-end
-    /// tests point it at a fake model.
+    /// Reads the `AI` binding. Any binding with a matching `run` method works, so this skips
+    /// `Env::ai`, which accepts only the Workers AI type.
     pub fn from_env(env: &Env) -> Result<Self> {
-        let backend = match env.var("AI_API") {
-            Ok(url) => Backend::Http(url.to_string()),
-            Err(_) => Backend::WorkersAi(env.ai("AI")?.unchecked_into()),
-        };
+        let ai = worker::js_sys::Reflect::get(env, &JsValue::from_str("AI"))?;
+        if ai.is_undefined() {
+            return Err("the AI binding is missing".into());
+        }
         Ok(Self {
-            backend,
+            ai: ai.unchecked_into(),
             tools: ToolCall::definitions(),
             eval_run: env.var("EVAL_RUN").ok().map(|run| run.to_string()),
         })
@@ -77,20 +72,15 @@ impl Agent {
             "tools": self.tools,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        let mut output = match &self.backend {
-            Backend::WorkersAi(ai) => {
-                let mut metadata = json!({ "event_id": event_id, "step": step });
-                if let Some(run) = &self.eval_run {
-                    metadata["eval_run"] = json!(run);
-                }
-                let options = json!({ "gateway": { "id": "satchel", "metadata": metadata } });
-                let input = input.serialize(&JSON)?;
-                let output =
-                    JsFuture::from(ai.run(MODEL, input, options.serialize(&JSON)?)?).await?;
-                serde_wasm_bindgen::from_value::<Value>(output)?
-            }
-            Backend::Http(url) => Self::post(url, &input).await?,
-        };
+        let mut metadata = json!({ "event_id": event_id, "step": step });
+        if let Some(run) = &self.eval_run {
+            metadata["eval_run"] = json!(run);
+        }
+        let options = json!({ "gateway": { "id": "satchel", "metadata": metadata } });
+        let output = self
+            .ai
+            .run(MODEL, input.serialize(&JSON)?, options.serialize(&JSON)?)?;
+        let mut output = serde_wasm_bindgen::from_value::<Value>(JsFuture::from(output).await?)?;
         let response = output["choices"][0]["message"].take();
         let text = Self::clean(response["content"].as_str().unwrap_or_default());
         let calls = response["tool_calls"]
@@ -101,25 +91,6 @@ impl Agent {
             .collect();
         context.push(response);
         Ok((text, calls))
-    }
-
-    async fn post(url: &str, input: &Value) -> Result<Value> {
-        let headers = Headers::new();
-        headers.set("content-type", "application/json")?;
-        let mut init = RequestInit::new();
-        init.with_method(Method::Post)
-            .with_headers(headers)
-            .with_body(Some(input.to_string().into()));
-        let mut response = Fetch::Request(Request::new_with_init(url, &init)?)
-            .send()
-            .await?;
-        if response.status_code() != 200 {
-            return Err(Error::RustError(format!(
-                "AI_API returned {}",
-                response.status_code()
-            )));
-        }
-        response.json().await
     }
 
     /// Adds one tool message per result, matched to the tool call ids in the last response.

@@ -1,7 +1,7 @@
 // End-to-end test for Satchel with a fake Linq and a fake model. This is the PR check.
 //
-// It runs the Worker with `wrangler dev --local`. `LINQ_API` points at a fake Linq, and `AI_API`
-// points at a fake model that returns scripted tool calls. Every run is the same.
+// It runs the Worker with `wrangler dev --local`. `LINQ_API` points at a fake Linq, and the `AI`
+// binding is a fake model Worker that returns scripted tool calls. Every run is the same.
 // Each case checks only what users can see: what Satchel sends to Linq, what it sends to the
 // model, and when a reminder fires. live.mjs runs the same Worker with the real model.
 //
@@ -289,7 +289,7 @@ function checkSaved() {
 
 let failures = 0;
 try {
-  await startWorker(["--local", "--var", `AI_API:http://127.0.0.1:${await listen(model)}/`]);
+  await startWorker(["--local"], { fakeModel: `http://127.0.0.1:${await listen(model)}/` });
   for (const [name, run] of CASES) {
     const failure = await run();
     if (failure) failures += 1;

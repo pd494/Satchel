@@ -3,10 +3,11 @@
 
 import { spawn } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const WORKER_PORT = 8787;
 const WEBHOOK_KEY = Buffer.from("satchel-e2e-webhook-key");
@@ -78,14 +79,38 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
-/** Starts the fake Linq and the Worker, with `args` added to `wrangler dev`. Waits until the Worker
+/** The repo's wrangler.jsonc, with the `AI` binding swapped for the fake model Worker in
+ * fake-model.mjs. That Worker forwards each model call to `scriptUrl`. Returns both config paths. */
+function fakeModelConfigs(scriptUrl) {
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const config = JSON.parse(readFileSync(join(root, "wrangler.jsonc"), "utf8"));
+  delete config.ai;
+  delete config.routes;
+  config.services = [{ binding: "AI", service: "satchel-fake-model" }];
+  config.main = join(root, config.main);
+  config.build = { ...config.build, cwd: root, watch_dir: join(root, "src") };
+  const fake = {
+    name: "satchel-fake-model",
+    main: fileURLToPath(new URL("fake-model.mjs", import.meta.url)),
+    compatibility_date: config.compatibility_date,
+    vars: { SCRIPT_URL: scriptUrl },
+  };
+  const paths = [join(storage, "satchel.json"), join(storage, "fake-model.json")];
+  writeFileSync(paths[0], JSON.stringify(config));
+  writeFileSync(paths[1], JSON.stringify(fake));
+  return paths;
+}
+
+/** Starts the fake Linq and the Worker, with `args` added to `wrangler dev`. With `fakeModel`, the
+ * `AI` binding is a fake model Worker that forwards each call to that URL. Waits until the Worker
  * answers. */
-export async function startWorker(args) {
+export async function startWorker(args, { fakeModel } = {}) {
   const linqPort = await listen(linq.server);
+  const configs = fakeModel ? fakeModelConfigs(fakeModel).flatMap((path) => ["-c", path]) : [];
   worker = spawn(
     "npx",
     [
-      "wrangler", "dev",
+      "wrangler", "dev", ...configs,
       "--port", String(WORKER_PORT),
       "--persist-to", storage,
       "--var", `LINQ_API:http://127.0.0.1:${linqPort}`,
