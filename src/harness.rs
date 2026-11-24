@@ -5,6 +5,7 @@ use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
 use serde_json::json;
+use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -185,9 +186,15 @@ impl Harness {
         let mut context = Agent::context(&history, &self.prompt_context()?);
 
         // Satchel saves the links and files the user sent to keep, and reads the ones they only
-        // asked about. The model sees this as a `save` call it made, so it knows what was saved.
+        // asked about. The model sees this as its own `save` call. It then knows what was saved.
+        // A due reminder's links were saved before. A URL sent twice counts once.
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
-        let links = texts.iter().flat_map(|text| Link::find_all(text)).collect();
+        let mut seen = HashSet::new();
+        let links = texts
+            .iter()
+            .flat_map(|text| Link::find_all(text))
+            .filter(|link| !message.is_reminder() && seen.insert(link.url.clone()))
+            .collect();
         let (links, asked) = self.agent.keep(&texts, links).await?;
         let saved = !links.is_empty();
         if saved || !asked.is_empty() {
