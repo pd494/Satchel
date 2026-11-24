@@ -4,7 +4,7 @@ use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
@@ -21,6 +21,8 @@ const REMINDER_EVENT_PREFIX: &str = "reminder:";
 
 /// Seconds Satchel waits after a text for more texts. Texts sent together then get one reply.
 const DEBOUNCE: i64 = 5;
+/// The most model calls in one reply. It stops a model that keeps calling tools.
+const MAX_STEPS: usize = 6;
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
@@ -178,8 +180,8 @@ impl Harness {
     }
 
     /// Runs the model on the burst until it stops calling tools or reacts. Text that comes
-    /// with tool calls is ignored, since the model writes its reply after it sees the results.
-    /// A tapback is the whole reply, so the text is empty.
+    /// with tool calls is ignored. The model writes its reply after it sees the results. A
+    /// tapback is the whole reply, and its text is empty.
     async fn run_agent(&self, burst: &[UnansweredMessage]) -> Result<String> {
         let message = burst.last().expect("a burst has a text");
         let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
@@ -193,7 +195,9 @@ impl Harness {
         let links = texts
             .iter()
             .flat_map(|text| Link::find_all(text))
-            .filter(|link| !message.is_reminder() && seen.insert(link.url.clone()))
+            .filter(|link| {
+                !link.suspicious && !message.is_reminder() && seen.insert(link.url.clone())
+            })
             .collect();
         let (links, asked) = self.agent.keep(&texts, links).await?;
         let saved = !links.is_empty();
@@ -201,17 +205,14 @@ impl Harness {
             let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
             let mut result = "Nothing saved.".to_string();
             if saved {
-                for link in &links {
-                    match File::parse(link.url.as_str()) {
-                        Some(file) => self.db.insert_saved(message.id, &file)?,
-                        None => self.db.insert_saved(message.id, link)?,
-                    };
-                }
                 result = self.save(message.id, &urls, None).await?;
                 self.react(burst, Tapback::Like).await?;
             }
+            // The model sees the photos the user asked about.
+            let mut images = Vec::new();
             for link in &asked {
-                let (text, _) = self.reader.read(&link.url, None, &self.agent).await;
+                let (text, media) = self.reader.read(&link.url, None, &self.agent).await;
+                images.extend(media.filter(|(mime, _)| mime.starts_with("image/")));
                 result += &format!(
                     "\nNot saved, since the user only asked about it: {}: {text}",
                     link.url
@@ -221,6 +222,13 @@ impl Harness {
             let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
             context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
             Agent::push_results(&mut context, vec![result]);
+            if !images.is_empty() {
+                let content: Vec<Value> = images
+                    .iter()
+                    .map(|(mime, bytes)| json!({ "type": "image_url", "image_url": { "url": Agent::data_url(mime, bytes) } }))
+                    .collect();
+                context.push(json!({ "role": "user", "content": content }));
+            }
         }
 
         let mut step = 0;
@@ -230,7 +238,7 @@ impl Harness {
                 .run_model(&mut context, &message.event_id, step)
                 .await?;
             step += 1;
-            if calls.is_empty() {
+            if calls.is_empty() || step == MAX_STEPS {
                 break text;
             }
 
@@ -241,9 +249,9 @@ impl Harness {
                     Ok(ToolCall::Save { urls, note }) => {
                         self.save(message.id, urls, note.as_deref()).await?
                     }
-                    // A saved burst already has its 👍.
+                    // A saved burst already has its 👍. A reminder has no text to react to.
                     Ok(ToolCall::React { emoji }) => {
-                        if !saved {
+                        if !saved && !message.is_reminder() {
                             self.react(burst, *emoji).await?;
                         }
                         "ok".to_string()
@@ -252,7 +260,7 @@ impl Harness {
                 });
             }
             let failed = results.iter().any(|result| result.starts_with("error"));
-            // A `react` call ends the model's reply, since a tapback means it has nothing to say.
+            // A `react` call ends the model's reply. A tapback means it has nothing to say.
             let reacted = calls
                 .iter()
                 .any(|c| matches!(c, Ok(ToolCall::React { .. })));
@@ -293,8 +301,12 @@ impl Harness {
             let Some(link) = Link::find_all(url).pop() else {
                 return Ok(format!("error: {url} is not a URL"));
             };
+            match File::parse(link.url.as_str()) {
+                Some(file) => self.db.insert_saved(message_id, &file)?,
+                None => self.db.insert_saved(message_id, &link)?,
+            };
             let Some(row) = self.db.add_context(link.url.as_str(), note)? else {
-                return Ok(format!("error: {url} is not in the messages or saved"));
+                return Ok(format!("error: {url} is not saved"));
             };
             let (text, mut media) = self.reader.read(&link.url, row.context, &self.agent).await;
             let vector = match self.agent.embed(&text, media.as_ref()).await {

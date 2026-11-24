@@ -58,7 +58,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Reads the `AI` binding. Any binding with a matching `run` method works, so this skips
+    /// Reads the `AI` binding. Any binding with a matching `run` method works. This skips
     /// `Env::ai`, which accepts only the Workers AI type.
     pub fn from_env(env: &Env) -> Result<Self> {
         let ai = Reflect::get(env, &"AI".into())?;
@@ -135,7 +135,7 @@ impl Agent {
     }
 
     /// Gemma sometimes packs several calls into one, as JSON objects back to back, or sends
-    /// arguments that are not JSON. Splits them into one call each, with valid JSON, since the
+    /// arguments that are not JSON. Splits them into one call each, with valid JSON. The
     /// model rejects a context that holds invalid arguments.
     fn split_calls(response: &mut Value) -> Calls {
         let mut split = Vec::new();
@@ -168,6 +168,13 @@ impl Agent {
     }
 
     /// Embeds `text` (and optional media) as little-endian `f32` bytes.
+    /// The file as a `data:` URL, the way the models take images and video.
+    pub fn data_url(mime: &str, bytes: &[u8]) -> String {
+        let mut url = format!("data:{mime};base64,");
+        BASE64.encode_string(bytes, &mut url);
+        url
+    }
+
     pub async fn embed(&self, text: &str, media: Option<&(String, Vec<u8>)>) -> Result<Vec<u8>> {
         // The model's document prefix. Queries use `task: search result | query: …`.
         let text: String = text.chars().take(MAX_TEXT).collect();
@@ -175,9 +182,7 @@ impl Agent {
             vec![json!({ "type": "text", "text": format!("title: none | text: {text}") })];
         if let Some((mime, bytes)) = media {
             let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
-            let mut url = format!("data:{mime};base64,");
-            BASE64.encode_string(bytes, &mut url);
-            content.push(json!({ "type": kind, kind: { "url": url } }));
+            content.push(json!({ "type": kind, kind: { "url": Self::data_url(mime, bytes) } }));
         }
         let input = json!({
             "messages": [[{ "role": "user", "content": content }]],

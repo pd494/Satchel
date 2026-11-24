@@ -53,7 +53,7 @@ on allCases()
 		{"burst-link-small-talk", "https://en.wikipedia.org/wiki/Sea_otter||lol", "tapback", ""}, ¬
 		{"link-then-words", "https://letterboxd.com/film/parasite-2019/", "tapback", ""}, ¬
 		{"words-after", "that's the movie for friday night", "tapback", ""}, ¬
-		{"save-tiktok-asks", "https://www.tiktok.com/@scout2015/video/6718335390845095173", "text-only", ""}, ¬
+		{"save-tiktok-asks", "https://www.tiktok.com/@scout2015/video/6718335390845095173", "both", "about"}, ¬
 		{"tiktok-answer", "it's a cute dog video", "tapback", ""}, ¬
 		{"recall-voice", "send me that voice memo", "attachment", ""}, ¬
 		{"save-contact", "file:~/Pictures/satchel-test/sample-contact.vcf", "tapback", ""}, ¬
@@ -64,6 +64,7 @@ on allCases()
 		{"recall-file", "send me that pdf", "attachment", ""}, ¬
 		{"question-not-saved", "send me the chili recipe", "text-only", ""}, ¬
 		{"link-question-not-saved", "is this site legit? https://example.net/deal", "text-only", ""}, ¬
+		{"save-after-asking", "ok save it", "tapback", ""}, ¬
 		{"save-and-answer", "save https://doc.rust-lang.org/book and tell me what it is", "text", "book"}, ¬
 		{"recall-after-answer", "what was that book link?", "text-only", "doc.rust-lang.org"}, ¬
 		{"remind-in", "remind me in 1 minute to drink water", "text-only", ""}, ¬
@@ -152,7 +153,7 @@ on runCase(satchelNumber, caseText, wantKind, wantText)
 	end if
 	set fromSatchel to "FROM message m JOIN handle h ON m.handle_id = h.ROWID WHERE h.id = '" & satchelNumber & "' AND m.is_from_me = 0 AND m.date > " & startDate
 	-- Count only a tapback on the message this case sent. A late tapback on an earlier message must not pass it.
-	-- Outgoing rows can have handle_id 0, so find the sent message through the Satchel chat.
+	-- Outgoing rows can have handle_id 0. Find the sent message through the Satchel chat.
 	set sentGuid to "(SELECT s.guid FROM message s JOIN chat_message_join cm ON cm.message_id = s.ROWID JOIN chat_handle_join ch ON ch.chat_id = cm.chat_id WHERE ch.handle_id = h.ROWID AND s.is_from_me = 1 AND s.date > " & startDate & " ORDER BY s.ROWID DESC LIMIT 1)"
 	set countQuery to "SELECT coalesce(sum(m.associated_message_type = " & likeTapback & " AND m.associated_message_guid LIKE '%' || " & sentGuid & "), 0) || '|' || " & ¬
 		"coalesce(sum(m.associated_message_type = 0 AND (instr(lower(coalesce(m.text, '')), lower('" & wantText & "')) > 0" & ¬

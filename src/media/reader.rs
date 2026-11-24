@@ -232,7 +232,7 @@ impl Reader {
             .join("\n")
     }
 
-    /// Decodes HTML entities twice, since some sites encode them twice.
+    /// Decodes HTML entities twice. Some sites encode them twice.
     fn decode(text: &str) -> String {
         let once = decode_html_entities(text);
         let decoded = decode_html_entities(&once);

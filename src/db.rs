@@ -327,7 +327,7 @@ impl Db {
         let insert_query =
             "INSERT INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?) \
-            ON CONFLICT (content) DO UPDATE SET content = content RETURNING id";
+            ON CONFLICT (content) DO UPDATE SET message_id = excluded.message_id RETURNING id";
         let row: Saved = self
             .sql
             .exec(
