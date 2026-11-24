@@ -139,11 +139,7 @@ impl Agent {
     /// model rejects a context that holds invalid arguments.
     fn split_calls(response: &mut Value) -> Calls {
         let mut split = Vec::new();
-        for call in response["tool_calls"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-        {
+        for call in response["tool_calls"].as_array().into_iter().flatten() {
             let arguments = &call["function"]["arguments"];
             let parts: Vec<Value> = match arguments.as_str() {
                 Some(text) => serde_json::Deserializer::from_str(text)
@@ -166,7 +162,7 @@ impl Agent {
             .map(|call| ToolCall::parse(&call["function"]).map_err(|error| error.to_string()))
             .collect();
         if !split.is_empty() {
-            response["tool_calls"] = json!(split);
+            response["tool_calls"] = Value::Array(split);
         }
         calls
     }
@@ -179,7 +175,8 @@ impl Agent {
             vec![json!({ "type": "text", "text": format!("title: none | text: {text}") })];
         if let Some((mime, bytes)) = media {
             let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
-            let url = format!("data:{mime};base64,{}", BASE64.encode(bytes));
+            let mut url = format!("data:{mime};base64,");
+            BASE64.encode_string(bytes, &mut url);
             content.push(json!({ "type": kind, kind: { "url": url } }));
         }
         let input = json!({
@@ -212,10 +209,10 @@ impl Agent {
         });
         let output = self.ai.to_markdown(doc.into(), options.serialize(&JSON)?)?;
         let output: Value = serde_wasm_bindgen::from_value(JsFuture::from(output).await?)?;
-        let text = output["data"]
+        Ok(output["data"]
             .as_str()
-            .ok_or_else(|| output["error"].to_string())?;
-        Ok(text.to_string())
+            .ok_or_else(|| output["error"].to_string())?
+            .into())
     }
 
     /// `options` is `None` for media calls, which are too large for AI Gateway.

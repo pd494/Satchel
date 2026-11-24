@@ -259,7 +259,7 @@ impl Db {
 
     /// Marks the user message `event_id` and its reply, if any, as sent.
     pub fn mark_sent(&self, event_id: &str) -> Result<()> {
-        let update_query = "UPDATE messages SET sent = 1 WHERE ?1 IN (event_id, reply_to)";
+        let update_query = "UPDATE messages SET sent = 1 WHERE event_id = ?1 OR reply_to = ?1";
         self.sql.exec(update_query, Some(vec![event_id.into()]))?;
         Ok(())
     }
@@ -300,14 +300,14 @@ impl Db {
         self.sql.exec(select_query, None)?.to_array()
     }
 
-    /// Adds the user's words to the newest item saved with `content`, unless a retry already
+    /// Adds the user's words to the item saved with `content`, unless a retry already
     /// added them. Returns `None` if nothing was saved with `content`.
     pub fn add_context(&self, content: &str, note: Option<&str>) -> Result<Option<Saved>> {
         let update_query = "UPDATE saved SET context = \
             CASE WHEN ?1 IS NULL OR instr(char(10) || context || char(10), char(10) || ?1 || char(10)) > 0 \
             THEN context \
             ELSE COALESCE(context || char(10), '') || ?1 END \
-            WHERE id = (SELECT max(id) FROM saved WHERE content = ?2) RETURNING id, context";
+            WHERE content = ?2 RETURNING id, context";
         let values = vec![note.into(), content.into()];
         Ok(self.sql.exec(update_query, Some(values))?.to_array()?.pop())
     }

@@ -36,7 +36,6 @@ extern "C" {
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; SatchelBot/0.1; +https://textsatchel.com)";
 const OEMBED_REGISTRY: &str = "https://oembed.com/providers.json";
 const JSON_LD: &str = "script[type='application/ld+json']";
-/// The most text that goes into one embedding. The model reads about 8,000 tokens.
 /// A Durable Object has 128 MB, and bytes are copied a few times on the way to the model.
 const MAX_BYTES: usize = 10_000_000;
 const TIMEOUT_MS: u32 = 10_000;
@@ -227,9 +226,8 @@ impl Reader {
         let text = String::from_utf8_lossy(bytes)
             .replace("\r\n", "\n")
             .replace("\n ", "");
-        let is_photo = |l: &&str| l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("PHOTO"));
         text.lines()
-            .filter(|l| !is_photo(l))
+            .filter(|l| !l.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("PHOTO")))
             .collect::<Vec<_>>()
             .join("\n")
     }

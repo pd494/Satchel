@@ -47,9 +47,7 @@ impl Harness {
         self.db.save_user_message(event_id, text)?;
         let debounced = Timestamp::now().as_second() + DEBOUNCE;
         Ok(Self::until(
-            self.db
-                .next_due()?
-                .map_or(debounced, |due| due.min(debounced)),
+            self.db.next_due()?.unwrap_or(debounced).min(debounced),
         ))
     }
 
@@ -99,10 +97,8 @@ impl Harness {
             };
             // A text that arrived while this alarm ran waits out its own debounce.
             let debounced = message.created_at + DEBOUNCE;
-            let fresh =
-                message.response.is_none() && !message.event_id.starts_with(REMINDER_EVENT_PREFIX);
-            if fresh && debounced > Timestamp::now().as_second() {
-                wake = Some(wake.map_or(debounced, |due| due.min(debounced)));
+            if !message.alone() && debounced > Timestamp::now().as_second() {
+                wake = Some(wake.unwrap_or(debounced).min(debounced));
                 break;
             }
 
@@ -146,10 +142,10 @@ impl Harness {
     /// The messages one reply answers, oldest first: the texts sent together. A due reminder,
     /// or a stored reply that failed to send, is a turn of its own.
     fn next_turn(mut unanswered: Vec<UnansweredMessage>) -> Vec<UnansweredMessage> {
-        let alone = |message: &UnansweredMessage| {
-            message.response.is_some() || message.event_id.starts_with(REMINDER_EVENT_PREFIX)
-        };
-        let end = unanswered.iter().position(alone).unwrap_or(usize::MAX);
+        let end = unanswered
+            .iter()
+            .position(UnansweredMessage::alone)
+            .unwrap_or(usize::MAX);
         unanswered.truncate(end.max(1));
         unanswered
     }
@@ -165,7 +161,7 @@ impl Harness {
 
         let text = if !last_try {
             self.run_agent(burst).await?
-        } else if message.event_id.starts_with(REMINDER_EVENT_PREFIX) {
+        } else if message.is_reminder() {
             message.content.clone()
         } else {
             SORRY.to_string()
@@ -223,7 +219,9 @@ impl Harness {
                 break text;
             }
 
-            let results = self.run_tools(&calls, burst, &links, saved).await?;
+            let results = self
+                .run_tools(&calls, burst, message.id, &links, saved)
+                .await?;
             let failed = results.iter().any(|result| result.starts_with("error"));
             // A `react` call ends the model's reply, since a tapback means it has nothing to say.
             let reacted = calls
@@ -240,17 +238,14 @@ impl Harness {
         }
         // The model sometimes writes a tapback as text, such as "👍". Send it as a tapback. A
         // reminder turn has no Linq message to react to.
-        let tapback = serde_json::from_value::<Tapback>(text.clone().into()).ok();
-        match tapback {
-            _ if message.event_id.starts_with(REMINDER_EVENT_PREFIX) => Ok(text),
-            Some(emoji) => {
-                if !saved {
-                    self.react(burst, emoji).await?;
-                }
-                Ok(String::new())
-            }
-            None => Ok(text),
+        let tapback = serde_json::from_value::<Tapback>(text.clone().into());
+        let (Ok(emoji), false) = (tapback, message.is_reminder()) else {
+            return Ok(text);
+        };
+        if !saved {
+            self.react(burst, emoji).await?;
         }
+        Ok(String::new())
     }
 
     /// Runs each tool call and returns one result per call: "ok", or an error the model can
@@ -259,10 +254,10 @@ impl Harness {
         &self,
         calls: &Calls,
         burst: &[UnansweredMessage],
+        message_id: i64,
         links: &[Link],
         saved: bool,
     ) -> Result<Vec<String>> {
-        let message_id = burst.last().expect("a burst has a text").id;
         let mut results = Vec::new();
         for call in calls {
             results.push(match call {
@@ -459,5 +454,15 @@ impl Harness {
                 .await?;
         }
         Ok(())
+    }
+}
+
+impl UnansweredMessage {
+    fn is_reminder(&self) -> bool {
+        self.event_id.starts_with(REMINDER_EVENT_PREFIX)
+    }
+
+    fn alone(&self) -> bool {
+        self.response.is_some() || self.is_reminder()
     }
 }
