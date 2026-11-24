@@ -89,7 +89,7 @@ impl Harness {
 
         self.queue_due_reminders()?;
 
-        let mut wake = self.db.next_due()?;
+        let mut waiting = None;
         loop {
             let burst = Self::next_turn(self.db.unanswered()?);
             let Some(message) = burst.last() else {
@@ -98,7 +98,7 @@ impl Harness {
             // A text that arrived while this alarm ran waits out its own debounce.
             let debounced = message.created_at + DEBOUNCE;
             if !message.alone() && debounced > Timestamp::now().as_second() {
-                wake = Some(wake.unwrap_or(debounced).min(debounced));
+                waiting = Some(debounced);
                 break;
             }
 
@@ -129,6 +129,8 @@ impl Harness {
             sent?;
         }
 
+        // Read the next reminder after the loop. A `remind` call in this run may have set one.
+        let wake = [self.db.next_due()?, waiting].into_iter().flatten().min();
         Ok(wake.map(Self::until))
     }
 
