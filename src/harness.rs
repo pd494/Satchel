@@ -1,4 +1,4 @@
-use crate::agent::{Agent, Calls};
+use crate::agent::Agent;
 use crate::db::{Db, Schedule, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
@@ -194,7 +194,13 @@ impl Harness {
             let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
             let mut result = "Nothing saved.".to_string();
             if saved {
-                result = self.save(message.id, &urls, None, &links).await?;
+                for link in &links {
+                    match File::parse(link.url.as_str()) {
+                        Some(file) => self.db.insert_saved(message.id, &file)?,
+                        None => self.db.insert_saved(message.id, link)?,
+                    };
+                }
+                result = self.save(message.id, &urls, None).await?;
                 self.react(burst, Tapback::Like).await?;
             }
             for link in &asked {
@@ -221,9 +227,23 @@ impl Harness {
                 break text;
             }
 
-            let results = self
-                .run_tools(&calls, burst, message.id, &links, saved)
-                .await?;
+            let mut results = Vec::new();
+            for call in &calls {
+                results.push(match call {
+                    Err(error) => format!("error: {error}"),
+                    Ok(ToolCall::Save { urls, note }) => {
+                        self.save(message.id, urls, note.as_deref()).await?
+                    }
+                    // A saved burst already has its 👍.
+                    Ok(ToolCall::React { emoji }) => {
+                        if !saved {
+                            self.react(burst, *emoji).await?;
+                        }
+                        "ok".to_string()
+                    }
+                    Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
+                });
+            }
             let failed = results.iter().any(|result| result.starts_with("error"));
             // A `react` call ends the model's reply, since a tapback means it has nothing to say.
             let reacted = calls
@@ -250,36 +270,6 @@ impl Harness {
         Ok(String::new())
     }
 
-    /// Runs each tool call and returns one result per call: "ok", or an error the model can
-    /// fix. A Linq or D1 failure is an `Err`.
-    async fn run_tools(
-        &self,
-        calls: &Calls,
-        burst: &[UnansweredMessage],
-        message_id: i64,
-        links: &[Link],
-        saved: bool,
-    ) -> Result<Vec<String>> {
-        let mut results = Vec::new();
-        for call in calls {
-            results.push(match call {
-                Err(error) => format!("error: {error}"),
-                Ok(ToolCall::Save { urls, note }) => {
-                    self.save(message_id, urls, note.as_deref(), links).await?
-                }
-                // A saved burst already has its 👍.
-                Ok(ToolCall::React { emoji }) => {
-                    if !saved {
-                        self.react(burst, *emoji).await?;
-                    }
-                    "ok".to_string()
-                }
-                Ok(ToolCall::Remind(remind)) => self.remind(remind, message_id)?,
-            });
-        }
-        Ok(results)
-    }
-
     /// A tapback answers the whole burst. It goes on every text in it.
     async fn react(&self, burst: &[UnansweredMessage], emoji: Tapback) -> Result<()> {
         for text in burst {
@@ -288,26 +278,14 @@ impl Harness {
         Ok(())
     }
 
-    /// Saves each URL, or adds `note` to a URL saved before, then reads and embeds it. Without
-    /// URLs, saves `note` on its own. Returns each item's search text for the model to check.
-    async fn save(
-        &self,
-        message_id: i64,
-        urls: &[String],
-        note: Option<&str>,
-        links: &[Link],
-    ) -> Result<String> {
+    /// Adds `note` to each saved URL, then reads and embeds it. Without URLs, saves `note` on its
+    /// own. Returns each item's search text for the model to check.
+    async fn save(&self, message_id: i64, urls: &[String], note: Option<&str>) -> Result<String> {
         let mut items = Vec::new();
         for url in urls {
             let Some(link) = Link::find_all(url).pop() else {
                 return Ok(format!("error: {url} is not a URL"));
             };
-            if let Some(link) = links.iter().find(|sent| sent.url == link.url) {
-                match File::parse(link.url.as_str()) {
-                    Some(file) => self.db.insert_saved(message_id, &file)?,
-                    None => self.db.insert_saved(message_id, link)?,
-                };
-            }
             let Some(row) = self.db.add_context(link.url.as_str(), note)? else {
                 return Ok(format!("error: {url} is not in the messages or saved"));
             };
@@ -320,9 +298,11 @@ impl Harness {
                 vector => vector?,
             };
             self.db.set_read(row.id, &text, vector)?;
-            let kind = |mime: &str| mime.split('/').next().unwrap_or_default().to_string();
             let media = media.map_or(String::new(), |(mime, _)| {
-                format!(" (plus the {} itself)", kind(&mime))
+                format!(
+                    " (plus the {} itself)",
+                    mime.split('/').next().unwrap_or_default()
+                )
             });
             items.push(format!("- {url}: {text}{media}"));
         }
