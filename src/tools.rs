@@ -129,10 +129,10 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "save",
-                "description": "Save links and files from the newest message, and/or a note to remember.",
+                "description": "Save links and files from the newest messages, or a note to remember. Returns each item's search text.",
                 "parameters": { "type": "object", "required": ["urls"], "properties": {
-                    "urls": { "type": "array", "items": { "type": "string" }, "description": "URLs exactly as they appear in the newest message." },
-                    "note": { "type": "string", "description": "Text to remember, in the user's words." },
+                    "urls": { "type": "array", "items": { "type": "string" }, "description": "URLs exactly as they appear in the newest messages. Use a URL from an earlier message only when the user is now telling you what it is." },
+                    "note": { "type": "string", "description": "The user's words, as they wrote them. With urls, they are saved with those links or files. Without urls, they are saved as a note." },
                 }},
             }},
             { "type": "function", "function": {

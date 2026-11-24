@@ -1,6 +1,5 @@
 use crate::db::Db;
 use crate::harness::Harness;
-use std::time::Duration;
 use worker::{
     durable_object, DurableObject, Env, Error, Headers, Method, Request, RequestInit, Response,
     Result, State,
@@ -74,12 +73,9 @@ impl DurableObject for User {
             Db::open(self.state.storage().sql())?;
         }
 
-        self.harness.receive(&event_id, &text)?;
+        let wait = self.harness.receive(&event_id, &text)?;
         self.state.storage().put(SPACE_ID_KEY, &space_id).await?;
-        self.state
-            .storage()
-            .set_alarm(Duration::from_secs(0))
-            .await?;
+        self.state.storage().set_alarm(wait).await?;
         Response::ok("ok")
     }
 
