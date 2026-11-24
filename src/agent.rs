@@ -17,6 +17,8 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 /// Vectors are stored at this size. Queries must use the same size.
 const DIMENSIONS: u32 = 512;
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
+/// A model reply takes about 1 second. The last of the 3 tries has no time limit.
+const MODEL_TIMEOUT_MS: u32 = 15_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
 
@@ -91,7 +93,12 @@ impl Agent {
         if let Some(run) = &self.eval_run {
             metadata["eval_run"] = json!(run);
         }
-        let options = json!({ "gateway": { "id": "satchel", "metadata": metadata } });
+        let options = json!({ "gateway": {
+            "id": "satchel",
+            "metadata": metadata,
+            "requestTimeoutMs": MODEL_TIMEOUT_MS,
+            "retries": { "maxAttempts": 3, "retryDelayMs": 500, "backoff": "exponential" },
+        } });
         let mut output = self.call(MODEL, &input, Some(&options)).await?;
         let mut response = output["choices"][0]["message"].take();
         let text = Self::clean(response["content"].as_str().unwrap_or_default());

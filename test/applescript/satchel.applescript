@@ -46,6 +46,8 @@ on allCases()
 		{"save-docx", "file:~/Pictures/satchel-test/sample-lease.docx", "tapback", ""}, ¬
 		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
 		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
+		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Sourdough||what's the weather in sf today?", "text-only", ""}, ¬
+		{"burst-link-small-talk", "https://en.wikipedia.org/wiki/Sea_otter||lol", "tapback", ""}, ¬
 		{"link-then-words", "https://letterboxd.com/film/parasite-2019/", "tapback", ""}, ¬
 		{"words-after", "that's the movie for friday night", "tapback", ""}, ¬
 		{"save-tiktok-asks", "https://www.tiktok.com/@scout2015/video/6718335390845095173", "text-only", ""}, ¬
