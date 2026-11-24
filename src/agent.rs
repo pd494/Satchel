@@ -78,15 +78,22 @@ impl Agent {
 
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
     /// tool calls. The AI Gateway log gets the message's `event_id` and the tool loop `step`.
+    /// With `must_save`, the model has to call `save` before anything else.
     pub async fn run_model(
         &self,
         context: &mut Vec<Value>,
         event_id: &str,
         step: usize,
+        must_save: bool,
     ) -> Result<(String, Calls)> {
         let input = json!({
             "messages": context,
             "tools": self.tools,
+            "tool_choice": if must_save {
+                json!({ "type": "function", "function": { "name": "save" } })
+            } else {
+                json!("auto")
+            },
             "chat_template_kwargs": { "enable_thinking": false },
         });
         let mut metadata = json!({ "event_id": event_id, "step": step });

@@ -199,7 +199,12 @@ impl Harness {
         let text = loop {
             let (text, calls) = self
                 .agent
-                .run_model(&mut context, &message.event_id, step)
+                .run_model(
+                    &mut context,
+                    &message.event_id,
+                    step,
+                    step == 0 && !links.is_empty(),
+                )
                 .await?;
             step += 1;
             if calls.is_empty() {
@@ -269,8 +274,12 @@ impl Harness {
                     result
                 }
                 Ok(ToolCall::React { emoji }) if !Self::can_react(*emoji, links, *saved) => {
-                    "error: save the links or files from the newest message before reacting with 👍"
-                        .to_string()
+                    if *saved {
+                        "error: after a save, the only tapback is 👍".to_string()
+                    } else {
+                        "error: save the links or files from the newest message before reacting with 👍"
+                            .to_string()
+                    }
                 }
                 Ok(ToolCall::React { emoji }) => {
                     self.react(message, earlier, *emoji).await?;
@@ -341,7 +350,10 @@ impl Harness {
             items.push(format!("- note: {note}"));
         }
 
-        Ok(format!("ok. Search text:\n{}", items.join("\n")))
+        Ok(format!(
+            "ok. Search text:\n{}\n\nIf the user asked anything else, answer it in text now, and do not react.",
+            items.join("\n")
+        ))
     }
 
     fn remind(&self, remind: &Remind, message_id: i64) -> Result<String> {
@@ -462,8 +474,12 @@ impl Harness {
         Ok(())
     }
 
-    /// A 👍 tells the user their links or files were saved. It waits for a save.
+    /// A 👍 tells the user their links or files were saved. It waits for a save, and after a
+    /// save it is the only tapback.
     fn can_react(emoji: Tapback, links: &[Link], saved: bool) -> bool {
-        !matches!(emoji, Tapback::Like) || links.is_empty() || saved
+        match emoji {
+            Tapback::Like => links.is_empty() || saved,
+            _ => !saved,
+        }
     }
 }
