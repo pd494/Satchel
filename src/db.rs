@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS saved (
     due_at      INTEGER,
     repeat      TEXT,
     until_at    INTEGER,
-    UNIQUE (message_id, content)
+    UNIQUE (content)
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS saved_due ON saved (due_at) WHERE due_at IS NOT NULL;
@@ -320,14 +320,14 @@ impl Db {
         Ok(())
     }
 
-    /// Saves `item` and returns its row id. Saving the same item from the same message again
-    /// keeps the first row.
+    /// Saves `item` and returns its row id. Saving the same item again, from any message, keeps
+    /// the first row.
     pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<i64> {
         let data = serde_json::to_string(&item.data())?;
         let insert_query =
             "INSERT INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?) \
-            ON CONFLICT (message_id, content) DO UPDATE SET content = content RETURNING id";
+            ON CONFLICT (content) DO UPDATE SET content = content RETURNING id";
         let row: Saved = self
             .sql
             .exec(
