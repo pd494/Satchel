@@ -4,7 +4,8 @@ name: Eval
 # PR check: a failure here means a case to look at, not a broken build.
 on:
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 19 * * *"
+      timezone: America/Los_Angeles
   workflow_dispatch:
 
 permissions:
