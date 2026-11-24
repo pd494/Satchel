@@ -206,7 +206,9 @@ impl Harness {
                 break text;
             }
 
-            let results = self.run_tools(&calls, message, &links, &mut saved).await?;
+            let results = self
+                .run_tools(&calls, message, earlier, &links, &mut saved)
+                .await?;
             let failed = results.iter().any(|result| result.starts_with("error"));
             // A `react` call ends the model's reply, since a tapback means it has nothing to say.
             let reacted = calls
@@ -228,7 +230,7 @@ impl Harness {
         match tapback {
             _ if message.event_id.starts_with(REMINDER_EVENT_PREFIX) => Ok(text),
             Some(emoji) if Self::can_react(emoji, &links, saved) => {
-                self.linq.react(&message.event_id, emoji).await?;
+                self.react(message, earlier, emoji).await?;
                 Ok(String::new())
             }
             Some(_) => Ok(String::new()),
@@ -242,6 +244,7 @@ impl Harness {
         &self,
         calls: &Calls,
         message: &UnansweredMessage,
+        earlier: &[UnansweredMessage],
         links: &[Link],
         saved: &mut bool,
     ) -> Result<Vec<String>> {
@@ -270,13 +273,26 @@ impl Harness {
                         .to_string()
                 }
                 Ok(ToolCall::React { emoji }) => {
-                    self.linq.react(&message.event_id, *emoji).await?;
+                    self.react(message, earlier, *emoji).await?;
                     "ok".to_string()
                 }
                 Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
             };
         }
         Ok(results)
+    }
+
+    /// A tapback answers the whole burst. It goes on every text in it.
+    async fn react(
+        &self,
+        message: &UnansweredMessage,
+        earlier: &[UnansweredMessage],
+        emoji: Tapback,
+    ) -> Result<()> {
+        for text in earlier.iter().chain([message]) {
+            self.linq.react(&text.event_id, emoji).await?;
+        }
+        Ok(())
     }
 
     /// Saves each URL, or adds `note` to a URL saved before, then reads and embeds it. Without
