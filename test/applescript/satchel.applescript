@@ -46,7 +46,10 @@ on allCases()
 		{"save-docx", "file:~/Pictures/satchel-test/sample-lease.docx", "tapback", ""}, ¬
 		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
 		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
-		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Croissant||what's the weather in sf today?", "text-only", ""}, ¬
+		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
+		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
+		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬
+		{"file-question-not-saved", "file:~/Pictures/satchel-test/sample-photo.jpg||what's in this picture?", "text-only", ""}, ¬
 		{"burst-link-small-talk", "https://en.wikipedia.org/wiki/Sea_otter||lol", "tapback", ""}, ¬
 		{"link-then-words", "https://letterboxd.com/film/parasite-2019/", "tapback", ""}, ¬
 		{"words-after", "that's the movie for friday night", "tapback", ""}, ¬
@@ -130,13 +133,15 @@ end doctor
 on runCase(satchelNumber, caseText, wantKind, wantText)
 	set startDate to do shell script "echo $(( ($(date +%s) - 978307200) * 1000000000 ))"
 	if caseText is not "" then
-		if caseText starts with "file:~/" then
-			set toSend to {POSIX file ((POSIX path of (path to home folder)) & (text 8 thru -1 of caseText))}
-		else
-			-- "first||second" sends two texts one second apart, inside one debounce window.
-			set AppleScript's text item delimiters to "||"
-			set toSend to text items of caseText
-		end if
+		-- "first||second" sends two texts one second apart, inside one debounce window.
+		-- A part that starts with "file:~/" sends that file.
+		set AppleScript's text item delimiters to "||"
+		set toSend to {}
+		repeat with part in text items of caseText
+			set part to part as text
+			if part starts with "file:~/" then set part to POSIX file ((POSIX path of (path to home folder)) & (text 8 thru -1 of part))
+			set end of toSend to part
+		end repeat
 		tell application "Messages"
 			set toSatchel to participant satchelNumber of (first account whose service type = iMessage)
 			repeat with i from 1 to count of toSend
@@ -165,6 +170,7 @@ on runCase(satchelNumber, caseText, wantKind, wantText)
 		if wantKind is "attachment" and attachments > 0 then set passed to true
 		if wantKind is "text" and matches > 0 then set passed to true
 		if wantKind is "text-only" and matches > 0 then set passed to (likes = 0)
+		if wantKind is "both" and matches > 0 and likes > 0 then set passed to true
 		if passed or (wantKind is "text-only" and matches > 0) then exit repeat
 	end repeat
 	set repliesQuery to "SELECT group_concat(CASE WHEN m.associated_message_type = " & likeTapback & ¬

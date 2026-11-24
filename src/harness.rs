@@ -4,6 +4,7 @@ use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
+use serde_json::json;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -93,7 +94,7 @@ impl Harness {
         let mut wake = self.db.next_due()?;
         loop {
             let burst = Self::next_turn(self.db.unanswered()?);
-            let Some((message, earlier)) = burst.split_last() else {
+            let Some(message) = burst.last() else {
                 break;
             };
             // A text that arrived while this alarm ran waits out its own debounce.
@@ -117,7 +118,7 @@ impl Harness {
             if typing {
                 self.show_typing(space_id, true).await;
             }
-            let reply = self.response_for(message, earlier, last_try).await;
+            let reply = self.response_for(&burst, last_try).await;
             if typing && !matches!(&reply, Ok(text) if !text.is_empty()) {
                 self.show_typing(space_id, false).await;
             }
@@ -153,20 +154,17 @@ impl Harness {
         unanswered
     }
 
-    /// Returns the stored unsent reply, or makes and stores a new one. The reply is empty if
-    /// the model only reacted. The earlier messages of the burst are marked answered.
-    async fn response_for(
-        &self,
-        message: &UnansweredMessage,
-        earlier: &[UnansweredMessage],
-        last_try: bool,
-    ) -> Result<String> {
+    /// Returns the stored unsent reply, or makes and stores a new one. The reply belongs to the
+    /// last text of the burst and is empty if the model only reacted. The other texts are marked
+    /// answered.
+    async fn response_for(&self, burst: &[UnansweredMessage], last_try: bool) -> Result<String> {
+        let (message, earlier) = burst.split_last().expect("a burst has a text");
         if let Some(text) = &message.response {
             return Ok(text.clone());
         }
 
         let text = if !last_try {
-            self.run_agent(message, earlier).await?
+            self.run_agent(burst).await?
         } else if message.event_id.starts_with(REMINDER_EVENT_PREFIX) {
             message.content.clone()
         } else {
@@ -183,37 +181,49 @@ impl Harness {
     /// Runs the model on the burst until it stops calling tools or reacts. Text that comes
     /// with tool calls is ignored, since the model writes its reply after it sees the results.
     /// A tapback is the whole reply, so the text is empty.
-    async fn run_agent(
-        &self,
-        message: &UnansweredMessage,
-        earlier: &[UnansweredMessage],
-    ) -> Result<String> {
+    async fn run_agent(&self, burst: &[UnansweredMessage]) -> Result<String> {
+        let message = burst.last().expect("a burst has a text");
         let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
-        let texts = earlier.iter().chain([message]);
-        let links: Vec<Link> = texts.flat_map(|s| Link::find_all(&s.content)).collect();
-        let state = self.prompt_context()?;
-        let mut context = Agent::context(&history, &state);
-        let mut saved = false;
+        let mut context = Agent::context(&history, &self.prompt_context()?);
+
+        // Satchel saves the links and files the user sent to keep, and reads the ones they only
+        // asked about. The model sees this as a `save` call it made, so it knows what was saved.
+        let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
+        let links = texts.iter().flat_map(|text| Link::find_all(text)).collect();
+        let (links, asked) = self.agent.keep(&texts, links).await?;
+        let saved = !links.is_empty();
+        if saved || !asked.is_empty() {
+            let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
+            let mut result = "Nothing saved.".to_string();
+            if saved {
+                result = self.save(message.id, &urls, None, &links).await?;
+                self.react(burst, Tapback::Like).await?;
+            }
+            for link in &asked {
+                let (text, _) = self.reader.read(&link.url, None, &self.agent).await;
+                result += &format!(
+                    "\nNot saved, since the user only asked about it: {}: {text}",
+                    link.url
+                );
+            }
+            result += "\n\nAnswer every other question or request in the newest messages in text.";
+            let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
+            context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
+            Agent::push_results(&mut context, vec![result]);
+        }
 
         let mut step = 0;
         let text = loop {
             let (text, calls) = self
                 .agent
-                .run_model(
-                    &mut context,
-                    &message.event_id,
-                    step,
-                    step == 0 && !links.is_empty(),
-                )
+                .run_model(&mut context, &message.event_id, step)
                 .await?;
             step += 1;
             if calls.is_empty() {
                 break text;
             }
 
-            let results = self
-                .run_tools(&calls, message, earlier, &links, &mut saved)
-                .await?;
+            let results = self.run_tools(&calls, burst, &links, saved).await?;
             let failed = results.iter().any(|result| result.starts_with("error"));
             // A `react` call ends the model's reply, since a tapback means it has nothing to say.
             let reacted = calls
@@ -225,20 +235,20 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        if history.len() == earlier.len() + 1 {
+        if history.len() == burst.len() {
             return Ok(GREETING.to_string());
         }
-        // The model sometimes writes a tapback as text, such as "👍". Send it as a tapback, with
-        // the same rule as `react`. A denied one is dropped: a "👍" text would claim a save. A
+        // The model sometimes writes a tapback as text, such as "👍". Send it as a tapback. A
         // reminder turn has no Linq message to react to.
         let tapback = serde_json::from_value::<Tapback>(text.clone().into()).ok();
         match tapback {
             _ if message.event_id.starts_with(REMINDER_EVENT_PREFIX) => Ok(text),
-            Some(emoji) if Self::can_react(emoji, &links, saved) => {
-                self.react(message, earlier, emoji).await?;
+            Some(emoji) => {
+                if !saved {
+                    self.react(burst, emoji).await?;
+                }
                 Ok(String::new())
             }
-            Some(_) => Ok(String::new()),
             None => Ok(text),
         }
     }
@@ -248,57 +258,34 @@ impl Harness {
     async fn run_tools(
         &self,
         calls: &Calls,
-        message: &UnansweredMessage,
-        earlier: &[UnansweredMessage],
+        burst: &[UnansweredMessage],
         links: &[Link],
-        saved: &mut bool,
+        saved: bool,
     ) -> Result<Vec<String>> {
-        // Saves run first. A 👍 then goes out only after a save works.
-        let mut order: Vec<usize> = (0..calls.len()).collect();
-        order.sort_by_key(|&i| !matches!(calls[i], Ok(ToolCall::Save { .. })));
-        let mut results = vec![String::new(); calls.len()];
-        for i in order {
-            results[i] = match &calls[i] {
+        let message_id = burst.last().expect("a burst has a text").id;
+        let mut results = Vec::new();
+        for call in calls {
+            results.push(match call {
                 Err(error) => format!("error: {error}"),
                 Ok(ToolCall::Save { urls, note }) => {
-                    let result = self.save(message.id, urls, note.as_deref(), links).await?;
-                    // Only a link from these texts unlocks 👍, not an older one.
-                    let current = |url: &String| {
-                        Link::find_all(url)
-                            .iter()
-                            .any(|w| links.iter().any(|l| l.url == w.url))
-                    };
-                    if result.starts_with("ok") && urls.iter().any(current) {
-                        *saved = true;
-                    }
-                    result
+                    self.save(message_id, urls, note.as_deref(), links).await?
                 }
-                Ok(ToolCall::React { emoji }) if !Self::can_react(*emoji, links, *saved) => {
-                    if *saved {
-                        "error: after a save, the only tapback is 👍".to_string()
-                    } else {
-                        "error: save the links or files from the newest message before reacting with 👍"
-                            .to_string()
-                    }
-                }
+                // A saved burst already has its 👍.
                 Ok(ToolCall::React { emoji }) => {
-                    self.react(message, earlier, *emoji).await?;
+                    if !saved {
+                        self.react(burst, *emoji).await?;
+                    }
                     "ok".to_string()
                 }
-                Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
-            };
+                Ok(ToolCall::Remind(remind)) => self.remind(remind, message_id)?,
+            });
         }
         Ok(results)
     }
 
     /// A tapback answers the whole burst. It goes on every text in it.
-    async fn react(
-        &self,
-        message: &UnansweredMessage,
-        earlier: &[UnansweredMessage],
-        emoji: Tapback,
-    ) -> Result<()> {
-        for text in earlier.iter().chain([message]) {
+    async fn react(&self, burst: &[UnansweredMessage], emoji: Tapback) -> Result<()> {
+        for text in burst {
             self.linq.react(&text.event_id, emoji).await?;
         }
         Ok(())
@@ -350,10 +337,10 @@ impl Harness {
             items.push(format!("- note: {note}"));
         }
 
-        Ok(format!(
-            "ok. Search text:\n{}\n\nIf the user asked anything else, answer it in text now, and do not react.",
-            items.join("\n")
-        ))
+        if items.is_empty() {
+            return Ok("error: nothing to save".to_string());
+        }
+        Ok(format!("ok. Search text:\n{}", items.join("\n")))
     }
 
     fn remind(&self, remind: &Remind, message_id: i64) -> Result<String> {
@@ -472,14 +459,5 @@ impl Harness {
                 .await?;
         }
         Ok(())
-    }
-
-    /// A 👍 tells the user their links or files were saved. It waits for a save, and after a
-    /// save it is the only tapback.
-    fn can_react(emoji: Tapback, links: &[Link], saved: bool) -> bool {
-        match emoji {
-            Tapback::Like => links.is_empty() || saved,
-            _ => !saved,
-        }
     }
 }

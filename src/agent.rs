@@ -1,4 +1,5 @@
 use crate::db::Row;
+use crate::media::Link;
 use crate::tools::ToolCall;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
@@ -10,6 +11,10 @@ use worker::web_sys::Blob;
 use worker::{Env, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
+/// Decides which links in a burst the user sent to keep. It returns a choice, not text.
+const CLEF: &str = "@cf/cloudflare/clef";
+const KEEP: &str = "Keep it. The user sent the link alone, with a comment or note about it, with a message about something else, or asked to save it or be reminded of it, even if they also ask a question about it.";
+const ASK: &str = "Only answer a question about this link, such as whether it is legit, what it says, who is in it, or what is similar to it. The user did not ask to keep it.";
 const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
 /// The most characters one embedding reads. The model reads about 8,000 tokens.
 const MAX_TEXT: usize = 4_000;
@@ -78,22 +83,15 @@ impl Agent {
 
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
     /// tool calls. The AI Gateway log gets the message's `event_id` and the tool loop `step`.
-    /// With `must_save`, the model has to call `save` before anything else.
     pub async fn run_model(
         &self,
         context: &mut Vec<Value>,
         event_id: &str,
         step: usize,
-        must_save: bool,
     ) -> Result<(String, Calls)> {
         let input = json!({
             "messages": context,
             "tools": self.tools,
-            "tool_choice": if must_save {
-                json!({ "type": "function", "function": { "name": "save" } })
-            } else {
-                json!("auto")
-            },
             "chat_template_kwargs": { "enable_thinking": false },
         });
         let mut metadata = json!({ "event_id": event_id, "step": step });
@@ -112,6 +110,28 @@ impl Agent {
         let calls = Self::split_calls(&mut response);
         context.push(response);
         Ok((text, calls))
+    }
+
+    /// Splits `links` into the ones the user sent to keep and the ones they only asked about.
+    pub async fn keep(&self, texts: &[&str], links: Vec<Link>) -> Result<(Vec<Link>, Vec<Link>)> {
+        if links.is_empty() {
+            return Ok((links, Vec::new()));
+        }
+        let questions: serde_json::Map<String, Value> = links
+            .iter()
+            .enumerate()
+            .map(|(i, link)| {
+                let instructions = format!("The user texted these messages to a save-for-later assistant. What does the user want done with the link {}?", link.url);
+                let question = json!({ "type": "choice", "instructions": instructions, "criteria": { "keep": KEEP, "ask": ASK } });
+                (format!("link{i}"), question)
+            })
+            .collect();
+        let input =
+            json!({ "model": "clef", "state": { "messages": texts }, "questions": questions });
+        let options = json!({ "gateway": { "id": "satchel" } });
+        let output = self.call(CLEF, &input, Some(&options)).await?;
+        let mut asks = (0..).map(|i| output["answers"][format!("link{i}")]["choice"] == "ask");
+        Ok(links.into_iter().partition(|_| asks.next() != Some(true)))
     }
 
     /// Gemma sometimes packs several calls into one, as JSON objects back to back, or sends
