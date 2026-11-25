@@ -46,6 +46,7 @@ on allCases()
 		{"save-docx", "file:~/Pictures/satchel-test/sample-lease.docx", "tapback", ""}, ¬
 		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
 		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
+		{"search-recipe", "send me that turkey burger recipe again", "text", "allrecipes.com"}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬
@@ -71,6 +72,10 @@ on allCases()
 		{"remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"}, ¬
 		{"remind-set", "pst", "text-only", ""}, ¬
 		{"remind-correct", "no, make it 10 am", "text-only", ""}, ¬
+		{"remind-change-later", "change my stretch reminder to 11 am", "text-only", ""}, ¬
+		{"remind-cancel", "cancel my stretch reminder", "text-only", ""}, ¬
+		{"zone-move", "i moved to nyc", "text-only", ""}, ¬
+		{"zone-move-back", "actually i moved back to LA", "text-only", ""}, ¬
 		{"remind-fires", "", "text-only", "water"}}
 end allCases
 

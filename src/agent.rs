@@ -167,7 +167,6 @@ impl Agent {
         calls
     }
 
-    /// Embeds `text` (and optional media) as little-endian `f32` bytes.
     /// The file as a `data:` URL, the way the models take images and video.
     pub fn data_url(mime: &str, bytes: &[u8]) -> String {
         let mut url = format!("data:{mime};base64,");
@@ -175,8 +174,9 @@ impl Agent {
         url
     }
 
+    /// Embeds `text` (and optional media) as little-endian `f32` bytes.
     pub async fn embed(&self, text: &str, media: Option<&(String, Vec<u8>)>) -> Result<Vec<u8>> {
-        // The model's document prefix. Queries use `task: search result | query: …`.
+        // The model's document prefix. `embed_query` uses its query prefix.
         let text: String = text.chars().take(MAX_TEXT).collect();
         let mut content =
             vec![json!({ "type": "text", "text": format!("title: none | text: {text}") })];
@@ -184,12 +184,24 @@ impl Agent {
             let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
             content.push(json!({ "type": kind, kind: { "url": Self::data_url(mime, bytes) } }));
         }
+        self.vector(content, None).await
+    }
+
+    /// Embeds a search query, to compare with the vectors from `embed`.
+    pub async fn embed_query(&self, query: &str) -> Result<Vec<u8>> {
+        let text = format!("task: search result | query: {query}");
+        let content = vec![json!({ "type": "text", "text": text })];
+        let options = json!({ "gateway": { "id": "satchel" } });
+        self.vector(content, Some(&options)).await
+    }
+
+    async fn vector(&self, content: Vec<Value>, options: Option<&Value>) -> Result<Vec<u8>> {
         let input = json!({
             "messages": [[{ "role": "user", "content": content }]],
             "dimensions": DIMENSIONS,
             "encoding_format": "base64",
         });
-        let output = self.call(EMBED_MODEL, &input, None).await?;
+        let output = self.call(EMBED_MODEL, &input, options).await?;
         let vector = output["data"][0]["embedding"]
             .as_str()
             .ok_or("the embedding is missing")?;

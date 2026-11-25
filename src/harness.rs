@@ -1,8 +1,8 @@
 use crate::agent::Agent;
-use crate::db::{Db, Schedule, UnansweredMessage};
+use crate::db::{Db, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
-use crate::tools::{Remind, Tapback, ToolCall};
+use crate::tools::{Remind, Search, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -257,6 +257,9 @@ impl Harness {
                         "ok".to_string()
                     }
                     Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
+                    Ok(ToolCall::Search(search)) => self.search(search).await?,
+                    Ok(ToolCall::Cancel { id }) => self.cancel(*id)?,
+                    Ok(ToolCall::TimeZone { time_zone }) => self.set_time_zone(time_zone)?,
                 });
             }
             let failed = results.iter().any(|result| result.starts_with("error"));
@@ -355,28 +358,29 @@ impl Harness {
             return Ok("error: that time has already passed".to_string());
         }
 
-        let (id, reply) = match self.db.reminder_named(&remind.note)? {
+        // A new reminder with the same note as a pending one gets that row back, and moves it.
+        let id = match remind.id {
+            Some(id) => id,
+            None => self
+                .db
+                .insert_saved(message_id, &Note(remind.note.clone()))?,
+        };
+        let reply = match self.db.reminder(id)? {
             Some(old) => {
                 let zone = remind
                     .at_zone
                     .clone()
                     .or(saved_zone)
                     .unwrap_or(TimeZone::UTC);
-                (
-                    old.id,
-                    format!(
-                        "ok, moved the earlier \"{}\" reminder from {} to {}. Tell the user you changed it.",
-                        remind.note,
-                        Self::local_time(&old.schedule, &zone)?,
-                        Self::local_time(&remind.schedule, &zone)?
-                    ),
+                format!(
+                    "ok, moved the \"{}\" reminder from {} to {}. Tell the user you changed it.",
+                    old.content,
+                    Self::local_time(old.schedule.due_at, &zone)?,
+                    Self::local_time(remind.schedule.due_at, &zone)?
                 )
             }
-            None => (
-                self.db
-                    .insert_saved(message_id, &Note(remind.note.clone()))?,
-                "ok".to_string(),
-            ),
+            None if remind.id.is_some() => return Ok(Self::not_pending(id)),
+            None => "ok".to_string(),
         };
 
         self.db.set_reminder(id, Some(&remind.schedule))?;
@@ -396,9 +400,57 @@ impl Harness {
         ))
     }
 
-    fn local_time(schedule: &Schedule, zone: &TimeZone) -> Result<String> {
-        Ok(schedule
-            .due(zone)?
+    fn cancel(&self, id: i64) -> Result<String> {
+        let Some(reminder) = self.db.reminder(id)? else {
+            return Ok(Self::not_pending(id));
+        };
+        self.db.set_reminder(id, None)?;
+        Ok(format!(
+            "ok, canceled the \"{}\" reminder. Tell the user.",
+            reminder.content
+        ))
+    }
+
+    fn not_pending(id: i64) -> String {
+        format!("error: no pending reminder has id {id}. It already fired or was canceled.")
+    }
+
+    fn set_time_zone(&self, name: &str) -> Result<String> {
+        let zone = match TimeZone::get(name) {
+            Ok(zone) => zone,
+            Err(error) => return Ok(format!("error: {error}")),
+        };
+        self.db.set_time_zone(zone.iana_name().unwrap_or(name))?;
+        Ok(format!("ok. {}", Self::now_line(Some(&zone))))
+    }
+
+    /// Finds saved items for the model. Dates are read in the saved time zone, or UTC.
+    async fn search(&self, search: &Search) -> Result<String> {
+        let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
+        let (after, before) = match search.bounds(&zone) {
+            Ok(bounds) => bounds,
+            Err(error) => return Ok(format!("error: {error}")),
+        };
+        let query = search.query.as_deref().map(str::trim).unwrap_or_default();
+        let limit = query.is_empty().then_some(Search::RESULTS as i64);
+        let rows = self.db.searchable(after, before, limit)?;
+        if rows.is_empty() {
+            return Ok("No saved items match.".to_string());
+        }
+        let rows = if query.is_empty() {
+            rows
+        } else {
+            let vector = self.agent.embed_query(query).await?;
+            Search::rank(query, &vector, rows)
+        };
+        let lines: Vec<String> = rows.iter().map(|row| Search::line(row, &zone)).collect();
+        Ok(lines.join("\n"))
+    }
+
+    fn local_time(at: i64, zone: &TimeZone) -> Result<String> {
+        Ok(Timestamp::from_second(at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone())
             .strftime("%a %b %-d %-I:%M %p %Z")
             .to_string())
     }
@@ -411,8 +463,18 @@ impl Harness {
             let zone = time_zone.unwrap_or(TimeZone::UTC);
             text.push_str("\nPending reminders:");
             for reminder in reminders {
-                let due = Self::local_time(&reminder.schedule, &zone)?;
-                text.push_str(&format!("\n- \"{}\" ({due})", reminder.content));
+                let schedule = &reminder.schedule;
+                let mut when = Self::local_time(schedule.due_at, &zone)?;
+                if let Some(repeat) = schedule.repeat {
+                    when.push_str(&format!(", repeat {repeat}"));
+                }
+                if let Some(until_at) = schedule.until_at {
+                    when.push_str(&format!(", until {}", Self::local_time(until_at, &zone)?));
+                }
+                text.push_str(&format!(
+                    "\n- id {}: \"{}\" ({when})",
+                    reminder.id, reminder.content
+                ));
             }
         }
         Ok(text)
@@ -427,10 +489,34 @@ impl Harness {
         line
     }
 
-    /// Sends each part of `text` as its own message. Linq requires a link or media part to be
-    /// the only part.
+    /// Replaces each ref to a saved link or file, such as `[12]`, with its URL. The model never
+    /// writes a saved URL itself. Other brackets stay as they are.
+    fn expand_refs(&self, text: &str) -> Result<String> {
+        let mut expanded = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find('[') {
+            expanded.push_str(&rest[..start]);
+            rest = &rest[start + 1..];
+            let end = rest.find(']').unwrap_or(0);
+            let id = Some(&rest[..end])
+                .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|digits| digits.parse().ok());
+            match id.map(|id| self.db.url(id)).transpose()?.flatten() {
+                Some(url) => {
+                    expanded.push_str(&url);
+                    rest = &rest[end + 1..];
+                }
+                None => expanded.push('['),
+            }
+        }
+        expanded.push_str(rest);
+        Ok(expanded)
+    }
+
+    /// Sends each part of `text` as its own message, after `expand_refs`. Linq requires a link
+    /// or media part to be the only part.
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
-        let (rest, urls) = Link::split(text);
+        let (rest, urls) = Link::split(&self.expand_refs(text)?);
         let mut parts = Vec::new();
         if !rest.is_empty() {
             parts.push(Part::Text(rest));

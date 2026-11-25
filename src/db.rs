@@ -67,6 +67,25 @@ struct NextDue {
     due_at: Option<i64>,
 }
 
+/// A saved item that search can rank: it has search text and an embedding.
+#[derive(Deserialize)]
+pub struct Searchable {
+    pub id: i64,
+    pub media: String,
+    pub content: String,
+    /// The search text from `set_read`.
+    pub description: String,
+    pub created_at: i64,
+    /// Little-endian `f32` bytes from `Agent::embed`.
+    #[serde(with = "serde_bytes")]
+    pub vector: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct Content {
+    content: String,
+}
+
 #[derive(Deserialize)]
 pub struct Saved {
     pub id: i64,
@@ -175,13 +194,12 @@ impl Db {
             .to_array()
     }
 
-    /// Returns the newest pending reminder with this note, ignoring case.
-    pub fn reminder_named(&self, note: &str) -> Result<Option<Reminder>> {
-        let select_query =
-            format!("{REMINDERS} AND r.content = ? COLLATE NOCASE ORDER BY r.id DESC LIMIT 1");
+    /// Returns the pending reminder `id`, if there is one.
+    pub fn reminder(&self, id: i64) -> Result<Option<Reminder>> {
+        let select_query = format!("{REMINDERS} AND r.id = ?");
         let mut rows: Vec<Reminder> = self
             .sql
-            .exec(&select_query, Some(vec![note.into()]))?
+            .exec(&select_query, Some(vec![id.into()]))?
             .to_array()?;
         Ok(rows.pop())
     }
@@ -343,5 +361,35 @@ impl Db {
             )?
             .one()?;
         Ok(row.id)
+    }
+
+    /// Returns up to `limit` items with search text, saved at or after `after` and before
+    /// `before`, newest first. A `None` limit returns them all.
+    pub fn searchable(
+        &self,
+        after: Option<i64>,
+        before: Option<i64>,
+        limit: Option<i64>,
+    ) -> Result<Vec<Searchable>> {
+        let select_query = "SELECT id, media, content, description, created_at, vector \
+            FROM saved WHERE vector IS NOT NULL AND description IS NOT NULL \
+            AND (?1 IS NULL OR created_at >= ?1) AND (?2 IS NULL OR created_at < ?2) \
+            ORDER BY created_at DESC, id DESC LIMIT coalesce(?3, -1)";
+        self.sql
+            .exec(
+                select_query,
+                Some(vec![after.into(), before.into(), limit.into()]),
+            )?
+            .to_array()
+    }
+
+    /// Returns the URL of saved link or file `id`. A note has none.
+    pub fn url(&self, id: i64) -> Result<Option<String>> {
+        let select_query = "SELECT content FROM saved WHERE id = ? AND media != 'note'";
+        let mut rows: Vec<Content> = self
+            .sql
+            .exec(select_query, Some(vec![id.into()]))?
+            .to_array()?;
+        Ok(rows.pop().map(|row| row.content))
     }
 }

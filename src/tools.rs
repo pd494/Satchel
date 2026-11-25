@@ -1,7 +1,9 @@
-use crate::db::Schedule;
+use crate::db::{Schedule, Searchable};
 use jiff::{civil::DateTime, tz::TimeZone, SignedDuration, Span, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::cmp::Reverse;
+use worker::Url;
 
 #[derive(Clone, Copy, Deserialize)]
 pub enum Tapback {
@@ -31,12 +33,137 @@ pub enum ToolCall {
         note: Option<String>,
     },
     Remind(Remind),
+    Search(Search),
+    Cancel {
+        id: i64,
+    },
+    #[serde(rename = "time_zone")]
+    TimeZone {
+        time_zone: String,
+    },
+}
+
+/// The reciprocal rank fusion constant. A larger value weighs the top ranks less.
+const RRF_K: f32 = 60.0;
+/// The most characters of search text one result shows.
+const SNIPPET: usize = 300;
+
+#[derive(Deserialize)]
+pub struct Search {
+    pub query: Option<String>,
+    after: Option<DateTime>,
+    before: Option<DateTime>,
+}
+
+impl Search {
+    /// The most results one search returns.
+    pub const RESULTS: usize = 10;
+
+    /// `after` and `before` as Unix seconds, read as local times in `zone`.
+    pub fn bounds(&self, zone: &TimeZone) -> Result<(Option<i64>, Option<i64>), String> {
+        let second = |at: Option<DateTime>| {
+            at.map(|at| zone.to_timestamp(at).map(|at| at.as_second()))
+                .transpose()
+                .map_err(|error| error.to_string())
+        };
+        Ok((second(self.after)?, second(self.before)?))
+    }
+
+    /// Ranks `rows` by how many query words they contain and by how close their vector is to
+    /// `query_vector`, then fuses the two ranks. Returns the best `RESULTS`. Ties keep the
+    /// newer row first.
+    pub fn rank(query: &str, query_vector: &[u8], rows: Vec<Searchable>) -> Vec<Searchable> {
+        let words: Vec<String> = Self::words(query).collect();
+        let query_vector = Self::floats(query_vector);
+        let hits: Vec<usize> = rows
+            .iter()
+            .map(|row| {
+                let text: Vec<String> = Self::words(&row.description).collect();
+                words
+                    .iter()
+                    .filter(|word| text.iter().any(|seen| seen.starts_with(word.as_str())))
+                    .count()
+            })
+            .collect();
+        let closeness: Vec<f32> = rows
+            .iter()
+            .map(|row| Self::cosine(&query_vector, &Self::floats(&row.vector)))
+            .collect();
+
+        let mut by_words: Vec<usize> = (0..rows.len()).filter(|&i| hits[i] > 0).collect();
+        by_words.sort_by_key(|&i| Reverse(hits[i]));
+        let mut by_meaning: Vec<usize> = (0..rows.len()).collect();
+        by_meaning.sort_by(|&a, &b| closeness[b].total_cmp(&closeness[a]));
+
+        let mut scores = vec![0.0; rows.len()];
+        for ranked in [by_words, by_meaning] {
+            for (rank, i) in ranked.into_iter().enumerate() {
+                scores[i] += 1.0 / (RRF_K + rank as f32 + 1.0);
+            }
+        }
+        let mut scored: Vec<(f32, Searchable)> = scores.into_iter().zip(rows).collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored
+            .into_iter()
+            .take(Self::RESULTS)
+            .map(|(_, row)| row)
+            .collect()
+    }
+
+    /// One result for the model. A link or file starts with its ref, such as `[12]`. A note
+    /// has no ref, since its text is the whole item.
+    pub fn line(row: &Searchable, zone: &TimeZone) -> String {
+        let saved = Timestamp::from_second(row.created_at)
+            .map(|at| {
+                at.to_zoned_datetime(zone.clone())
+                    .strftime("%a %b %-d %Y")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let snippet: String = row
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(SNIPPET)
+            .collect();
+        if row.media == "note" {
+            return format!("- note, saved {saved}: {snippet}");
+        }
+        let site = match (row.media.as_str(), Url::parse(&row.content)) {
+            ("link", Ok(url)) => format!(" from {}", url.host_str().unwrap_or_default()),
+            _ => String::new(),
+        };
+        format!(
+            "- [{}] {}{site}, saved {saved}: {snippet}",
+            row.id, row.media
+        )
+    }
+
+    fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() > 2)
+            .map(str::to_lowercase)
+    }
+
+    fn floats(bytes: &[u8]) -> Vec<f32> {
+        let (chunks, _) = bytes.as_chunks::<4>();
+        chunks.iter().copied().map(f32::from_le_bytes).collect()
+    }
+
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        dot / (norm(a) * norm(b)).max(f32::EPSILON)
+    }
 }
 
 const MIN_REPEAT: SignedDuration = SignedDuration::from_mins(5);
 
 #[derive(Deserialize)]
 struct RawRemind {
+    id: Option<i64>,
     note: String,
     at: Option<DateTime>,
     after: Option<Span>,
@@ -48,6 +175,8 @@ struct RawRemind {
 #[derive(Deserialize)]
 #[serde(try_from = "RawRemind")]
 pub struct Remind {
+    /// The pending reminder to move. `None` sets a new one.
+    pub id: Option<i64>,
     pub note: String,
     /// The zone of a clock-time reminder (`at`). `None` for a duration (`after`).
     pub at_zone: Option<TimeZone>,
@@ -96,6 +225,7 @@ impl TryFrom<RawRemind> for Remind {
         }
 
         Ok(Self {
+            id: raw.id,
             note: raw.note,
             at_zone: raw.at.and(time_zone),
             schedule: Schedule {
@@ -136,15 +266,39 @@ impl ToolCall {
                 }},
             }},
             { "type": "function", "function": {
+                "name": "search",
+                "description": "Find saved links, files, and notes. Returns up to 10 results, best first. A link or file starts with its ref, such as [12].",
+                "parameters": { "type": "object", "properties": {
+                    "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"austin apartment\". Omit it to list the newest saves." },
+                    "after": { "type": "string", "description": "Only items saved at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },
+                    "before": { "type": "string", "description": "Only items saved before this local date and time, such as 2026-11-23T00:00:00. Omit it unless the user names a time." },
+                }},
+            }},
+            { "type": "function", "function": {
                 "name": "remind",
-                "description": "Set a reminder.",
+                "description": "Set a reminder, or move a pending one.",
                 "parameters": { "type": "object", "required": ["note"], "properties": {
+                    "id": { "type": "integer", "description": "To move a pending reminder: its id from the \"Pending reminders\" list. Its note stays the same. Omit it to set a new reminder." },
                     "note": { "type": "string", "description": "What to remind the user about, in their words." },
                     "at": { "type": "string", "description": "For a clock time or date (\"at 3\", \"friday 9 am\"): the local date and time to fire, no offset, such as 2026-11-24T09:00:00. Send exactly one of `at` or `after`." },
                     "after": { "type": "string", "description": "For an amount of time from now (\"in 1 minute\", \"in 3 months\"): an ISO 8601 duration. PT30S = 30 seconds, PT1M = 1 minute, PT2H = 2 hours, P3D = 3 days, P3M = 3 months. Send exactly one of `at` or `after`." },
                     "time_zone": { "type": "string", "description": "The user's IANA time zone, such as America/Los_Angeles. Required with `at` or `until`; omit for `after` if unknown." },
                     "repeat": { "type": "string", "description": "ISO 8601 duration between repeats, counted from each due time. P1D = daily, P1W = weekly, P2W = every 2 weeks, P1M = monthly, P1Y = yearly. The shortest repeat is PT5M. Omit for a one-time reminder." },
                     "until": { "type": "string", "description": "For a repeating reminder: the last local date and time it can fire, in `time_zone`, such as 2026-12-31T23:59:00. For \"5 times\", use the time of the fifth fire. Omit to repeat forever." },
+                }},
+            }},
+            { "type": "function", "function": {
+                "name": "cancel",
+                "description": "Cancel a pending reminder.",
+                "parameters": { "type": "object", "required": ["id"], "properties": {
+                    "id": { "type": "integer", "description": "Its id from the \"Pending reminders\" list." },
+                }},
+            }},
+            { "type": "function", "function": {
+                "name": "time_zone",
+                "description": "Save the user's time zone when they tell you where they live or that they moved, with no reminder. Returns the new \"Now:\" line.",
+                "parameters": { "type": "object", "required": ["time_zone"], "properties": {
+                    "time_zone": { "type": "string", "description": "An IANA time zone, such as America/New_York." },
                 }},
             }},
         ])
