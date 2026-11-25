@@ -242,6 +242,14 @@ impl Harness {
             }
         }
 
+        // URLs the model may write: ones the user sent, or a due reminder holds. A saved item
+        // from search goes by its ref.
+        let chat_urls: HashSet<String> = history
+            .iter()
+            .filter(|row| row.role == "user")
+            .flat_map(|row| Self::urls(&row.content))
+            .collect();
+
         let mut step = 0;
         let text = loop {
             let (text, calls) = self
@@ -253,16 +261,17 @@ impl Harness {
                 break text;
             }
             if calls.is_empty() {
-                let unknown: Vec<String> = Self::refs(&text)
+                let mut unknown: Vec<String> = Self::refs(&text)
                     .into_iter()
                     .filter(|(_, id)| !known.contains(id))
                     .map(|(_, id)| format!("[{id}]"))
                     .collect();
+                unknown.extend(Self::urls(&text).filter(|url| !chat_urls.contains(url)));
                 if unknown.is_empty() {
                     break text;
                 }
                 let note = format!(
-                    "Satchel: {} did not come from a search result. Call `search`, then reply with refs from its results.",
+                    "(Satchel check, not from the user) Your reply was not sent. It has {}, which is not a ref from a search result or a URL the user sent. Write your reply to the user's last message again. Call `search` if you need refs, and send a saved item only by its ref, such as [2].",
                     unknown.join(", ")
                 );
                 context.push(json!({ "role": "user", "content": note }));
@@ -518,6 +527,14 @@ impl Harness {
             line.push_str(" The user's time zone is unknown.");
         }
         line
+    }
+
+    /// The URLs in `text` that `send_text` sends as links.
+    fn urls(text: &str) -> impl Iterator<Item = String> {
+        Link::find_all(text)
+            .into_iter()
+            .filter(|link| !link.suspicious)
+            .map(|link| link.url.to_string())
     }
 
     /// Each ref in `text`, such as `[12]`, with its byte range.

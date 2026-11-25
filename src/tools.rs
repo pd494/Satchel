@@ -132,7 +132,12 @@ impl Search {
             return format!("- note, saved {saved}: {snippet}");
         }
         let site = match (row.media.as_str(), Url::parse(&row.content)) {
-            ("link", Ok(url)) => format!(" from {}", url.host_str().unwrap_or_default()),
+            // A site name, such as "zillow". A domain in the reply would send as a link.
+            ("link", Ok(url)) => {
+                let host = url.host_str().unwrap_or_default();
+                let domain = psl::domain_str(host).unwrap_or(host);
+                format!(" from {}", domain.split('.').next().unwrap_or_default())
+            }
             _ => String::new(),
         };
         format!(

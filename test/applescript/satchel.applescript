@@ -52,6 +52,10 @@ on allCases()
 		{"pile-chat-2", "remember my sister's flight lands at 6", "text-only", ""}, ¬
 		{"pile-chat-3", "ok thanks", "text-only", ""}, ¬
 		{"pile-ask", "wait what was that apartment place by the lake i sent", "text", "zillow.com"}, ¬
+		{"search-today", "what did i save today?", "text", ""}, ¬
+		{"search-list", "send me the stuff i saved yesterday", "text", ""}, ¬
+		{"search-pick", "#2", "text", ""}, ¬
+		{"search-missing", "send me that pottery class link", "text-only", ""}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬
