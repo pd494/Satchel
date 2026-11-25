@@ -69,6 +69,11 @@ on allCases()
 		{"s-find-missing", "send me that pasta recipe", "text-only", ""}, ¬
 		{"s-list", "what have i saved so far", "text", ""}, ¬
 		{"s-pick-after-list", "send me the sourdough one", "text", "wikipedia.org"}, ¬
+		{"c-save-burst", "https://www.tiktok.com/@scout2015/video/6718335390845095173||the corgi doing zoomies lol", "tapback", ""}, ¬
+		{"c-save-inline", "https://www.instagram.com/reel/C0JKhWRx5zv/ thai green curry my aunt makes", "tapback", ""}, ¬
+		{"c-chat", "ugh mondays", "text-only", ""}, ¬
+		{"c-find-corgi", "send me the zoomies dog clip", "text", "tiktok.com"}, ¬
+		{"c-find-curry", "that curry reel", "text", "instagram.com"}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬

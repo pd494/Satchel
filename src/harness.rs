@@ -230,7 +230,14 @@ impl Harness {
             let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
             let mut result = "Nothing saved.".to_string();
             if saved {
-                result = self.save(message.id, &urls, None).await?;
+                // The user's other words in the burst describe its links. Search reads them.
+                let words: Vec<String> = texts
+                    .iter()
+                    .map(|text| Link::split(text).0)
+                    .filter(|rest| !rest.is_empty())
+                    .collect();
+                let note = (!words.is_empty()).then(|| words.join("\n"));
+                result = self.save(message.id, &urls, note.as_deref()).await?;
                 self.react(burst, Tapback::Like).await?;
             }
             // The model sees the photos the user asked about.
@@ -591,7 +598,9 @@ impl Harness {
     /// Sends each part of `text` as its own message, after `expand_refs`. Linq requires a link
     /// or media part to be the only part.
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
-        let (rest, urls) = Link::split(&self.expand_refs(text)?);
+        let (rest, mut urls) = Link::split(&self.expand_refs(text)?);
+        let mut seen = HashSet::new();
+        urls.retain(|url| seen.insert(url.clone()));
         let mut parts = Vec::new();
         if !rest.is_empty() {
             parts.push(Part::Text(rest));
