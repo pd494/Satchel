@@ -184,24 +184,23 @@ impl Agent {
             let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
             content.push(json!({ "type": kind, kind: { "url": Self::data_url(mime, bytes) } }));
         }
-        self.vector(content, None).await
+        self.vector(content).await
     }
 
     /// Embeds a search query, to compare with the vectors from `embed`.
     pub async fn embed_query(&self, query: &str) -> Result<Vec<u8>> {
         let text = format!("task: search result | query: {query}");
-        let content = vec![json!({ "type": "text", "text": text })];
-        let options = json!({ "gateway": { "id": "satchel" } });
-        self.vector(content, Some(&options)).await
+        self.vector(vec![json!({ "type": "text", "text": text })])
+            .await
     }
 
-    async fn vector(&self, content: Vec<Value>, options: Option<&Value>) -> Result<Vec<u8>> {
+    async fn vector(&self, content: Vec<Value>) -> Result<Vec<u8>> {
         let input = json!({
             "messages": [[{ "role": "user", "content": content }]],
             "dimensions": DIMENSIONS,
             "encoding_format": "base64",
         });
-        let output = self.call(EMBED_MODEL, &input, options).await?;
+        let output = self.call(EMBED_MODEL, &input, None).await?;
         let vector = output["data"][0]["embedding"]
             .as_str()
             .ok_or("the embedding is missing")?;

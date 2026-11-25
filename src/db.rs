@@ -62,35 +62,29 @@ const REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at,
     WHERE u.message_id = r.message_id AND u.media != 'note') AS urls \
     FROM saved AS r WHERE r.due_at IS NOT NULL";
 
+/// The columns of `Saved`.
+const SAVED: &str = "id, media, content, context, description, created_at, vector";
+
 #[derive(Deserialize)]
 struct NextDue {
     due_at: Option<i64>,
 }
 
-/// A saved item that search can rank: it has search text and an embedding.
-#[derive(Deserialize)]
-pub struct Searchable {
-    pub id: i64,
-    pub media: String,
-    pub content: String,
-    /// The search text from `set_read`.
-    pub description: String,
-    pub created_at: i64,
-    /// Little-endian `f32` bytes from `Agent::embed`.
-    #[serde(with = "serde_bytes")]
-    pub vector: Vec<u8>,
-}
-
-#[derive(Deserialize)]
-struct Content {
-    content: String,
-}
-
+/// A row of the `saved` table, as `SAVED` selects it.
 #[derive(Deserialize)]
 pub struct Saved {
     pub id: i64,
+    pub media: String,
+    /// The URL of a link or file, or the text of a note.
+    pub content: String,
     /// The user's words about the item.
     pub context: Option<String>,
+    /// The search text from `set_read`.
+    pub description: Option<String>,
+    pub created_at: i64,
+    /// Little-endian `f32` bytes from `Agent::embed`.
+    #[serde(with = "serde_bytes")]
+    pub vector: Option<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -321,13 +315,17 @@ impl Db {
     /// Adds the user's words to the item saved with `content`, unless a retry already
     /// added them. Returns `None` if nothing was saved with `content`.
     pub fn add_context(&self, content: &str, note: Option<&str>) -> Result<Option<Saved>> {
-        let update_query = "UPDATE saved SET context = \
+        let update_query = format!("UPDATE saved SET context = \
             CASE WHEN ?1 IS NULL OR instr(char(10) || context || char(10), char(10) || ?1 || char(10)) > 0 \
             THEN context \
             ELSE COALESCE(context || char(10), '') || ?1 END \
-            WHERE content = ?2 RETURNING id, context";
+            WHERE content = ?2 RETURNING {SAVED}");
         let values = vec![note.into(), content.into()];
-        Ok(self.sql.exec(update_query, Some(values))?.to_array()?.pop())
+        Ok(self
+            .sql
+            .exec(&update_query, Some(values))?
+            .to_array()?
+            .pop())
     }
 
     /// Stores the search text of saved item `id`, as its description, and its embedding.
@@ -342,14 +340,15 @@ impl Db {
     /// the first row.
     pub fn insert_saved(&self, message_id: i64, item: &dyn Media) -> Result<i64> {
         let data = serde_json::to_string(&item.data())?;
-        let insert_query =
+        let insert_query = format!(
             "INSERT INTO saved (message_id, media, content, title, description, data) \
             VALUES (?, ?, ?, ?, ?, ?) \
-            ON CONFLICT (content) DO UPDATE SET message_id = excluded.message_id RETURNING id";
+            ON CONFLICT (content) DO UPDATE SET message_id = excluded.message_id RETURNING {SAVED}"
+        );
         let row: Saved = self
             .sql
             .exec(
-                insert_query,
+                &insert_query,
                 Some(vec![
                     message_id.into(),
                     item.get_type().into(),
@@ -363,43 +362,24 @@ impl Db {
         Ok(row.id)
     }
 
-    /// Returns up to `limit` items with search text, saved at or after `after` and before
-    /// `before`, newest first. A `None` limit returns them all.
-    pub fn searchable(
-        &self,
-        after: Option<i64>,
-        before: Option<i64>,
-        limit: Option<i64>,
-    ) -> Result<Vec<Searchable>> {
-        let select_query = "SELECT id, media, content, description, created_at, vector \
-            FROM saved WHERE vector IS NOT NULL AND description IS NOT NULL \
+    /// Returns the items with search text saved at or after `after` and before `before`,
+    /// newest first.
+    pub fn searchable(&self, after: Option<i64>, before: Option<i64>) -> Result<Vec<Saved>> {
+        let select_query = format!(
+            "SELECT {SAVED} FROM saved WHERE vector IS NOT NULL AND description IS NOT NULL \
             AND (?1 IS NULL OR created_at >= ?1) AND (?2 IS NULL OR created_at < ?2) \
-            ORDER BY created_at DESC, id DESC LIMIT coalesce(?3, -1)";
+            ORDER BY created_at DESC, id DESC"
+        );
         self.sql
-            .exec(
-                select_query,
-                Some(vec![after.into(), before.into(), limit.into()]),
-            )?
+            .exec(&select_query, Some(vec![after.into(), before.into()]))?
             .to_array()
     }
 
-    /// Returns the id of the saved link or file `url`.
-    pub fn saved_id(&self, url: &str) -> Result<Option<i64>> {
-        let select_query = "SELECT id FROM saved WHERE content = ? AND media != 'note'";
-        let mut rows: Vec<Saved> = self
-            .sql
-            .exec(select_query, Some(vec![url.into()]))?
-            .to_array()?;
-        Ok(rows.pop().map(|row| row.id))
-    }
-
-    /// Returns the URL of saved link or file `id`. A note has none.
-    pub fn url(&self, id: i64) -> Result<Option<String>> {
-        let select_query = "SELECT content FROM saved WHERE id = ? AND media != 'note'";
-        let mut rows: Vec<Content> = self
-            .sql
-            .exec(select_query, Some(vec![id.into()]))?
-            .to_array()?;
-        Ok(rows.pop().map(|row| row.content))
+    /// Returns the saved link or file whose id or URL is `key`. A note is never one.
+    pub fn link(&self, key: SqlStorageValue) -> Result<Option<Saved>> {
+        let select_query =
+            format!("SELECT {SAVED} FROM saved WHERE media != 'note' AND ?1 IN (id, content)");
+        let mut rows: Vec<Saved> = self.sql.exec(&select_query, Some(vec![key]))?.to_array()?;
+        Ok(rows.pop())
     }
 }

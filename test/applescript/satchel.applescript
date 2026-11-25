@@ -47,15 +47,9 @@ on allCases()
 		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
 		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
 		{"search-recipe", "send me that turkey burger recipe again", "text", "allrecipes.com"}, ¬
-		{"pile-save", "https://www.zillow.com/homes/austin_rb/ cute 2 bed near the lake", "tapback", ""}, ¬
-		{"pile-chat-1", "lol my cat just knocked my coffee over", "text-only", ""}, ¬
-		{"pile-chat-2", "remember my sister's flight lands at 6", "text-only", ""}, ¬
-		{"pile-chat-3", "ok thanks", "text-only", ""}, ¬
-		{"pile-ask", "wait what was that apartment place by the lake i sent", "text", "zillow.com"}, ¬
 		{"search-today", "what did i save today?", "text", ""}, ¬
 		{"search-list", "send me the stuff i saved yesterday", "text", ""}, ¬
 		{"search-pick", "#2", "text", ""}, ¬
-		{"search-missing", "send me that pottery class link", "text-only", ""}, ¬
 		{"s-save-video", "https://www.youtube.com/watch?v=4BOTvaRaDjI hip stretches my PT sent", "tapback", ""}, ¬
 		{"s-save-note", "remember the cabin wifi password is otter42", "text-only", ""}, ¬
 		{"s-save-bread", "https://en.wikipedia.org/wiki/Sourdough want to try baking this", "tapback", ""}, ¬

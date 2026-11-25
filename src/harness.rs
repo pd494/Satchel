@@ -1,12 +1,11 @@
 use crate::agent::Agent;
-use crate::db::{Db, UnansweredMessage};
+use crate::db::{Db, Row, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Search, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::ops::Range;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -186,30 +185,12 @@ impl Harness {
     async fn run_agent(&self, burst: &[UnansweredMessage]) -> Result<String> {
         let message = burst.last().expect("a burst has a text");
         let mut history = self.db.load_history(message.id, HISTORY_LIMIT)?;
-        // Refs the model may write: ones a search returns, real ones from its own replies, and
-        // the refs of saved links and files in the chat. Each user message shows its refs.
-        let mut known = HashSet::new();
-        for row in &mut history {
-            if row.role == "assistant" {
-                for (_, id) in Self::refs(&row.content) {
-                    if self.db.url(id)?.is_some() {
-                        known.insert(id);
-                    }
-                }
-                continue;
-            }
-            let mut refs = Vec::new();
-            for url in Self::urls(&row.content) {
-                if let Some(id) = self.db.saved_id(&url)? {
-                    known.insert(id);
-                    refs.push(format!("[{id}]"));
-                }
-            }
-            if !refs.is_empty() {
-                row.content
-                    .push_str(&format!("\n(Satchel saved this as {})", refs.join(", ")));
-            }
-        }
+        self.show_ids(&mut history)?;
+        // The ids and URLs the model may write: ones in the chat, and ones a search returns.
+        let mut known: HashSet<String> = history
+            .iter()
+            .flat_map(|row| Self::mentions(&row.content))
+            .collect();
         let mut context = Agent::context(&history, &self.prompt_context()?);
 
         // Satchel saves the links and files the user sent to keep, and reads the ones they only
@@ -263,14 +244,6 @@ impl Harness {
             }
         }
 
-        // URLs the model may write: ones the user sent, or a due reminder holds. A saved item
-        // from search goes by its ref.
-        let chat_urls: HashSet<String> = history
-            .iter()
-            .filter(|row| row.role == "user")
-            .flat_map(|row| Self::urls(&row.content))
-            .collect();
-
         let mut step = 0;
         let text = loop {
             let (text, calls) = self
@@ -282,17 +255,14 @@ impl Harness {
                 break text;
             }
             if calls.is_empty() {
-                let mut unknown: Vec<String> = Self::refs(&text)
-                    .into_iter()
-                    .filter(|(_, id)| !known.contains(id))
-                    .map(|(_, id)| format!("[{id}]"))
+                let unknown: Vec<String> = Self::mentions(&text)
+                    .filter(|mention| !known.contains(mention))
                     .collect();
-                unknown.extend(Self::urls(&text).filter(|url| !chat_urls.contains(url)));
                 if unknown.is_empty() {
                     break text;
                 }
                 let note = format!(
-                    "(Satchel check, not from the user) Your reply was not sent. It has {}, which is not a ref from a search result or a URL the user sent. Write your reply to the user's last message again. Call `search` if you need refs, and send a saved item only by its ref, such as [2].",
+                    "(Satchel check, not from the user) Your reply was not sent. It has {}, which is not in the chat or a search result. Write your reply to the user's last message again. Call `search` if you need an id, and send a saved item only by its id, such as [2].",
                     unknown.join(", ")
                 );
                 context.push(json!({ "role": "user", "content": note }));
@@ -316,7 +286,7 @@ impl Harness {
                     Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
                     Ok(ToolCall::Search(search)) => {
                         let result = self.search(search).await?;
-                        known.extend(Self::refs(&result).into_iter().map(|(_, id)| id));
+                        known.extend(Self::mentions(&result));
                         result
                     }
                     Ok(ToolCall::Cancel { id }) => self.cancel(*id)?,
@@ -493,17 +463,15 @@ impl Harness {
             Err(error) => return Ok(format!("error: {error}")),
         };
         let query = search.query.as_deref().map(str::trim).unwrap_or_default();
-        let limit = query.is_empty().then_some(Search::RESULTS as i64);
-        let rows = self.db.searchable(after, before, limit)?;
+        let mut rows = self.db.searchable(after, before)?;
         if rows.is_empty() {
             return Ok("No saved items match.".to_string());
         }
-        let rows = if query.is_empty() {
-            rows
-        } else {
+        if !query.is_empty() {
             let vector = self.agent.embed_query(query).await?;
-            Search::rank(query, &vector, rows)
-        };
+            rows = Search::rank(query, &vector, rows);
+        }
+        rows.truncate(Search::RESULTS);
         let lines: Vec<String> = rows.iter().map(|row| Search::line(row, &zone)).collect();
         Ok(lines.join("\n"))
     }
@@ -558,47 +526,58 @@ impl Harness {
             .map(|link| link.url.to_string())
     }
 
-    /// Each ref in `text`, such as `[12]`, with its byte range.
-    fn refs(text: &str) -> Vec<(Range<usize>, i64)> {
-        let mut refs = Vec::new();
-        let mut from = 0;
-        while let Some(start) = text[from..].find('[').map(|i| from + i) {
-            from = start + 1;
-            let Some(len) = text[from..].find(']') else {
-                break;
-            };
-            let digits = &text[from..from + len];
-            if !digits.bytes().all(|b| b.is_ascii_digit()) {
-                continue;
+    /// Adds the ids of the saved links and files in each user message to its end, such as
+    /// "(Satchel saved this as [12])".
+    fn show_ids(&self, history: &mut [Row]) -> Result<()> {
+        for row in history.iter_mut().filter(|row| row.role == "user") {
+            let mut ids = Vec::new();
+            for url in Self::urls(&row.content) {
+                if let Some(saved) = self.db.link(url.as_str().into())? {
+                    ids.push(format!("[{}]", saved.id));
+                }
             }
-            if let Ok(id) = digits.parse() {
-                refs.push((start..from + len + 1, id));
-                from += len + 1;
+            if !ids.is_empty() {
+                row.content
+                    .push_str(&format!("\n(Satchel saved this as {})", ids.join(", ")));
             }
         }
-        refs
+        Ok(())
     }
 
-    /// Replaces each ref to a saved link or file with its URL. The model never writes a saved
+    /// The ids and URLs in `text`, such as "[12]" and "https://example.com".
+    fn mentions(text: &str) -> impl Iterator<Item = String> {
+        Self::ids(text)
+            .into_iter()
+            .map(|id| format!("[{id}]"))
+            .chain(Self::urls(text))
+    }
+
+    /// Each saved item id in `text`, such as `[12]`.
+    fn ids(text: &str) -> Vec<i64> {
+        text.match_indices('[')
+            .filter_map(|(start, _)| {
+                let rest = &text[start + 1..];
+                rest[..rest.find(']')?].parse().ok()
+            })
+            .collect()
+    }
+
+    /// Replaces each id of a saved link or file with its URL. The model never writes a saved
     /// URL itself. Other brackets stay as they are.
-    fn expand_refs(&self, text: &str) -> Result<String> {
-        let mut expanded = String::new();
-        let mut cursor = 0;
-        for (span, id) in Self::refs(text) {
-            if let Some(url) = self.db.url(id)? {
-                expanded.push_str(&text[cursor..span.start]);
-                expanded.push_str(&url);
-                cursor = span.end;
+    fn expand_ids(&self, text: &str) -> Result<String> {
+        let mut expanded = text.to_string();
+        for id in Self::ids(text) {
+            if let Some(saved) = self.db.link(id.into())? {
+                expanded = expanded.replace(&format!("[{id}]"), &saved.content);
             }
         }
-        expanded.push_str(&text[cursor..]);
         Ok(expanded)
     }
 
-    /// Sends each part of `text` as its own message, after `expand_refs`. Linq requires a link
+    /// Sends each part of `text` as its own message, after `expand_ids`. Linq requires a link
     /// or media part to be the only part.
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
-        let (rest, mut urls) = Link::split(&self.expand_refs(text)?);
+        let (rest, mut urls) = Link::split(&self.expand_ids(text)?);
         let mut seen = HashSet::new();
         urls.retain(|url| seen.insert(url.clone()));
         let mut parts = Vec::new();

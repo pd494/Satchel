@@ -1,9 +1,8 @@
-use crate::db::{Schedule, Searchable};
+use crate::db::{Saved, Schedule};
 use jiff::{civil::DateTime, tz::TimeZone, SignedDuration, Span, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cmp::Reverse;
-use worker::Url;
 
 #[derive(Clone, Copy, Deserialize)]
 pub enum Tapback {
@@ -70,15 +69,15 @@ impl Search {
     }
 
     /// Ranks `rows` by how many query words they contain and by how close their vector is to
-    /// `query_vector`, then fuses the two ranks. Returns the best `RESULTS`. Ties keep the
-    /// newer row first.
-    pub fn rank(query: &str, query_vector: &[u8], rows: Vec<Searchable>) -> Vec<Searchable> {
+    /// `query_vector`, then fuses the two ranks, best first. Ties keep the newer row first.
+    pub fn rank(query: &str, query_vector: &[u8], rows: Vec<Saved>) -> Vec<Saved> {
         let words: Vec<String> = Self::words(query).collect();
         let query_vector = Self::floats(query_vector);
         let hits: Vec<usize> = rows
             .iter()
             .map(|row| {
-                let text: Vec<String> = Self::words(&row.description).collect();
+                let text: Vec<String> =
+                    Self::words(row.description.as_deref().unwrap_or_default()).collect();
                 words
                     .iter()
                     .filter(|word| text.iter().any(|seen| seen.starts_with(word.as_str())))
@@ -87,7 +86,12 @@ impl Search {
             .collect();
         let closeness: Vec<f32> = rows
             .iter()
-            .map(|row| Self::cosine(&query_vector, &Self::floats(&row.vector)))
+            .map(|row| {
+                Self::cosine(
+                    &query_vector,
+                    &Self::floats(row.vector.as_deref().unwrap_or_default()),
+                )
+            })
             .collect();
 
         let mut by_words: Vec<usize> = (0..rows.len()).filter(|&i| hits[i] > 0).collect();
@@ -101,18 +105,14 @@ impl Search {
                 scores[i] += 1.0 / (RRF_K + rank as f32 + 1.0);
             }
         }
-        let mut scored: Vec<(f32, Searchable)> = scores.into_iter().zip(rows).collect();
+        let mut scored: Vec<(f32, Saved)> = scores.into_iter().zip(rows).collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-        scored
-            .into_iter()
-            .take(Self::RESULTS)
-            .map(|(_, row)| row)
-            .collect()
+        scored.into_iter().map(|(_, row)| row).collect()
     }
 
-    /// One result for the model. A link or file starts with its ref, such as `[12]`. A note
-    /// has no ref, since its text is the whole item.
-    pub fn line(row: &Searchable, zone: &TimeZone) -> String {
+    /// One result for the model. A link or file starts with its id, such as `[12]`. A note
+    /// has none, since its text is the whole item.
+    pub fn line(row: &Saved, zone: &TimeZone) -> String {
         let saved = Timestamp::from_second(row.created_at)
             .map(|at| {
                 at.to_zoned_datetime(zone.clone())
@@ -122,6 +122,8 @@ impl Search {
             .unwrap_or_default();
         let snippet: String = row
             .description
+            .as_deref()
+            .unwrap_or_default()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
@@ -131,19 +133,7 @@ impl Search {
         if row.media == "note" {
             return format!("- note, saved {saved}: {snippet}");
         }
-        let site = match (row.media.as_str(), Url::parse(&row.content)) {
-            // A site name, such as "zillow". A domain in the reply would send as a link.
-            ("link", Ok(url)) => {
-                let host = url.host_str().unwrap_or_default();
-                let domain = psl::domain_str(host).unwrap_or(host);
-                format!(" from {}", domain.split('.').next().unwrap_or_default())
-            }
-            _ => String::new(),
-        };
-        format!(
-            "- [{}] {}{site}, saved {saved}: {snippet}",
-            row.id, row.media
-        )
+        format!("- [{}] {}, saved {saved}: {snippet}", row.id, row.media)
     }
 
     fn words(text: &str) -> impl Iterator<Item = String> + '_ {
@@ -272,7 +262,7 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "search",
-                "description": "Find saved links, files, and notes. Returns up to 10 results, best first. A link or file starts with its ref, such as [12].",
+                "description": "Find saved links, files, and notes. Returns up to 10 results, best first. A link or file starts with its id, such as [12].",
                 "parameters": { "type": "object", "properties": {
                     "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"austin apartment\". Omit it to list the newest saves." },
                     "after": { "type": "string", "description": "Only items saved at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },
