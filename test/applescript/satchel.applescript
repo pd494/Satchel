@@ -63,6 +63,17 @@ on allCases()
 		{"s-find-missing", "send me that pasta recipe", "text-only", ""}, ¬
 		{"s-list", "what have i saved so far", "text", ""}, ¬
 		{"s-pick-after-list", "send me the sourdough one", "text", "wikipedia.org"}, ¬
+		{"s-find-exact", "send me the tokio link", "text", "github.com"}, ¬
+		{"s-find-typo", "that sourdoh thing", "text", "wikipedia.org"}, ¬
+		{"s-save-bare", "https://en.wikipedia.org/wiki/Banana_bread", "tapback", ""}, ¬
+		{"s-resend-recent", "send that back to me", "text", "Banana_bread"}, ¬
+		{"s-find-many", "send me my bread links", "text", "2"}, ¬
+		{"s-pick-number", "#1", "text", "wikipedia.org"}, ¬
+		{"s-save-dup", "https://www.youtube.com/watch?v=4BOTvaRaDjI my glute warmup too", "tapback", ""}, ¬
+		{"s-find-dup", "the glute warmup vid", "text", "youtube.com"}, ¬
+		{"s-note-fix", "actually the cabin wifi is otter99 now", "text-only", ""}, ¬
+		{"s-find-note-fix", "cabin wifi password?", "text-only", "otter99"}, ¬
+		{"s-find-old-date", "what did i save last year?", "text-only", ""}, ¬
 		{"c-save-burst", "https://www.tiktok.com/@scout2015/video/6718335390845095173||the corgi doing zoomies lol", "tapback", ""}, ¬
 		{"c-save-inline", "https://www.instagram.com/reel/C0JKhWRx5zv/ thai green curry my aunt makes", "tapback", ""}, ¬
 		{"c-chat", "ugh mondays", "text-only", ""}, ¬
@@ -95,6 +106,7 @@ on allCases()
 		{"remind-correct", "no, make it 10 am", "text-only", ""}, ¬
 		{"remind-change-later", "change my stretch reminder to 11 am", "text-only", ""}, ¬
 		{"remind-cancel", "cancel my stretch reminder", "text-only", ""}, ¬
+		{"remind-cancel-none", "cancel my dentist reminder", "text-only", ""}, ¬
 		{"zone-move", "i moved to nyc", "text-only", ""}, ¬
 		{"zone-move-back", "actually i moved back to LA", "text-only", ""}, ¬
 		{"remind-fires", "", "text-only", "water"}}
