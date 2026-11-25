@@ -6,6 +6,7 @@ use crate::tools::{Remind, Search, Tapback, ToolCall};
 use jiff::{tz::TimeZone, Timestamp};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::ops::Range;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
@@ -231,6 +232,16 @@ impl Harness {
             }
         }
 
+        // Refs the model may write: ones a search returned, and real ones from its own replies.
+        let mut known = HashSet::new();
+        for row in history.iter().filter(|row| row.role == "assistant") {
+            for (_, id) in Self::refs(&row.content) {
+                if self.db.url(id)?.is_some() {
+                    known.insert(id);
+                }
+            }
+        }
+
         let mut step = 0;
         let text = loop {
             let (text, calls) = self
@@ -238,8 +249,24 @@ impl Harness {
                 .run_model(&mut context, &message.event_id, step)
                 .await?;
             step += 1;
-            if calls.is_empty() || step == MAX_STEPS {
+            if step == MAX_STEPS {
                 break text;
+            }
+            if calls.is_empty() {
+                let unknown: Vec<String> = Self::refs(&text)
+                    .into_iter()
+                    .filter(|(_, id)| !known.contains(id))
+                    .map(|(_, id)| format!("[{id}]"))
+                    .collect();
+                if unknown.is_empty() {
+                    break text;
+                }
+                let note = format!(
+                    "Satchel: {} did not come from a search result. Call `search`, then reply with refs from its results.",
+                    unknown.join(", ")
+                );
+                context.push(json!({ "role": "user", "content": note }));
+                continue;
             }
 
             let mut results = Vec::new();
@@ -257,7 +284,11 @@ impl Harness {
                         "ok".to_string()
                     }
                     Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
-                    Ok(ToolCall::Search(search)) => self.search(search).await?,
+                    Ok(ToolCall::Search(search)) => {
+                        let result = self.search(search).await?;
+                        known.extend(Self::refs(&result).into_iter().map(|(_, id)| id));
+                        result
+                    }
                     Ok(ToolCall::Cancel { id }) => self.cancel(*id)?,
                     Ok(ToolCall::TimeZone { time_zone }) => self.set_time_zone(time_zone)?,
                 });
@@ -489,27 +520,40 @@ impl Harness {
         line
     }
 
-    /// Replaces each ref to a saved link or file, such as `[12]`, with its URL. The model never
-    /// writes a saved URL itself. Other brackets stay as they are.
-    fn expand_refs(&self, text: &str) -> Result<String> {
-        let mut expanded = String::new();
-        let mut rest = text;
-        while let Some(start) = rest.find('[') {
-            expanded.push_str(&rest[..start]);
-            rest = &rest[start + 1..];
-            let end = rest.find(']').unwrap_or(0);
-            let id = Some(&rest[..end])
-                .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|digits| digits.parse().ok());
-            match id.map(|id| self.db.url(id)).transpose()?.flatten() {
-                Some(url) => {
-                    expanded.push_str(&url);
-                    rest = &rest[end + 1..];
-                }
-                None => expanded.push('['),
+    /// Each ref in `text`, such as `[12]`, with its byte range.
+    fn refs(text: &str) -> Vec<(Range<usize>, i64)> {
+        let mut refs = Vec::new();
+        let mut from = 0;
+        while let Some(start) = text[from..].find('[').map(|i| from + i) {
+            from = start + 1;
+            let Some(len) = text[from..].find(']') else {
+                break;
+            };
+            let digits = &text[from..from + len];
+            if !digits.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(id) = digits.parse() {
+                refs.push((start..from + len + 1, id));
+                from += len + 1;
             }
         }
-        expanded.push_str(rest);
+        refs
+    }
+
+    /// Replaces each ref to a saved link or file with its URL. The model never writes a saved
+    /// URL itself. Other brackets stay as they are.
+    fn expand_refs(&self, text: &str) -> Result<String> {
+        let mut expanded = String::new();
+        let mut cursor = 0;
+        for (span, id) in Self::refs(text) {
+            if let Some(url) = self.db.url(id)? {
+                expanded.push_str(&text[cursor..span.start]);
+                expanded.push_str(&url);
+                cursor = span.end;
+            }
+        }
+        expanded.push_str(&text[cursor..]);
         Ok(expanded)
     }
 

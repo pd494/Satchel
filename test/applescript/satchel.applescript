@@ -47,6 +47,11 @@ on allCases()
 		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
 		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
 		{"search-recipe", "send me that turkey burger recipe again", "text", "allrecipes.com"}, ¬
+		{"pile-save", "https://www.zillow.com/homes/austin_rb/ cute 2 bed near the lake", "tapback", ""}, ¬
+		{"pile-chat-1", "lol my cat just knocked my coffee over", "text-only", ""}, ¬
+		{"pile-chat-2", "remember my sister's flight lands at 6", "text-only", ""}, ¬
+		{"pile-chat-3", "ok thanks", "text-only", ""}, ¬
+		{"pile-ask", "wait what was that apartment place by the lake i sent", "text", "zillow.com"}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬
