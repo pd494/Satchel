@@ -383,6 +383,16 @@ impl Db {
             .to_array()
     }
 
+    /// Returns the id of the saved link or file `url`.
+    pub fn saved_id(&self, url: &str) -> Result<Option<i64>> {
+        let select_query = "SELECT id FROM saved WHERE content = ? AND media != 'note'";
+        let mut rows: Vec<Saved> = self
+            .sql
+            .exec(select_query, Some(vec![url.into()]))?
+            .to_array()?;
+        Ok(rows.pop().map(|row| row.id))
+    }
+
     /// Returns the URL of saved link or file `id`. A note has none.
     pub fn url(&self, id: i64) -> Result<Option<String>> {
         let select_query = "SELECT content FROM saved WHERE id = ? AND media != 'note'";

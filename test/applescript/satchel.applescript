@@ -56,6 +56,19 @@ on allCases()
 		{"search-list", "send me the stuff i saved yesterday", "text", ""}, ¬
 		{"search-pick", "#2", "text", ""}, ¬
 		{"search-missing", "send me that pottery class link", "text-only", ""}, ¬
+		{"s-save-video", "https://www.youtube.com/watch?v=4BOTvaRaDjI hip stretches my PT sent", "tapback", ""}, ¬
+		{"s-save-note", "remember the cabin wifi password is otter42", "text-only", ""}, ¬
+		{"s-save-bread", "https://en.wikipedia.org/wiki/Sourdough want to try baking this", "tapback", ""}, ¬
+		{"s-save-repo", "https://github.com/tokio-rs/tokio for the rust side project", "tapback", ""}, ¬
+		{"s-chat-1", "lol today was so long", "text-only", ""}, ¬
+		{"s-chat-2", "who won the world cup in 2018", "text-only", ""}, ¬
+		{"s-find-video", "what was that stretching video", "text", "youtube.com"}, ¬
+		{"s-find-bread", "send me the bread thing i wanted to bake", "text", "wikipedia.org"}, ¬
+		{"s-find-note", "whats the internet password at the cabin", "text-only", "otter42"}, ¬
+		{"s-find-repo", "that async rust library i saved", "text", "github.com"}, ¬
+		{"s-find-missing", "send me that pasta recipe", "text-only", ""}, ¬
+		{"s-list", "what have i saved so far", "text", ""}, ¬
+		{"s-pick-after-list", "send me the sourdough one", "text", "wikipedia.org"}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬

@@ -185,7 +185,31 @@ impl Harness {
     /// tapback is the whole reply, and its text is empty.
     async fn run_agent(&self, burst: &[UnansweredMessage]) -> Result<String> {
         let message = burst.last().expect("a burst has a text");
-        let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
+        let mut history = self.db.load_history(message.id, HISTORY_LIMIT)?;
+        // Refs the model may write: ones a search returns, real ones from its own replies, and
+        // the refs of saved links and files in the chat. Each user message shows its refs.
+        let mut known = HashSet::new();
+        for row in &mut history {
+            if row.role == "assistant" {
+                for (_, id) in Self::refs(&row.content) {
+                    if self.db.url(id)?.is_some() {
+                        known.insert(id);
+                    }
+                }
+                continue;
+            }
+            let mut refs = Vec::new();
+            for url in Self::urls(&row.content) {
+                if let Some(id) = self.db.saved_id(&url)? {
+                    known.insert(id);
+                    refs.push(format!("[{id}]"));
+                }
+            }
+            if !refs.is_empty() {
+                row.content
+                    .push_str(&format!("\n(Satchel saved this as {})", refs.join(", ")));
+            }
+        }
         let mut context = Agent::context(&history, &self.prompt_context()?);
 
         // Satchel saves the links and files the user sent to keep, and reads the ones they only
@@ -229,16 +253,6 @@ impl Harness {
                     .map(|(mime, bytes)| json!({ "type": "image_url", "image_url": { "url": Agent::data_url(mime, bytes) } }))
                     .collect();
                 context.push(json!({ "role": "user", "content": content }));
-            }
-        }
-
-        // Refs the model may write: ones a search returned, and real ones from its own replies.
-        let mut known = HashSet::new();
-        for row in history.iter().filter(|row| row.role == "assistant") {
-            for (_, id) in Self::refs(&row.content) {
-                if self.db.url(id)?.is_some() {
-                    known.insert(id);
-                }
             }
         }
 
