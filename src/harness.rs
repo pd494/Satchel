@@ -755,9 +755,9 @@ impl Harness {
         let query = query.filter(|query| !query.is_empty());
 
         let mut sections = Vec::new();
-        let lines = self.search_saved(query, after, before, &zone).await?;
-        if !lines.is_empty() {
-            sections.push(format!("Saved items:\n{}", lines.join("\n")));
+        let matching_saved = self.search_saved(query, after, before, &zone).await?;
+        if !matching_saved.is_empty() {
+            sections.push(format!("Saved items:\n{}", matching_saved.join("\n")));
         }
         let mut blocks = Vec::new();
         for block in self.db.search_chat(query, after, before, before_turn)? {
