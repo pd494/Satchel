@@ -754,26 +754,26 @@ impl Harness {
         let query = search.query.as_deref().map(str::trim);
         let query = query.filter(|query| !query.is_empty());
 
-        let mut sections = Vec::new();
+        let mut found = Vec::new();
         let matching_saved = self.search_saved(query, after, before, &zone).await?;
         if !matching_saved.is_empty() {
-            sections.push(format!("Saved items:\n{}", matching_saved.join("\n")));
+            found.push(format!("Saved items:\n{}", matching_saved.join("\n")));
         }
-        let mut blocks = Vec::new();
+        let mut matching_chat = Vec::new();
         for block in self.db.search_chat(query, after, before, before_turn)? {
             let mut lines = Vec::new();
             for row in &block {
                 lines.push(Self::transcript_line(row, &zone, Some(SNIPPET))?);
             }
-            blocks.push(lines.join("\n"));
+            matching_chat.push(lines.join("\n"));
         }
-        if !blocks.is_empty() {
-            sections.push(format!("Past chat:\n{}", blocks.join("\n\n")));
+        if !matching_chat.is_empty() {
+            found.push(format!("Past chat:\n{}", matching_chat.join("\n\n")));
         }
-        if sections.is_empty() {
+        if found.is_empty() {
             return Ok(ToolResult::Done("Nothing matches.".to_string()));
         }
-        Ok(ToolResult::Done(sections.join("\n\n")))
+        Ok(ToolResult::Done(found.join("\n\n")))
     }
 
     async fn search_saved(
