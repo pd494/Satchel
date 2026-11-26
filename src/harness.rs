@@ -101,7 +101,7 @@ impl Harness {
         self.queue_due_reminders()?;
 
         let mut waiting = self.reply_all(space_id).await?;
-        // A fold never takes a turn that waits for its reply. A failed fold changes nothing,
+        // A compaction never takes a turn that waits for its reply. A failed one changes nothing,
         // and the next `inbox` tries again.
         if waiting.is_none() {
             if let Err(error) = self.compact().await {
@@ -573,7 +573,7 @@ impl Harness {
         Ok(ToolResult::Done(reply))
     }
 
-    /// When the summary and the chat after it reach `COMPACT_AT_TOKENS`, folds the oldest
+    /// When the summary and the chat after it reach `COMPACT_AT_TOKENS`, compacts the oldest
     /// messages into the summary, and writes the setting changes in them. The newest
     /// `KEEP_RECENT` messages stay. Messages are never deleted: `search` still finds them.
     async fn compact(&self) -> Result<()> {
@@ -595,25 +595,25 @@ impl Harness {
 
         // The oldest rows, up to the turn of the first kept row. A reply stays with its text.
         let first_kept = rows[rows.len() - KEEP_RECENT].turn;
-        let mut fold = Vec::new();
+        let mut older = Vec::new();
         for row in rows {
             if row.turn >= first_kept {
                 break;
             }
-            fold.push(row);
+            older.push(row);
         }
-        if fold.is_empty() {
+        if older.is_empty() {
             return Ok(());
         }
 
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let compaction = self
             .agent
-            .compact(summary.as_ref(), &self.db.settings()?, &fold, &zone)
+            .compact(summary.as_ref(), &self.db.settings()?, &older, &zone)
             .await?;
         if !self
             .db
-            .save_fold(&fold, &compaction.summary, &compaction.facts)?
+            .save_compaction(&older, &compaction.summary, &compaction.facts)?
         {
             console_error!("a reset deleted the chat during compaction");
         }

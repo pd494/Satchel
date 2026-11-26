@@ -52,13 +52,14 @@ extern "C" {
     ) -> std::result::Result<Promise, JsValue>;
 }
 
-/// What one fold returns: the new summary of the older chat, and the setting changes it found.
+/// What one compaction returns: the new summary of the older chat, and the setting changes it
+/// found.
 pub struct Compaction {
     pub summary: String,
     pub facts: Vec<SettingChange>,
 }
 
-/// The model's JSON for a fold, before each fact is checked.
+/// The model's JSON for a compaction, before each fact is checked.
 #[derive(Deserialize)]
 struct RawCompaction {
     summary: String,
@@ -161,7 +162,7 @@ impl Agent {
         Ok(format!("- {sent}, {who}: {text}"))
     }
 
-    /// Folds `rows`, the oldest messages after the summary, into a new summary, and finds the
+    /// Compacts `rows`, the oldest messages after the summary, into a new summary, and finds the
     /// setting changes in them. A fact that fails to parse is logged and skipped. Bad JSON or an
     /// empty summary is an error, and then nothing is written.
     pub async fn compact(
@@ -176,7 +177,7 @@ impl Agent {
             chat.push(Self::chat_line(row, zone, None)?);
         }
         let input_text = format!(
-            "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages to fold in:\n{}",
+            "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
             summary.map_or("(none)", |summary| summary.text.as_str()),
             Self::settings_text(settings, zone)?,
             chat.join("\n")
@@ -211,13 +212,13 @@ impl Agent {
 
         let summary = raw.summary.trim().to_string();
         if summary.is_empty() {
-            return Err("the fold returned an empty summary".into());
+            return Err("the compaction returned an empty summary".into());
         }
         let mut facts = Vec::new();
         for fact in raw.facts {
             match SettingChange::parse(&fact.key, &fact.value) {
                 Ok(change) => facts.push(change),
-                Err(error) => console_error!("fold fact {}: {error}", fact.key),
+                Err(error) => console_error!("compaction fact {}: {error}", fact.key),
             }
         }
         Ok(Compaction { summary, facts })

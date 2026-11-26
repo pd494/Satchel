@@ -15,7 +15,7 @@ use worker::{Result, SqlStorage, SqlStorageValue};
 /// `chat` is each message with its turn: a reply belongs to the turn of the text it answers.
 /// `messages_fts` indexes every message's text for `search`. Messages are never deleted.
 /// `settings` holds what the user said about themselves. A `NULL` value is a removal, kept with
-/// its date so that a fold of older messages cannot bring the old value back.
+/// its date so that a compaction of older messages cannot bring the old value back.
 /// `summary` is one row: the summary of every turn up to and including `through`.
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
@@ -365,13 +365,18 @@ impl Db {
         Ok(rows.pop())
     }
 
-    /// Writes what one fold of `rows` found: the facts, then the summary up to the last row. A
-    /// reset during the model call deletes the rows, and then nothing is written. Returns
+    /// Writes what one compaction of `rows` found: the facts, then the summary up to the last
+    /// row. A reset during the model call deletes the rows, and then nothing is written. Returns
     /// whether it wrote.
     ///
-    /// The facts count as said at the first folded message. A setting the tool wrote during or
-    /// after these messages is newer, and it wins.
-    pub fn save_fold(&self, rows: &[Row], summary: &str, facts: &[SettingChange]) -> Result<bool> {
+    /// The facts count as said at the first compacted message. A setting the tool wrote during
+    /// or after these messages is newer, and it wins.
+    pub fn save_compaction(
+        &self,
+        rows: &[Row],
+        summary: &str,
+        facts: &[SettingChange],
+    ) -> Result<bool> {
         let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
             return Ok(false);
         };
