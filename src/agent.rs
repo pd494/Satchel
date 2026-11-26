@@ -174,27 +174,25 @@ impl Agent {
         url
     }
 
-    /// Embeds `text` (and optional media) as little-endian `f32` bytes.
-    pub async fn embed(&self, text: &str, media: Option<&(String, Vec<u8>)>) -> Result<Vec<u8>> {
-        // The model's document prefix. `embed_query` uses its query prefix.
+    /// The embedding model's prefix for the text of a saved item.
+    pub const DOCUMENT: &str = "title: none | text: ";
+    /// The embedding model's prefix for a search query.
+    pub const QUERY: &str = "task: search result | query: ";
+
+    /// Embeds `text` (and optional media) as little-endian `f32` bytes. `prefix` is
+    /// `DOCUMENT` for a saved item, or `QUERY` for a search.
+    pub async fn embed(
+        &self,
+        prefix: &str,
+        text: &str,
+        media: Option<&(String, Vec<u8>)>,
+    ) -> Result<Vec<u8>> {
         let text: String = text.chars().take(MAX_TEXT).collect();
-        let mut content =
-            vec![json!({ "type": "text", "text": format!("title: none | text: {text}") })];
+        let mut content = vec![json!({ "type": "text", "text": format!("{prefix}{text}") })];
         if let Some((mime, bytes)) = media {
             let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
             content.push(json!({ "type": kind, kind: { "url": Self::data_url(mime, bytes) } }));
         }
-        self.vector(content).await
-    }
-
-    /// Embeds a search query, to compare with the vectors from `embed`.
-    pub async fn embed_query(&self, query: &str) -> Result<Vec<u8>> {
-        let text = format!("task: search result | query: {query}");
-        self.vector(vec![json!({ "type": "text", "text": text })])
-            .await
-    }
-
-    async fn vector(&self, content: Vec<Value>) -> Result<Vec<u8>> {
         let input = json!({
             "messages": [[{ "role": "user", "content": content }]],
             "dimensions": DIMENSIONS,
