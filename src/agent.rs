@@ -112,8 +112,13 @@ impl Agent {
         Ok((text, calls))
     }
 
-    /// Splits `links` into the ones the user sent to keep and the ones they only asked about.
-    pub async fn keep(&self, texts: &[&str], links: Vec<Link>) -> Result<(Vec<Link>, Vec<Link>)> {
+    /// Asks Clef about each of `links`. Returns the links to save, and the links the user only
+    /// asked about, which Satchel reads to answer.
+    pub async fn save_or_read(
+        &self,
+        texts: &[&str],
+        links: Vec<Link>,
+    ) -> Result<(Vec<Link>, Vec<Link>)> {
         if links.is_empty() {
             return Ok((links, Vec::new()));
         }
@@ -167,7 +172,6 @@ impl Agent {
         calls
     }
 
-    /// Embeds `text` (and optional media) as little-endian `f32` bytes.
     /// The file as a `data:` URL, the way the models take images and video.
     pub fn data_url(mime: &str, bytes: &[u8]) -> String {
         let mut url = format!("data:{mime};base64,");
@@ -175,11 +179,19 @@ impl Agent {
         url
     }
 
-    pub async fn embed(&self, text: &str, media: Option<&(String, Vec<u8>)>) -> Result<Vec<u8>> {
-        // The model's document prefix. Queries use `task: search result | query: …`.
+    pub const SAVED_ITEM: &str = "title: none | text: ";
+    pub const SEARCH: &str = "task: search result | query: ";
+
+    /// Embeds `text` (and optional media) as little-endian `f32` bytes. `prefix` is
+    /// `SAVED_ITEM` or `SEARCH`.
+    pub async fn embed(
+        &self,
+        prefix: &str,
+        text: &str,
+        media: Option<&(String, Vec<u8>)>,
+    ) -> Result<Vec<u8>> {
         let text: String = text.chars().take(MAX_TEXT).collect();
-        let mut content =
-            vec![json!({ "type": "text", "text": format!("title: none | text: {text}") })];
+        let mut content = vec![json!({ "type": "text", "text": format!("{prefix}{text}") })];
         if let Some((mime, bytes)) = media {
             let kind = format!("{}_url", mime.split('/').next().unwrap_or_default());
             content.push(json!({ "type": kind, kind: { "url": Self::data_url(mime, bytes) } }));

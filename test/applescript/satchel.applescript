@@ -46,6 +46,45 @@ on allCases()
 		{"save-docx", "file:~/Pictures/satchel-test/sample-lease.docx", "tapback", ""}, ¬
 		{"save-tweet", "https://x.com/jack/status/20", "tapback", ""}, ¬
 		{"burst-link-words", "https://www.allrecipes.com/recipe/158968/spinach-and-feta-turkey-burgers/||for sunday dinner", "tapback", ""}, ¬
+		{"search-recipe", "send me that turkey burger recipe again", "text", "allrecipes.com"}, ¬
+		{"search-today", "what did i save today?", "text", ""}, ¬
+		{"search-list", "send me the stuff i saved yesterday", "text", ""}, ¬
+		{"search-pick", "#2", "text", ""}, ¬
+		{"s-save-video", "https://www.youtube.com/watch?v=4BOTvaRaDjI hip stretches my PT sent", "tapback", ""}, ¬
+		{"s-save-note", "remember the cabin wifi password is otter42", "text-only", ""}, ¬
+		{"s-save-bread", "https://en.wikipedia.org/wiki/Sourdough want to try baking this", "tapback", ""}, ¬
+		{"s-save-repo", "https://github.com/tokio-rs/tokio for the rust side project", "tapback", ""}, ¬
+		{"s-chat-1", "lol today was so long", "text-only", ""}, ¬
+		{"s-chat-2", "who won the world cup in 2018", "text-only", ""}, ¬
+		{"s-find-video", "what was that stretching video", "text", "youtube.com"}, ¬
+		{"s-find-bread", "send me the bread thing i wanted to bake", "text", "wikipedia.org"}, ¬
+		{"s-find-note", "whats the internet password at the cabin", "text-only", "otter42"}, ¬
+		{"s-find-repo", "that async rust library i saved", "text", "github.com"}, ¬
+		{"s-find-missing", "send me that pasta recipe", "text-only", ""}, ¬
+		{"s-find-missing-2", "where's that hotel booking i saved", "text-only", ""}, ¬
+		{"s-list", "what have i saved so far", "text", ""}, ¬
+		{"s-pick-after-list", "send me the sourdough one", "text", "wikipedia.org"}, ¬
+		{"s-find-exact", "send me the tokio link", "text", "github.com"}, ¬
+		{"s-find-typo", "that sourdoh thing", "text", "wikipedia.org"}, ¬
+		{"s-save-bare", "https://en.wikipedia.org/wiki/Banana_bread", "tapback", ""}, ¬
+		{"s-resend-recent", "send that back to me", "text", "Banana_bread"}, ¬
+		{"s-find-many", "send me my bread links", "text", "2"}, ¬
+		{"s-pick-number", "#1", "text", "wikipedia.org"}, ¬
+		{"s-save-dup", "https://www.youtube.com/watch?v=4BOTvaRaDjI my glute warmup too", "tapback", ""}, ¬
+		{"s-find-dup", "the glute warmup vid", "text", "youtube.com"}, ¬
+		{"s-note-fix", "actually the cabin wifi is otter99 now", "text-only", ""}, ¬
+		{"s-find-note-fix", "cabin wifi password?", "text-only", "otter99"}, ¬
+		{"s-find-old-date", "what did i save last year?", "text-only", ""}, ¬
+		{"c-save-burst", "https://www.tiktok.com/@scout2015/video/6718335390845095173||the corgi doing zoomies lol", "tapback", ""}, ¬
+		{"c-save-inline", "https://www.instagram.com/reel/C0JKhWRx5zv/ thai green curry my aunt makes", "tapback", ""}, ¬
+		{"c-chat", "ugh mondays", "text-only", ""}, ¬
+		{"c-find-corgi", "send me the zoomies dog clip", "text", "tiktok.com"}, ¬
+		{"c-find-curry", "that curry reel", "text", "instagram.com"}, ¬
+		{"o-x", "https://x.com/elonmusk/status/1585341984679469056", "tapback", ""}, ¬
+		{"o-instagram", "https://www.instagram.com/reel/C0JKhWRx5zv/", "tapback", ""}, ¬
+		{"o-reddit", "https://www.reddit.com/r/rust/comments/1fh8gq5/", "tapback", ""}, ¬
+		{"o-spotify", "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8", "tapback", ""}, ¬
+		{"o-pinterest", "https://www.pinterest.com/pin/1196337398574536/", "tapback", ""}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬
@@ -71,6 +110,11 @@ on allCases()
 		{"remind-asks-zone", "remind me tomorrow at 9 am to stretch", "text-only", "zone"}, ¬
 		{"remind-set", "pst", "text-only", ""}, ¬
 		{"remind-correct", "no, make it 10 am", "text-only", ""}, ¬
+		{"remind-change-later", "change my stretch reminder to 11 am", "text-only", ""}, ¬
+		{"remind-cancel", "cancel my stretch reminder", "text-only", ""}, ¬
+		{"remind-cancel-none", "cancel my dentist reminder", "text-only", ""}, ¬
+		{"zone-move", "i moved to nyc", "text-only", ""}, ¬
+		{"zone-move-back", "actually i moved back to LA", "text-only", ""}, ¬
 		{"remind-fires", "", "text-only", "water"}}
 end allCases
 
