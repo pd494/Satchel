@@ -560,6 +560,8 @@ impl Harness {
         Ok(ToolResult::Done(reply))
     }
 
+    /// When the summary and the chat after it pass `COMPACT_AT_TOKENS`, moves the oldest turns
+    /// into the summary. The newest `KEEP_RECENT` messages stay. Otherwise it does nothing.
     async fn compact(&self) -> Result<()> {
         let summary = self.db.summary()?;
         let rows = self
@@ -593,7 +595,7 @@ impl Harness {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let compaction = self
             .agent
-            .compact(summary.as_ref(), &self.db.settings()?, &older, &zone)
+            .summarize(summary.as_ref(), &self.db.settings()?, &older, &zone)
             .await?;
         if !self
             .db

@@ -152,9 +152,9 @@ impl Agent {
         Ok(format!("- {sent}, {who}: {text}"))
     }
 
-    /// Logs and skips a fact that fails to parse. Returns an error for bad JSON or an empty
-    /// summary.
-    pub async fn compact(
+    /// Asks the model for a new summary that also covers `rows`, and for the facts in them. Logs
+    /// and skips a fact that fails to parse. Returns an error for bad JSON or an empty summary.
+    pub async fn summarize(
         &self,
         summary: Option<&Summary>,
         settings: &[Setting],
