@@ -691,6 +691,8 @@ impl Harness {
             json!({ "role": "system", "content": COMPACT_PROMPT }),
             json!({ "role": "user", "content": input }),
         ];
+        // summary: the new summary of all chat up to the last compacted message.
+        // facts: the setting changes in the compacted messages, each a key and a value.
         let response_schema = json!({
             "type": "object",
             "required": ["summary", "facts"],
