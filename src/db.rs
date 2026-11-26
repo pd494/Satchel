@@ -374,12 +374,4 @@ impl Db {
             .exec(&select_query, Some(vec![after.into(), before.into()]))?
             .to_array()
     }
-
-    /// Returns the saved link or file whose id or URL is `key`. A note is never one.
-    pub fn link(&self, key: SqlStorageValue) -> Result<Option<Saved>> {
-        let select_query =
-            format!("SELECT {SAVED} FROM saved WHERE media != 'note' AND ?1 IN (id, content)");
-        let mut rows: Vec<Saved> = self.sql.exec(&select_query, Some(vec![key]))?.to_array()?;
-        Ok(rows.pop())
-    }
 }

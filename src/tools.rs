@@ -1,8 +1,7 @@
-use crate::db::{Saved, Schedule};
+use crate::db::Schedule;
 use jiff::{civil::DateTime, tz::TimeZone, SignedDuration, Span, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::cmp::Reverse;
 
 #[derive(Clone, Copy, Deserialize)]
 pub enum Tapback {
@@ -42,11 +41,6 @@ pub enum ToolCall {
     },
 }
 
-/// The reciprocal rank fusion constant. A larger value weighs the top ranks less.
-const RRF_K: f32 = 60.0;
-/// The most characters of search text one result shows.
-const SNIPPET: usize = 300;
-
 #[derive(Deserialize)]
 pub struct Search {
     pub query: Option<String>,
@@ -55,9 +49,6 @@ pub struct Search {
 }
 
 impl Search {
-    /// The most results one search returns.
-    pub const RESULTS: usize = 10;
-
     /// `after` and `before` as Unix seconds, read as local times in `zone`.
     pub fn bounds(&self, zone: &TimeZone) -> Result<(Option<i64>, Option<i64>), String> {
         let second = |at: Option<DateTime>| {
@@ -66,91 +57,6 @@ impl Search {
                 .map_err(|error| error.to_string())
         };
         Ok((second(self.after)?, second(self.before)?))
-    }
-
-    /// Ranks `rows` by how many query words they contain and by how close their vector is to
-    /// `query_vector`, then fuses the two ranks, best first. Ties keep the newer row first.
-    pub fn rank(query: &str, query_vector: &[u8], rows: Vec<Saved>) -> Vec<Saved> {
-        let words: Vec<String> = Self::words(query).collect();
-        let query_vector = Self::floats(query_vector);
-        let hits: Vec<usize> = rows
-            .iter()
-            .map(|row| {
-                let text: Vec<String> =
-                    Self::words(row.description.as_deref().unwrap_or_default()).collect();
-                words
-                    .iter()
-                    .filter(|word| text.iter().any(|seen| seen.starts_with(word.as_str())))
-                    .count()
-            })
-            .collect();
-        let closeness: Vec<f32> = rows
-            .iter()
-            .map(|row| {
-                Self::cosine(
-                    &query_vector,
-                    &Self::floats(row.vector.as_deref().unwrap_or_default()),
-                )
-            })
-            .collect();
-
-        let mut by_words: Vec<usize> = (0..rows.len()).filter(|&i| hits[i] > 0).collect();
-        by_words.sort_by_key(|&i| Reverse(hits[i]));
-        let mut by_meaning: Vec<usize> = (0..rows.len()).collect();
-        by_meaning.sort_by(|&a, &b| closeness[b].total_cmp(&closeness[a]));
-
-        let mut scores = vec![0.0; rows.len()];
-        for ranked in [by_words, by_meaning] {
-            for (rank, i) in ranked.into_iter().enumerate() {
-                scores[i] += 1.0 / (RRF_K + rank as f32 + 1.0);
-            }
-        }
-        let mut scored: Vec<(f32, Saved)> = scores.into_iter().zip(rows).collect();
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-        scored.into_iter().map(|(_, row)| row).collect()
-    }
-
-    /// One result for the model. A link or file starts with its id, such as `[12]`. A note
-    /// has none, since its text is the whole item.
-    pub fn line(row: &Saved, zone: &TimeZone) -> String {
-        let saved = Timestamp::from_second(row.created_at)
-            .map(|at| {
-                at.to_zoned_datetime(zone.clone())
-                    .strftime("%a %b %-d %Y")
-                    .to_string()
-            })
-            .unwrap_or_default();
-        let snippet: String = row
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(SNIPPET)
-            .collect();
-        if row.media == "note" {
-            return format!("- note, saved {saved}: {snippet}");
-        }
-        format!("- [{}] {}, saved {saved}: {snippet}", row.id, row.media)
-    }
-
-    fn words(text: &str) -> impl Iterator<Item = String> + '_ {
-        text.split(|c: char| !c.is_alphanumeric())
-            .filter(|word| word.chars().count() > 2)
-            .map(str::to_lowercase)
-    }
-
-    fn floats(bytes: &[u8]) -> Vec<f32> {
-        let (chunks, _) = bytes.as_chunks::<4>();
-        chunks.iter().copied().map(f32::from_le_bytes).collect()
-    }
-
-    fn cosine(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-        let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        dot / (norm(a) * norm(b)).max(f32::EPSILON)
     }
 }
 
@@ -262,7 +168,7 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "search",
-                "description": "Find saved links, files, and notes. Returns up to 10 results, best first. A link or file starts with its id, such as [12].",
+                "description": "Find saved links, files, and notes. Returns up to 10 results, best first, each with its URL.",
                 "parameters": { "type": "object", "properties": {
                     "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"austin apartment\". Omit it to list the newest saves." },
                     "after": { "type": "string", "description": "Only items saved at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },

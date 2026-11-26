@@ -1,5 +1,5 @@
 use crate::agent::Agent;
-use crate::db::{Db, Row, UnansweredMessage};
+use crate::db::{Db, Saved, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Search, Tapback, ToolCall};
@@ -23,6 +23,16 @@ const REMINDER_EVENT_PREFIX: &str = "reminder:";
 const DEBOUNCE: i64 = 5;
 /// The most model calls in one reply. It stops a model that keeps calling tools.
 const MAX_STEPS: usize = 6;
+
+/// The most results one search returns.
+const SEARCH_RESULTS: usize = 10;
+/// The reciprocal rank fusion constant. A larger value weighs the top ranks less.
+const RRF_K: f32 = 60.0;
+/// The most characters of search text one search result shows.
+const SNIPPET: usize = 300;
+
+/// The error for a `remind` or `cancel` id that is not a pending reminder.
+const NOT_PENDING: &str = "error: that reminder already fired or was canceled.";
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
@@ -184,65 +194,15 @@ impl Harness {
     /// tapback is the whole reply, and its text is empty.
     async fn run_agent(&self, burst: &[UnansweredMessage]) -> Result<String> {
         let message = burst.last().expect("a burst has a text");
-        let mut history = self.db.load_history(message.id, HISTORY_LIMIT)?;
-        self.show_ids(&mut history)?;
-        // The ids and URLs the model may write: ones in the chat, and ones a search returns.
+        let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
+        let mut context = Agent::context(&history, &self.prompt_context()?);
+        let saved = self.auto_save(burst, &mut context).await?;
+
+        // The URLs the model may send: the ones in the chat, and the ones a tool returns.
         let mut known: HashSet<String> = history
             .iter()
-            .flat_map(|row| Self::mentions(&row.content))
+            .flat_map(|row| Self::urls(&row.content))
             .collect();
-        let mut context = Agent::context(&history, &self.prompt_context()?);
-
-        // Satchel saves the links and files the user sent to keep, and reads the ones they only
-        // asked about. The model sees this as its own `save` call. It then knows what was saved.
-        // A due reminder's links were saved before. A URL sent twice counts once.
-        let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
-        let mut seen = HashSet::new();
-        let links = texts
-            .iter()
-            .flat_map(|text| Link::find_all(text))
-            .filter(|link| {
-                !link.suspicious && !message.is_reminder() && seen.insert(link.url.clone())
-            })
-            .collect();
-        let (links, asked) = self.agent.keep(&texts, links).await?;
-        let saved = !links.is_empty();
-        if saved || !asked.is_empty() {
-            let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
-            let mut result = "Nothing saved.".to_string();
-            if saved {
-                // The user's other words in the burst describe its links. Search reads them.
-                let words: Vec<String> = texts
-                    .iter()
-                    .map(|text| Link::split(text).0)
-                    .filter(|rest| !rest.is_empty())
-                    .collect();
-                let note = (!words.is_empty()).then(|| words.join("\n"));
-                result = self.save(message.id, &urls, note.as_deref()).await?;
-                self.react(burst, Tapback::Like).await?;
-            }
-            // The model sees the photos the user asked about.
-            let mut images = Vec::new();
-            for link in &asked {
-                let (text, media) = self.reader.read(&link.url, None, &self.agent).await;
-                images.extend(media.filter(|(mime, _)| mime.starts_with("image/")));
-                result += &format!(
-                    "\nNot saved, since the user only asked about it: {}: {text}",
-                    link.url
-                );
-            }
-            result += "\n\nAnswer every other question or request in the newest messages in text.";
-            let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
-            context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
-            Agent::push_results(&mut context, vec![result]);
-            if !images.is_empty() {
-                let content: Vec<Value> = images
-                    .iter()
-                    .map(|(mime, bytes)| json!({ "type": "image_url", "image_url": { "url": Agent::data_url(mime, bytes) } }))
-                    .collect();
-                context.push(json!({ "role": "user", "content": content }));
-            }
-        }
 
         let mut step = 0;
         let text = loop {
@@ -254,61 +214,158 @@ impl Harness {
             if step == MAX_STEPS {
                 break text;
             }
+
             if calls.is_empty() {
-                let unknown: Vec<String> = Self::mentions(&text)
-                    .filter(|mention| !known.contains(mention))
-                    .collect();
-                if unknown.is_empty() {
+                let Some(note) = Self::check_reply(&text, &known) else {
                     break text;
-                }
-                let note = format!(
-                    "(Satchel check, not from the user) Your reply was not sent. It has {}, which is not in the chat or a search result. Write your reply to the user's last message again. Call `search` if you need an id, and send a saved item only by its id, such as [2].",
-                    unknown.join(", ")
-                );
+                };
                 context.push(json!({ "role": "user", "content": note }));
                 continue;
             }
 
             let mut results = Vec::new();
             for call in &calls {
-                results.push(match call {
-                    Err(error) => format!("error: {error}"),
-                    Ok(ToolCall::Save { urls, note }) => {
-                        self.save(message.id, urls, note.as_deref()).await?
-                    }
-                    // A saved burst already has its 👍. A reminder has no text to react to.
-                    Ok(ToolCall::React { emoji }) => {
-                        if !saved && !message.is_reminder() {
-                            self.react(burst, *emoji).await?;
-                        }
-                        "ok".to_string()
-                    }
-                    Ok(ToolCall::Remind(remind)) => self.remind(remind, message.id)?,
-                    Ok(ToolCall::Search(search)) => {
-                        let result = self.search(search).await?;
-                        known.extend(Self::mentions(&result));
-                        result
-                    }
-                    Ok(ToolCall::Cancel { id }) => self.cancel(*id)?,
-                    Ok(ToolCall::TimeZone { time_zone }) => self.set_time_zone(time_zone)?,
-                });
+                let result = self.run_tool(call, burst, saved).await?;
+                known.extend(Self::urls(&result));
+                results.push(result);
             }
-            let failed = results.iter().any(|result| result.starts_with("error"));
             // A `react` call ends the model's reply. A tapback means it has nothing to say.
+            let failed = results.iter().any(|result| result.starts_with("error"));
             let reacted = calls
                 .iter()
-                .any(|c| matches!(c, Ok(ToolCall::React { .. })));
-            if !failed && reacted {
+                .any(|call| matches!(call, Ok(ToolCall::React { .. })));
+            if reacted && !failed {
                 break String::new();
             }
             Agent::push_results(&mut context, results);
         };
 
-        if history.len() == burst.len() {
+        let first_message = history.len() == burst.len();
+        self.finish(text, burst, first_message, saved).await
+    }
+
+    /// Saves the links and files the user sent to keep, and reads the ones they only asked
+    /// about. The model sees this as its own `save` call. It then knows what was saved. A due
+    /// reminder's links were saved before. A URL sent twice counts once. Returns whether
+    /// anything was saved.
+    async fn auto_save(
+        &self,
+        burst: &[UnansweredMessage],
+        context: &mut Vec<Value>,
+    ) -> Result<bool> {
+        let message = burst.last().expect("a burst has a text");
+        let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
+        let mut seen = HashSet::new();
+        let links = texts
+            .iter()
+            .flat_map(|text| Link::find_all(text))
+            .filter(|link| {
+                !link.suspicious && !message.is_reminder() && seen.insert(link.url.clone())
+            })
+            .collect();
+        let (links, asked) = self.agent.keep(&texts, links).await?;
+        let saved = !links.is_empty();
+        if !saved && asked.is_empty() {
+            return Ok(false);
+        }
+
+        let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
+        let mut result = "Nothing saved.".to_string();
+        if saved {
+            // The user's other words in the burst describe its links. Search reads them.
+            let words: Vec<String> = texts
+                .iter()
+                .map(|text| Link::split(text).0)
+                .filter(|rest| !rest.is_empty())
+                .collect();
+            let note = (!words.is_empty()).then(|| words.join("\n"));
+            result = self.save(message.id, &urls, note.as_deref()).await?;
+            self.react(burst, Tapback::Like).await?;
+        }
+
+        // The model sees the photos the user asked about.
+        let mut images = Vec::new();
+        for link in &asked {
+            let (text, media) = self.reader.read(&link.url, None, &self.agent).await;
+            images.extend(media.filter(|(mime, _)| mime.starts_with("image/")));
+            result += &format!(
+                "\nNot saved, since the user only asked about it: {}: {text}",
+                link.url
+            );
+        }
+        result += "\n\nAnswer every other question or request in the newest messages in text.";
+
+        let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
+        context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
+        Agent::push_results(context, vec![result]);
+        if !images.is_empty() {
+            let content: Vec<Value> = images
+                .iter()
+                .map(|(mime, bytes)| json!({ "type": "image_url", "image_url": { "url": Agent::data_url(mime, bytes) } }))
+                .collect();
+            context.push(json!({ "role": "user", "content": content }));
+        }
+        Ok(saved)
+    }
+
+    /// Runs one tool call and returns its result for the model.
+    async fn run_tool(
+        &self,
+        call: &std::result::Result<ToolCall, String>,
+        burst: &[UnansweredMessage],
+        saved: bool,
+    ) -> Result<String> {
+        let message = burst.last().expect("a burst has a text");
+        let call = match call {
+            Ok(call) => call,
+            Err(error) => return Ok(format!("error: {error}")),
+        };
+        match call {
+            ToolCall::Save { urls, note } => self.save(message.id, urls, note.as_deref()).await,
+            // A saved burst already has its 👍. A reminder has no text to react to.
+            ToolCall::React { emoji } => {
+                if !saved && !message.is_reminder() {
+                    self.react(burst, *emoji).await?;
+                }
+                Ok("ok".to_string())
+            }
+            ToolCall::Remind(remind) => self.remind(remind, message.id),
+            ToolCall::Search(search) => self.search(search).await,
+            ToolCall::Cancel { id } => self.cancel(*id),
+            ToolCall::TimeZone { time_zone } => self.set_time_zone(time_zone),
+        }
+    }
+
+    /// Returns a note that sends the reply back to the model if it has a URL that is not in
+    /// the chat or a tool result. The model may have changed or made up that URL. Returns
+    /// `None` if the reply can be sent.
+    fn check_reply(text: &str, known: &HashSet<String>) -> Option<String> {
+        let unknown: Vec<String> = Self::urls(text)
+            .filter(|url| !known.contains(url))
+            .collect();
+        if unknown.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "(Satchel check, not from the user) Your reply was not sent. It has {}, which is not in the chat or a search result. Write your reply to the user's last message again. Copy each URL exactly, or call `search` to find it.",
+            unknown.join(", ")
+        ))
+    }
+
+    /// Returns the text to send. The first message gets the greeting. The model sometimes
+    /// writes a tapback as text, such as "👍". That goes on the burst as a tapback, and the
+    /// text is empty. A reminder turn has no Linq message to react to.
+    async fn finish(
+        &self,
+        text: String,
+        burst: &[UnansweredMessage],
+        first_message: bool,
+        saved: bool,
+    ) -> Result<String> {
+        if first_message {
             return Ok(GREETING.to_string());
         }
-        // The model sometimes writes a tapback as text, such as "👍". Send it as a tapback. A
-        // reminder turn has no Linq message to react to.
+        let message = burst.last().expect("a burst has a text");
         let tapback = serde_json::from_value::<Tapback>(text.clone().into());
         let (Ok(emoji), false) = (tapback, message.is_reminder()) else {
             return Ok(text);
@@ -410,7 +467,7 @@ impl Harness {
                     Self::local_time(remind.schedule.due_at, &zone)?
                 )
             }
-            None if remind.id.is_some() => return Ok(Self::not_pending(id)),
+            None if remind.id.is_some() => return Ok(NOT_PENDING.to_string()),
             None => "ok".to_string(),
         };
 
@@ -433,17 +490,13 @@ impl Harness {
 
     fn cancel(&self, id: i64) -> Result<String> {
         let Some(reminder) = self.db.reminder(id)? else {
-            return Ok(Self::not_pending(id));
+            return Ok(NOT_PENDING.to_string());
         };
         self.db.set_reminder(id, None)?;
         Ok(format!(
             "ok, canceled the \"{}\" reminder. Tell the user.",
             reminder.content
         ))
-    }
-
-    fn not_pending(id: i64) -> String {
-        format!("error: no pending reminder has id {id}. It already fired or was canceled.")
     }
 
     fn set_time_zone(&self, name: &str) -> Result<String> {
@@ -469,11 +522,101 @@ impl Harness {
         }
         if !query.is_empty() {
             let vector = self.agent.embed_query(query).await?;
-            rows = Search::rank(query, &vector, rows);
+            rows = Self::rank(query, &vector, rows);
         }
-        rows.truncate(Search::RESULTS);
-        let lines: Vec<String> = rows.iter().map(|row| Search::line(row, &zone)).collect();
+        rows.truncate(SEARCH_RESULTS);
+        let lines: Vec<String> = rows
+            .iter()
+            .map(|row| Self::search_result(row, &zone))
+            .collect();
         Ok(lines.join("\n"))
+    }
+
+    /// Ranks `rows` two ways, then merges the two ranks with reciprocal rank fusion, best
+    /// first. One rank counts the query words in each row's search text. The other measures
+    /// how close each row's vector is to `query_vector`. Ties keep the newer row first.
+    fn rank(query: &str, query_vector: &[u8], rows: Vec<Saved>) -> Vec<Saved> {
+        let query_words: Vec<String> = Self::words(query).collect();
+        let query_vector = Self::floats(query_vector);
+
+        let mut word_hits = Vec::new();
+        let mut closeness = Vec::new();
+        for row in &rows {
+            let text = row.description.as_deref().unwrap_or_default();
+            let row_words: Vec<String> = Self::words(text).collect();
+            let hits = query_words
+                .iter()
+                .filter(|word| row_words.iter().any(|seen| seen.starts_with(word.as_str())))
+                .count();
+            word_hits.push(hits);
+
+            let vector = Self::floats(row.vector.as_deref().unwrap_or_default());
+            closeness.push(Self::cosine(&query_vector, &vector));
+        }
+
+        // Row indexes, best first. A row with no word hit is not in the word rank.
+        let mut by_words: Vec<usize> = (0..rows.len()).filter(|&i| word_hits[i] > 0).collect();
+        by_words.sort_by(|&a, &b| word_hits[b].cmp(&word_hits[a]));
+        let mut by_meaning: Vec<usize> = (0..rows.len()).collect();
+        by_meaning.sort_by(|&a, &b| closeness[b].total_cmp(&closeness[a]));
+
+        // Each rank gives a row 1 / (RRF_K + its place). Place 1 is the best.
+        let mut scores = vec![0.0; rows.len()];
+        for ranked in [by_words, by_meaning] {
+            for (place, i) in (1..).zip(ranked) {
+                scores[i] += 1.0 / (RRF_K + place as f32);
+            }
+        }
+
+        let mut scored: Vec<(f32, Saved)> = scores.into_iter().zip(rows).collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        scored.into_iter().map(|(_, row)| row).collect()
+    }
+
+    /// One search result for the model. A link or file starts with its URL. A note has none.
+    fn search_result(row: &Saved, zone: &TimeZone) -> String {
+        let saved = Timestamp::from_second(row.created_at)
+            .map(|at| {
+                at.to_zoned_datetime(zone.clone())
+                    .strftime("%a %b %-d %Y")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        // One line, at most `SNIPPET` characters.
+        let text = row.description.as_deref().unwrap_or_default();
+        let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let snippet: String = one_line.chars().take(SNIPPET).collect();
+
+        if row.media == "note" {
+            return format!("- note, saved {saved}: {snippet}");
+        }
+        format!(
+            "- {} ({}, saved {saved}): {snippet}",
+            row.content, row.media
+        )
+    }
+
+    /// The lowercase words in `text` longer than 2 characters.
+    fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() > 2)
+            .map(str::to_lowercase)
+    }
+
+    /// The `f32` values in little-endian `bytes`.
+    fn floats(bytes: &[u8]) -> Vec<f32> {
+        let (chunks, _) = bytes.as_chunks::<4>();
+        chunks
+            .iter()
+            .map(|&chunk| f32::from_le_bytes(chunk))
+            .collect()
+    }
+
+    /// The cosine similarity of `a` and `b`: 1 for the same direction, 0 for unrelated.
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let length = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        dot / (length(a) * length(b)).max(f32::EPSILON)
     }
 
     fn local_time(at: i64, zone: &TimeZone) -> Result<String> {
@@ -526,58 +669,10 @@ impl Harness {
             .map(|link| link.url.to_string())
     }
 
-    /// Adds the ids of the saved links and files in each user message to its end, such as
-    /// "(Satchel saved this as [12])".
-    fn show_ids(&self, history: &mut [Row]) -> Result<()> {
-        for row in history.iter_mut().filter(|row| row.role == "user") {
-            let mut ids = Vec::new();
-            for url in Self::urls(&row.content) {
-                if let Some(saved) = self.db.link(url.as_str().into())? {
-                    ids.push(format!("[{}]", saved.id));
-                }
-            }
-            if !ids.is_empty() {
-                row.content
-                    .push_str(&format!("\n(Satchel saved this as {})", ids.join(", ")));
-            }
-        }
-        Ok(())
-    }
-
-    /// The ids and URLs in `text`, such as "[12]" and "https://example.com".
-    fn mentions(text: &str) -> impl Iterator<Item = String> {
-        Self::ids(text)
-            .into_iter()
-            .map(|id| format!("[{id}]"))
-            .chain(Self::urls(text))
-    }
-
-    /// Each saved item id in `text`, such as `[12]`.
-    fn ids(text: &str) -> Vec<i64> {
-        text.match_indices('[')
-            .filter_map(|(start, _)| {
-                let rest = &text[start + 1..];
-                rest[..rest.find(']')?].parse().ok()
-            })
-            .collect()
-    }
-
-    /// Replaces each id of a saved link or file with its URL. The model never writes a saved
-    /// URL itself. Other brackets stay as they are.
-    fn expand_ids(&self, text: &str) -> Result<String> {
-        let mut expanded = text.to_string();
-        for id in Self::ids(text) {
-            if let Some(saved) = self.db.link(id.into())? {
-                expanded = expanded.replace(&format!("[{id}]"), &saved.content);
-            }
-        }
-        Ok(expanded)
-    }
-
-    /// Sends each part of `text` as its own message, after `expand_ids`. Linq requires a link
-    /// or media part to be the only part.
+    /// Sends each part of `text` as its own message. Linq requires a link or media part to be
+    /// the only part. A URL written twice is sent once.
     async fn send_text(&self, space_id: &str, event_id: &str, text: &str) -> Result<()> {
-        let (rest, mut urls) = Link::split(&self.expand_ids(text)?);
+        let (rest, mut urls) = Link::split(text);
         let mut seen = HashSet::new();
         urls.retain(|url| seen.insert(url.clone()));
         let mut parts = Vec::new();
