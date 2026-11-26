@@ -120,8 +120,14 @@ impl Harness {
             waiting = self.reply_all(space_id).await?;
         }
 
-        let wake = [self.db.next_due()?, waiting].into_iter().flatten().min();
-        Ok(wake.map(Self::until))
+        // Wake for the next reminder or the waiting burst, whichever comes first.
+        let wake_at = match (self.db.next_due()?, waiting) {
+            (Some(reminder), Some(burst)) => reminder.min(burst),
+            (Some(reminder), None) => reminder,
+            (None, Some(burst)) => burst,
+            (None, None) => return Ok(None),
+        };
+        Ok(Some(Self::until(wake_at)))
     }
 
     async fn reply_all(&self, space_id: &str) -> Result<Option<i64>> {
