@@ -113,7 +113,11 @@ impl Agent {
     }
 
     /// Splits `links` into the ones the user sent to keep and the ones they only asked about.
-    pub async fn keep(&self, texts: &[&str], links: Vec<Link>) -> Result<(Vec<Link>, Vec<Link>)> {
+    pub async fn save_or_read(
+        &self,
+        texts: &[&str],
+        links: Vec<Link>,
+    ) -> Result<(Vec<Link>, Vec<Link>)> {
         if links.is_empty() {
             return Ok((links, Vec::new()));
         }

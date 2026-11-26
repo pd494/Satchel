@@ -236,7 +236,7 @@ impl Harness {
     ) -> Result<bool> {
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
         let links = Self::burst_links(&texts, message.is_reminder());
-        let (links_to_save, links_to_read) = self.agent.keep(&texts, links).await?;
+        let (links_to_save, links_to_read) = self.agent.save_or_read(&texts, links).await?;
         let saved = !links_to_save.is_empty();
         if !saved && links_to_read.is_empty() {
             return Ok(false);
