@@ -463,8 +463,12 @@ impl Db {
         let select_query = if words.is_empty() {
             format!("{ROW} WHERE {filter} ORDER BY id DESC LIMIT {CHAT_HITS}")
         } else {
+            // A hit's content is the words around its match. The search result cuts each message
+            // to its start, and a long message would lose the match.
             format!(
-                "{ROW} JOIN messages_fts AS f ON f.rowid = chat.id \
+                "SELECT chat.id, chat.turn, chat.role, \
+                snippet(messages_fts, 0, '', '', '...', 32) AS content, chat.created_at \
+                FROM chat JOIN messages_fts AS f ON f.rowid = chat.id \
                 WHERE {filter} AND messages_fts MATCH ?4 ORDER BY f.rank LIMIT {CHAT_HITS}"
             )
         };
@@ -492,7 +496,14 @@ impl Db {
         let mut excerpts = Vec::new();
         for (from, to) in merged_ranges {
             let values = vec![from.into(), to.into(), before_turn.0.into()];
-            let excerpt: Vec<Row> = self.sql.exec(&excerpt_query, Some(values))?.to_array()?;
+            let mut excerpt: Vec<Row> = self.sql.exec(&excerpt_query, Some(values))?.to_array()?;
+            for row in &mut excerpt {
+                for hit in &hits {
+                    if hit.id == row.id {
+                        row.content = hit.content.clone();
+                    }
+                }
+            }
             excerpts.push(excerpt);
         }
         Ok(excerpts)
