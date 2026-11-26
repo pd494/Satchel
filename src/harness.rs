@@ -248,7 +248,7 @@ impl Harness {
             .collect();
         let mut result = "Nothing saved.".to_string();
         if saved {
-            let note = Self::burst_words(&texts);
+            let note = Self::burst_words(&texts, &links_to_read);
             result = self.save(message.id, &urls, note.as_deref()).await?;
             self.react(burst, Tapback::Like).await?;
         }
@@ -279,11 +279,15 @@ impl Harness {
     }
 
     /// The user's words in the burst, without the URLs. They become each saved link's context.
-    fn burst_words(texts: &[&str]) -> Option<String> {
+    /// A text with a link to read is skipped. Its words are a question about that link.
+    fn burst_words(texts: &[&str], links_to_read: &[Link]) -> Option<String> {
         let mut words = Vec::new();
         for text in texts {
-            let (rest, _) = Link::split(text);
-            if !rest.is_empty() {
+            let (rest, urls) = Link::split(text);
+            let asks_about_a_link = links_to_read
+                .iter()
+                .any(|link| urls.contains(&link.url.to_string()));
+            if !rest.is_empty() && !asks_about_a_link {
                 words.push(rest);
             }
         }
