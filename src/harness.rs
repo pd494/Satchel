@@ -192,7 +192,7 @@ impl Harness {
         let message = burst.last().expect("a burst has a text");
         let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
         let mut context = Agent::context(&history, &self.prompt_context()?);
-        let saved = self.auto_save(burst, &mut context).await?;
+        let saved = self.handle_burst(burst, &mut context).await?;
 
         let mut step = 0;
         let text = loop {
@@ -224,7 +224,7 @@ impl Harness {
         self.finish(text, burst, first_message, saved).await
     }
 
-    async fn auto_save(
+    async fn handle_burst(
         &self,
         burst: &[UnansweredMessage],
         context: &mut Vec<Value>,
