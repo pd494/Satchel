@@ -691,7 +691,7 @@ impl Harness {
             json!({ "role": "system", "content": COMPACT_PROMPT }),
             json!({ "role": "user", "content": input }),
         ];
-        let schema = json!({
+        let response_schema = json!({
             "type": "object",
             "required": ["summary", "facts"],
             "properties": {
@@ -705,7 +705,11 @@ impl Harness {
         });
         let (text, _) = self
             .agent
-            .run_model(&mut context, json!({ "step": "compact" }), Some(&schema))
+            .run_model(
+                &mut context,
+                json!({ "step": "compact" }),
+                Some(&response_schema),
+            )
             .await?;
         let compaction: Compaction = serde_json::from_str(&text)?;
 

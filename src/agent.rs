@@ -71,21 +71,26 @@ impl Agent {
     }
 
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
-    /// tool calls. `metadata` tags the AI Gateway log. With a `schema`, the model gets no tools
-    /// and replies with JSON in that shape.
+    /// tool calls. `metadata` tags the AI Gateway log.
     pub async fn run_model(
         &self,
         context: &mut Vec<Value>,
         mut metadata: Value,
-        schema: Option<&Value>,
+        response_schema: Option<&Value>,
     ) -> Result<(String, Calls)> {
         let mut input = json!({
             "messages": context,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        match schema {
-            Some(schema) => {
-                input["response_format"] = json!({ "type": "json_schema", "json_schema": schema })
+        // `None` is a reply to the user. The model gets the tools, and it answers with text, tool
+        // calls, or both.
+        // `Some` is a JSON Schema, such as the one `Harness::compact` sends. The model gets no
+        // tools, and Workers AI's JSON mode makes it answer with JSON in that shape. The two
+        // modes do not mix: with tools, the model could call a tool instead of writing the JSON.
+        match response_schema {
+            Some(response_schema) => {
+                input["response_format"] =
+                    json!({ "type": "json_schema", "json_schema": response_schema })
             }
             None => input["tools"] = self.tools.clone(),
         }
