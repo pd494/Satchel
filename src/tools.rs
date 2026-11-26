@@ -58,17 +58,8 @@ pub enum ToolCall {
 #[derive(Deserialize)]
 pub struct Search {
     pub query: Option<String>,
-    /// `None` looks in both saved items and past chats.
-    pub scope: Option<Scope>,
     after: Option<DateTime>,
     before: Option<DateTime>,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    Saved,
-    Chat,
 }
 
 impl Search {
@@ -201,7 +192,6 @@ impl ToolCall {
                 "description": "Find saved links, files, and notes, and past chat messages. Returns up to 10 saved items, best first, each with its URL, and up to 5 past messages, each with the messages around it.",
                 "parameters": { "type": "object", "properties": {
                     "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"tokyo trip\". Omit it to list the newest saves, or, with `after` or `before`, everything from that time." },
-                    "scope": { "type": "string", "enum": ["saved", "chat"], "description": "`saved`: saved items. `chat`: past messages. If it finds nothing, the other one is searched. Omit it to search both." },
                     "after": { "type": "string", "description": "Only items saved, or messages sent, at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },
                     "before": { "type": "string", "description": "Only items saved, or messages sent, before this local date and time, such as 2026-11-23T00:00:00. Omit it unless the user names a time." },
                 }},

@@ -2,7 +2,7 @@ use crate::agent::Agent;
 use crate::db::{Db, Role, Row, Saved, Setting, SettingChange, Summary, Turn, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
-use crate::tools::{Remind, Scope, Search, Tapback, ToolCall, ToolResult};
+use crate::tools::{Remind, Search, Tapback, ToolCall, ToolResult};
 use jiff::{tz::TimeZone, Timestamp};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -753,39 +753,27 @@ impl Harness {
         };
         let query = search.query.as_deref().map(str::trim);
         let query = query.filter(|query| !query.is_empty());
-        // A scope that finds nothing falls back to the other one. `None` searches both.
-        let tries = match search.scope {
-            None => vec![None],
-            Some(Scope::Saved) => vec![Some(Scope::Saved), Some(Scope::Chat)],
-            Some(Scope::Chat) => vec![Some(Scope::Chat), Some(Scope::Saved)],
-        };
 
-        for scope in tries {
-            let mut sections = Vec::new();
-            if matches!(scope, None | Some(Scope::Saved)) {
-                let lines = self.search_saved(query, after, before, &zone).await?;
-                if !lines.is_empty() {
-                    sections.push(format!("Saved items:\n{}", lines.join("\n")));
-                }
-            }
-            if matches!(scope, None | Some(Scope::Chat)) {
-                let mut blocks = Vec::new();
-                for block in self.db.search_chat(query, after, before, before_turn)? {
-                    let mut lines = Vec::new();
-                    for row in &block {
-                        lines.push(Self::transcript_line(row, &zone, Some(SNIPPET))?);
-                    }
-                    blocks.push(lines.join("\n"));
-                }
-                if !blocks.is_empty() {
-                    sections.push(format!("Past chat:\n{}", blocks.join("\n\n")));
-                }
-            }
-            if !sections.is_empty() {
-                return Ok(ToolResult::Done(sections.join("\n\n")));
-            }
+        let mut sections = Vec::new();
+        let lines = self.search_saved(query, after, before, &zone).await?;
+        if !lines.is_empty() {
+            sections.push(format!("Saved items:\n{}", lines.join("\n")));
         }
-        Ok(ToolResult::Done("Nothing matches.".to_string()))
+        let mut blocks = Vec::new();
+        for block in self.db.search_chat(query, after, before, before_turn)? {
+            let mut lines = Vec::new();
+            for row in &block {
+                lines.push(Self::transcript_line(row, &zone, Some(SNIPPET))?);
+            }
+            blocks.push(lines.join("\n"));
+        }
+        if !blocks.is_empty() {
+            sections.push(format!("Past chat:\n{}", blocks.join("\n\n")));
+        }
+        if sections.is_empty() {
+            return Ok(ToolResult::Done("Nothing matches.".to_string()));
+        }
+        Ok(ToolResult::Done(sections.join("\n\n")))
     }
 
     async fn search_saved(
