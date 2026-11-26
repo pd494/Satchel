@@ -148,7 +148,7 @@ on allCases()
 		{"r-ask-detail", "the one who lives above me", "text-only", "Omar"}, ¬
 		{"r-ask-missing", "what was my old landlords name", "text", ""}, ¬
 		{"r-ask-missing-2", "idk the place before this one", "text", ""}, ¬
-		{"r-ask-missing-3", "no clue honestly", "text-only", "not"}, ¬
+		{"r-ask-missing-3", "no clue honestly", "text-only", ""}, ¬
 		{"m-recall-note", "the code for the place??", "text-only", "4417"}, ¬
 		{"m-recall-link", "that neighborhood link", "text", "wikipedia.org"}, ¬
 		{"m-saved-list", "what do u have of mine", "text", ""}, ¬
