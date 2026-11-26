@@ -753,22 +753,22 @@ impl Harness {
         };
         let query = search.query.as_deref().map(str::trim);
         let query = query.filter(|query| !query.is_empty());
-        // Each try is (in_saved, in_chat). A scope that finds nothing falls back to the other one.
+        // A scope that finds nothing falls back to the other one. `None` searches both.
         let tries = match search.scope {
-            None => vec![(true, true)],
-            Some(Scope::Saved) => vec![(true, false), (false, true)],
-            Some(Scope::Chat) => vec![(false, true), (true, false)],
+            None => vec![None],
+            Some(Scope::Saved) => vec![Some(Scope::Saved), Some(Scope::Chat)],
+            Some(Scope::Chat) => vec![Some(Scope::Chat), Some(Scope::Saved)],
         };
 
-        for (in_saved, in_chat) in tries {
+        for scope in tries {
             let mut sections = Vec::new();
-            if in_saved {
+            if matches!(scope, None | Some(Scope::Saved)) {
                 let lines = self.search_saved(query, after, before, &zone).await?;
                 if !lines.is_empty() {
                     sections.push(format!("Saved items:\n{}", lines.join("\n")));
                 }
             }
-            if in_chat {
+            if matches!(scope, None | Some(Scope::Chat)) {
                 let mut blocks = Vec::new();
                 for block in self.db.search_chat(query, after, before, before_turn)? {
                     let mut lines = Vec::new();
