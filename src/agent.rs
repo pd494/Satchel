@@ -1,15 +1,15 @@
-use crate::db::{Role, Row, Setting, SettingChange, Summary};
+use crate::db::{Role, Row, Setting, Summary};
 use crate::media::Link;
 use crate::tools::{ToolCall, ToolResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use jiff::{tz::TimeZone, Timestamp};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use worker::js_sys::{Array, Object, Promise, Reflect, Uint8Array};
 use worker::wasm_bindgen_futures::JsFuture;
 use worker::web_sys::Blob;
-use worker::{console_error, Env, Result};
+use worker::{Env, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 /// Decides which links in a burst the user sent to keep. It returns a choice, not text.
@@ -23,7 +23,6 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 /// Vectors are stored at this size. Queries must use the same size.
 const DIMENSIONS: u32 = 512;
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
-const COMPACT_PROMPT: &str = include_str!("prompts/compact.md");
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
@@ -50,23 +49,6 @@ extern "C" {
         document: JsValue,
         options: JsValue,
     ) -> std::result::Result<Promise, JsValue>;
-}
-
-pub struct Compaction {
-    pub summary: String,
-    pub facts: Vec<SettingChange>,
-}
-
-#[derive(Deserialize)]
-struct RawCompaction {
-    summary: String,
-    facts: Vec<RawFact>,
-}
-
-#[derive(Deserialize)]
-struct RawFact {
-    key: String,
-    value: String,
 }
 
 pub struct Agent {
@@ -113,7 +95,7 @@ impl Agent {
         Ok(context)
     }
 
-    fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
+    pub fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
         let mut lines = Vec::new();
         for setting in settings {
             let said = Timestamp::from_second(setting.said_at)
@@ -152,88 +134,36 @@ impl Agent {
         Ok(format!("- {sent}, {who}: {text}"))
     }
 
-    /// Asks the model for a new summary that also covers `rows`, and for the facts in them. Logs
-    /// and skips a fact that fails to parse. Returns an error for bad JSON or an empty summary.
-    pub async fn summarize(
-        &self,
-        summary: Option<&Summary>,
-        settings: &[Setting],
-        rows: &[Row],
-        zone: &TimeZone,
-    ) -> Result<Compaction> {
-        let mut chat = Vec::new();
-        for row in rows {
-            chat.push(Self::chat_line(row, zone, None)?);
-        }
-        let input_text = format!(
-            "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
-            summary.map_or("(none)", |summary| summary.text.as_str()),
-            Self::settings_text(settings, zone)?,
-            chat.join("\n")
-        );
-        let schema = json!({
-            "type": "object",
-            "required": ["summary", "facts"],
-            "properties": {
-                "summary": { "type": "string" },
-                "facts": { "type": "array", "items": {
-                    "type": "object",
-                    "required": ["key", "value"],
-                    "properties": { "key": { "type": "string" }, "value": { "type": "string" } },
-                }},
-            },
-        });
-        let input = json!({
-            "messages": [
-                { "role": "system", "content": COMPACT_PROMPT },
-                { "role": "user", "content": input_text },
-            ],
-            "response_format": { "type": "json_schema", "json_schema": schema },
-            "chat_template_kwargs": { "enable_thinking": false },
-        });
-        let options = Self::gateway(json!({ "step": "compact" }));
-        let output = self.call(MODEL, &input, Some(&options)).await?;
-        let content = &output["choices"][0]["message"]["content"];
-        let raw: RawCompaction = match content.as_str() {
-            Some(text) => serde_json::from_str(&Self::clean(text))?,
-            None => serde_json::from_value(content.clone())?,
-        };
-
-        let summary = raw.summary.trim().to_string();
-        if summary.is_empty() {
-            return Err("the compaction returned an empty summary".into());
-        }
-        let mut facts = Vec::new();
-        for fact in raw.facts {
-            match SettingChange::parse(&fact.key, &fact.value) {
-                Ok(change) => facts.push(change),
-                Err(error) => console_error!("compaction fact {}: {error}", fact.key),
-            }
-        }
-        Ok(Compaction { summary, facts })
-    }
-
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
-    /// tool calls. The AI Gateway log gets the message's `event_id` and the tool loop `step`.
+    /// tool calls. `metadata` tags the AI Gateway log. With a `schema`, the model gets no tools
+    /// and replies with JSON in that shape.
     pub async fn run_model(
         &self,
         context: &mut Vec<Value>,
-        event_id: &str,
-        step: usize,
+        mut metadata: Value,
+        schema: Option<&Value>,
     ) -> Result<(String, Calls)> {
-        let input = json!({
+        let mut input = json!({
             "messages": context,
-            "tools": self.tools,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        let mut metadata = json!({ "event_id": event_id, "step": step });
+        match schema {
+            Some(schema) => {
+                input["response_format"] = json!({ "type": "json_schema", "json_schema": schema })
+            }
+            None => input["tools"] = self.tools.clone(),
+        }
         if let Some(run) = &self.eval_run {
             metadata["eval_run"] = json!(run);
         }
         let options = Self::gateway(metadata);
         let mut output = self.call(MODEL, &input, Some(&options)).await?;
         let mut response = output["choices"][0]["message"].take();
-        let text = Self::clean(response["content"].as_str().unwrap_or_default());
+        let text = match &response["content"] {
+            Value::String(text) => Self::clean(text),
+            Value::Null => String::new(),
+            json => json.to_string(),
+        };
         let calls = Self::split_calls(&mut response);
         context.push(response);
         Ok((text, calls))

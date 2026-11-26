@@ -4,11 +4,13 @@ use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Scope, Search, Tapback, ToolCall, ToolResult};
 use jiff::{tz::TimeZone, Timestamp};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
+const COMPACT_PROMPT: &str = include_str!("prompts/compact.md");
 const COMPACT_AT_TOKENS: usize = 4_000;
 const KEEP_RECENT: usize = 10;
 
@@ -32,6 +34,19 @@ const NOT_PENDING: &str = "that reminder already fired or was canceled.";
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
+
+/// The model's JSON from the compact prompt.
+#[derive(Deserialize)]
+struct Compaction {
+    summary: String,
+    facts: Vec<Fact>,
+}
+
+#[derive(Deserialize)]
+struct Fact {
+    key: String,
+    value: String,
+}
 
 pub struct Harness {
     db: Db,
@@ -218,7 +233,11 @@ impl Harness {
         let text = loop {
             let (text, calls) = self
                 .agent
-                .run_model(&mut context, &message.event_id, step)
+                .run_model(
+                    &mut context,
+                    json!({ "event_id": message.event_id, "step": step }),
+                    None,
+                )
                 .await?;
             step += 1;
             if calls.is_empty() || step == MAX_STEPS {
@@ -592,15 +611,55 @@ impl Harness {
             return Ok(());
         }
 
+        // One model call with the compact prompt returns the new summary and the facts.
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
-        let compaction = self
+        let mut lines = Vec::new();
+        for row in &older {
+            lines.push(Agent::chat_line(row, &zone, None)?);
+        }
+        let input = format!(
+            "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
+            summary
+                .as_ref()
+                .map_or("(none)", |summary| summary.text.as_str()),
+            Agent::settings_text(&self.db.settings()?, &zone)?,
+            lines.join("\n")
+        );
+        let mut context = vec![
+            json!({ "role": "system", "content": COMPACT_PROMPT }),
+            json!({ "role": "user", "content": input }),
+        ];
+        let schema = json!({
+            "type": "object",
+            "required": ["summary", "facts"],
+            "properties": {
+                "summary": { "type": "string" },
+                "facts": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["key", "value"],
+                    "properties": { "key": { "type": "string" }, "value": { "type": "string" } },
+                }},
+            },
+        });
+        let (text, _) = self
             .agent
-            .summarize(summary.as_ref(), &self.db.settings()?, &older, &zone)
+            .run_model(&mut context, json!({ "step": "compact" }), Some(&schema))
             .await?;
-        if !self
-            .db
-            .save_compaction(&older, &compaction.summary, &compaction.facts)?
-        {
+        let compaction: Compaction = serde_json::from_str(&text)?;
+
+        // A fact that fails to parse is logged and skipped. An empty summary writes nothing.
+        let new_summary = compaction.summary.trim();
+        if new_summary.is_empty() {
+            return Err("the compaction returned an empty summary".into());
+        }
+        let mut facts = Vec::new();
+        for fact in compaction.facts {
+            match SettingChange::parse(&fact.key, &fact.value) {
+                Ok(change) => facts.push(change),
+                Err(error) => console_error!("compaction fact {}: {error}", fact.key),
+            }
+        }
+        if !self.db.save_compaction(&older, new_summary, &facts)? {
             console_error!("a reset deleted the chat during compaction");
         }
         Ok(())
