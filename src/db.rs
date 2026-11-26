@@ -12,11 +12,6 @@ use worker::{Result, SqlStorage, SqlStorageValue};
 /// +----+-----------+------------------+----------+----------+----------+------+------------+
 /// ```
 /// `sent` on a user message means it was answered, by its own reply or a later one.
-/// `chat` is each message with its turn: a reply belongs to the turn of the text it answers.
-/// `messages_fts` indexes every message's text for `search`. Messages are never deleted.
-/// `settings` holds what the user said about themselves. A `NULL` value is a removal, kept with
-/// its date so that a compaction of older messages cannot bring the old value back.
-/// `summary` is one row: the summary of every turn up to and including `through`.
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY,
@@ -90,9 +85,8 @@ const SAVED: &str = "id, media, content, context, description, created_at, vecto
 
 const ROW: &str = "SELECT chat.id, chat.turn, chat.role, chat.content, chat.created_at FROM chat";
 
-/// Past messages one chat search returns. Each comes with `AROUND` messages on each side.
 const CHAT_HITS: i64 = 5;
-const AROUND: i64 = 3;
+const NEIGHBORS: i64 = 3;
 
 #[derive(Deserialize)]
 struct NextDue {
@@ -115,8 +109,7 @@ pub struct Saved {
     pub vector: Option<Vec<u8>>,
 }
 
-/// A user text and the reply to it share one turn: the id of the text. Only rows read from the
-/// database make one. A message id or a time cannot be passed where a turn belongs.
+/// A user text and the reply to it share one turn: the id of the text.
 #[derive(Clone, Copy, Deserialize, PartialEq, PartialOrd)]
 #[serde(transparent)]
 pub struct Turn(i64);
@@ -128,7 +121,6 @@ pub enum Role {
     Assistant,
 }
 
-/// A row of the `chat` view.
 #[derive(Deserialize)]
 pub struct Row {
     id: i64,
@@ -157,16 +149,13 @@ pub struct UnansweredMessage {
     pub response: Option<String>,
 }
 
-/// A setting the user has. Removed settings are never read.
 #[derive(Deserialize)]
 pub struct Setting {
     pub key: String,
     pub value: String,
-    /// When the user said it.
     pub said_at: i64,
 }
 
-/// One change to the user's settings, from the `settings` tool, `remind`, or compaction.
 pub enum SettingChange {
     TimeZone(TimeZone),
     Set { key: String, value: String },
@@ -174,14 +163,13 @@ pub enum SettingChange {
 }
 
 impl UnansweredMessage {
-    /// A user message starts its own turn.
     pub fn turn(&self) -> Turn {
         Turn(self.id)
     }
 }
 
 impl SettingChange {
-    /// Reads the `{ key, value }` the model sends. An empty value removes the key.
+    /// An empty value removes the key.
     pub fn parse(key: &str, value: &str) -> std::result::Result<Self, String> {
         let key = key.trim().to_lowercase();
         let value = value.trim();
@@ -321,7 +309,6 @@ impl Db {
         Ok(())
     }
 
-    /// Returns the user's settings, by key.
     pub fn settings(&self) -> Result<Vec<Setting>> {
         let select_query =
             "SELECT key, value, said_at FROM settings WHERE value IS NOT NULL ORDER BY key";
@@ -338,8 +325,7 @@ impl Db {
         Ok(None)
     }
 
-    /// Writes `change`, said at `said_at`. A newer statement wins: a change said before the
-    /// stored one changes nothing. The same value keeps its first date.
+    /// A change said before the stored one changes nothing. The same value keeps its first date.
     pub fn change_setting(&self, change: &SettingChange, said_at: i64) -> Result<()> {
         let (key, value) = match change {
             SettingChange::TimeZone(zone) => {
@@ -365,12 +351,8 @@ impl Db {
         Ok(rows.pop())
     }
 
-    /// Writes what one compaction of `rows` found: the facts, then the summary up to the last
-    /// row. A reset during the model call deletes the rows, and then nothing is written. Returns
-    /// whether it wrote.
-    ///
-    /// The facts count as said at the first compacted message. A setting the tool wrote during
-    /// or after these messages is newer, and it wins.
+    /// Writes nothing if a reset deleted the rows during the model call. Returns whether it
+    /// wrote. The facts get the date of the first row.
     pub fn save_compaction(
         &self,
         rows: &[Row],
@@ -392,7 +374,6 @@ impl Db {
             return Ok(false);
         }
 
-        // Facts first. A failure before the summary write leaves the summary where it was.
         for fact in facts {
             self.change_setting(fact, first.created_at)?;
         }
@@ -442,10 +423,8 @@ impl Db {
     /// Returns the messages in the turns after `after`, up to and including `up_to`, oldest
     /// first. `None` leaves that side open.
     pub fn chat(&self, after: Option<Turn>, up_to: Option<Turn>) -> Result<Vec<Row>> {
-        // A message's id is never below its turn. `chat.id > ?1` keeps the same rows and lets
-        // SQLite skip the older ones.
         let select_query = format!(
-            "{ROW} WHERE (?1 IS NULL OR (chat.id > ?1 AND turn > ?1)) \
+            "{ROW} WHERE (?1 IS NULL OR turn > ?1) \
             AND (?2 IS NULL OR turn <= ?2) ORDER BY turn, id"
         );
         let values = vec![
@@ -455,10 +434,9 @@ impl Db {
         self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
-    /// Finds past messages in the turns before `before_turn`. With a `query`, the best matches
-    /// for its words come first. Without one, the newest messages between `after` and `before`
-    /// come first. Each match comes with the `AROUND` messages on each side, and matches that
-    /// touch are joined. Returns one block of messages per group, oldest first.
+    /// Finds past messages in the turns before `before_turn`. Each match comes with `NEIGHBORS`
+    /// messages on each side. Matches that touch become one block. Returns the blocks oldest
+    /// first.
     pub fn search_chat(
         &self,
         query: Option<&str>,
@@ -499,7 +477,7 @@ impl Db {
         // Each hit and its neighbors, oldest first. Ranges that overlap or touch are joined.
         let mut ranges: Vec<(i64, i64)> = Vec::new();
         for hit in &hits {
-            ranges.push((hit.id - AROUND, hit.id + AROUND));
+            ranges.push((hit.id - NEIGHBORS, hit.id + NEIGHBORS));
         }
         ranges.sort();
         let mut joined: Vec<(i64, i64)> = Vec::new();

@@ -52,14 +52,11 @@ extern "C" {
     ) -> std::result::Result<Promise, JsValue>;
 }
 
-/// What one compaction returns: the new summary of the older chat, and the setting changes it
-/// found.
 pub struct Compaction {
     pub summary: String,
     pub facts: Vec<SettingChange>,
 }
 
-/// The model's JSON for a compaction, before each fact is checked.
 #[derive(Deserialize)]
 struct RawCompaction {
     summary: String,
@@ -94,10 +91,6 @@ impl Agent {
         })
     }
 
-    /// The prompt, in a fixed order: the system prompt, the user's settings, and the summary of
-    /// the older chat, then the chat after the summary, then `now` (the "Now:" line and the
-    /// pending reminders) as its own system message. Only `now` changes on every call. The start
-    /// of the prompt stays the same between calls.
     pub fn context(
         settings: &[Setting],
         summary: Option<&Summary>,
@@ -120,7 +113,6 @@ impl Agent {
         Ok(context)
     }
 
-    /// One line per setting, with the date the user said it in `zone`, or "None yet.".
     fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
         let mut lines = Vec::new();
         for setting in settings {
@@ -139,8 +131,6 @@ impl Agent {
         Ok(lines.join("\n"))
     }
 
-    /// A message as one line, with when it was sent and who sent it. `max_chars` cuts long
-    /// messages. `None` keeps the whole message.
     pub fn chat_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
         let sent = Timestamp::from_second(row.created_at)
             .map_err(|error| error.to_string())?
@@ -162,9 +152,8 @@ impl Agent {
         Ok(format!("- {sent}, {who}: {text}"))
     }
 
-    /// Compacts `rows`, the oldest messages after the summary, into a new summary, and finds the
-    /// setting changes in them. A fact that fails to parse is logged and skipped. Bad JSON or an
-    /// empty summary is an error, and then nothing is written.
+    /// Logs and skips a fact that fails to parse. Returns an error for bad JSON or an empty
+    /// summary.
     pub async fn compact(
         &self,
         summary: Option<&Summary>,
@@ -250,7 +239,6 @@ impl Agent {
         Ok((text, calls))
     }
 
-    /// AI Gateway options for a `MODEL` call. `metadata` tags its log.
     fn gateway(metadata: Value) -> Value {
         json!({ "gateway": {
             "id": "satchel",

@@ -19,14 +19,12 @@ pub enum Tapback {
     Question,
 }
 
-/// What a tool tells the model. An `Error` tells the model to fix its call or tell the user.
 pub enum ToolResult {
     Done(String),
     Error(String),
 }
 
 impl ToolResult {
-    /// The text of the tool message. An error starts with "error: ".
     pub fn into_text(self) -> String {
         match self {
             Self::Done(text) => text,
@@ -60,7 +58,7 @@ pub enum ToolCall {
 #[derive(Deserialize)]
 pub struct Search {
     pub query: Option<String>,
-    /// Where to look. `None` looks in both saved items and past chats.
+    /// `None` looks in both saved items and past chats.
     pub scope: Option<Scope>,
     after: Option<DateTime>,
     before: Option<DateTime>,

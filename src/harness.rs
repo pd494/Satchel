@@ -9,10 +9,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
-/// Compaction runs when the summary and the chat in the prompt reach about this many tokens.
-/// Raise it for a model with a larger, cheaper context window.
 const COMPACT_AT_TOKENS: usize = 4_000;
-/// The newest messages that compaction keeps word for word.
 const KEEP_RECENT: usize = 10;
 
 /// Runs before a message gets `SORRY` instead.
@@ -89,8 +86,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Replies to every unanswered message. When every text has its reply, compacts the chat if
-    /// it grew too long. Texts that arrive while compaction runs get their replies after it.
+    /// Replies to every unanswered message.
     /// Returns how long until the next reminder or waiting burst, or `None` if none is pending.
     pub async fn inbox(&self, space_id: &str) -> Result<Option<Duration>> {
         // Show the user that Satchel read the chat. A failure here does not stop the replies.
@@ -101,8 +97,6 @@ impl Harness {
         self.queue_due_reminders()?;
 
         let mut waiting = self.reply_all(space_id).await?;
-        // A compaction never takes a turn that waits for its reply. A failed one changes nothing,
-        // and the next `inbox` tries again.
         if waiting.is_none() {
             if let Err(error) = self.compact().await {
                 console_error!("compaction failed: {error}");
@@ -110,15 +104,10 @@ impl Harness {
             waiting = self.reply_all(space_id).await?;
         }
 
-        // Read the next reminder last. A `remind` call in this run may have set one.
         let wake = [self.db.next_due()?, waiting].into_iter().flatten().min();
         Ok(wake.map(Self::until))
     }
 
-    /// Replies to every unanswered message, oldest first. A reply is stored before it is sent.
-    /// A failed send only resends it. After `MAX_ATTEMPTS` runs, a message gets `SORRY`,
-    /// and it is marked sent even if that send fails. A burst still inside `DEBOUNCE` waits.
-    /// Returns when that burst is due, if one waits.
     async fn reply_all(&self, space_id: &str) -> Result<Option<i64>> {
         let mut waiting = None;
         loop {
@@ -556,8 +545,6 @@ impl Harness {
         )))
     }
 
-    /// Sets, changes, or removes one of the user's settings. A new time zone returns the new
-    /// "Now:" line.
     fn settings(&self, key: &str, value: &str) -> Result<ToolResult> {
         let change = match SettingChange::parse(key, value) {
             Ok(change) => change,
@@ -573,9 +560,6 @@ impl Harness {
         Ok(ToolResult::Done(reply))
     }
 
-    /// When the summary and the chat after it reach `COMPACT_AT_TOKENS`, compacts the oldest
-    /// messages into the summary, and writes the setting changes in them. The newest
-    /// `KEEP_RECENT` messages stay. Messages are never deleted: `search` still finds them.
     async fn compact(&self) -> Result<()> {
         let summary = self.db.summary()?;
         let rows = self
@@ -620,8 +604,6 @@ impl Harness {
         Ok(())
     }
 
-    /// Searches saved items, past chat, or both. Chat search covers the turns before
-    /// `before_turn`, the current burst.
     async fn search(&self, search: &Search, before_turn: Turn) -> Result<ToolResult> {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let (after, before) = match search.bounds(&zone) {
@@ -662,7 +644,6 @@ impl Harness {
         Ok(ToolResult::Done(sections.join("\n\n")))
     }
 
-    /// The saved items that best match `query`, one line each. Without a query, the newest.
     async fn search_saved(
         &self,
         query: Option<&str>,
