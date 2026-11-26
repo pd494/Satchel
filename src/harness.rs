@@ -112,16 +112,16 @@ impl Harness {
 
         self.queue_due_reminders()?;
 
-        let mut waiting = self.reply_all(space_id).await?;
-        if waiting.is_none() {
+        let mut burst_due_at = self.reply_all(space_id).await?;
+        if burst_due_at.is_none() {
             if let Err(error) = self.compact().await {
                 console_error!("compaction failed: {error}");
             }
-            waiting = self.reply_all(space_id).await?;
+            burst_due_at = self.reply_all(space_id).await?;
         }
 
         // Wake for the next reminder or the waiting burst, whichever comes first.
-        let wake_at = match (self.db.next_due()?, waiting) {
+        let wake_at = match (self.db.next_due()?, burst_due_at) {
             (Some(reminder), Some(burst)) => reminder.min(burst),
             (Some(reminder), None) => reminder,
             (None, Some(burst)) => burst,
@@ -130,8 +130,11 @@ impl Harness {
         Ok(Some(Self::until(wake_at)))
     }
 
+    /// Replies to every burst it can. Stops at a burst whose newest text is under `DEBOUNCE`
+    /// seconds old, and returns the time that burst can be answered. Returns `None` when every
+    /// text has its reply.
     async fn reply_all(&self, space_id: &str) -> Result<Option<i64>> {
-        let mut waiting = None;
+        let mut burst_due_at = None;
         loop {
             let burst = Self::next_turn(self.db.unanswered()?);
             let Some(message) = burst.last() else {
@@ -140,7 +143,7 @@ impl Harness {
             // A text that arrived while this alarm ran waits out its own debounce.
             let debounced = message.created_at + DEBOUNCE;
             if !message.alone() && debounced > Timestamp::now().as_second() {
-                waiting = Some(debounced);
+                burst_due_at = Some(debounced);
                 break;
             }
 
@@ -170,7 +173,7 @@ impl Harness {
             }
             sent?;
         }
-        Ok(waiting)
+        Ok(burst_due_at)
     }
 
     /// Typing dots are a nicety. A failure does not stop the reply.
