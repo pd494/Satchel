@@ -278,8 +278,7 @@ impl Harness {
         links
     }
 
-    /// The user's words in the burst, without the URLs. They are saved as the saved links'
-    /// context.
+    /// The user's words in the burst, without the URLs. They become each saved link's context.
     fn burst_words(texts: &[&str]) -> Option<String> {
         let mut words = Vec::new();
         for text in texts {
