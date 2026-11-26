@@ -113,7 +113,7 @@ impl Agent {
         Ok(lines.join("\n"))
     }
 
-    pub fn chat_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
+    pub fn transcript_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
         let sent = Timestamp::from_second(row.created_at)
             .map_err(|error| error.to_string())?
             .to_zoned_datetime(zone.clone())

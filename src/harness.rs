@@ -615,7 +615,7 @@ impl Harness {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let mut lines = Vec::new();
         for row in &older {
-            lines.push(Agent::chat_line(row, &zone, None)?);
+            lines.push(Agent::transcript_line(row, &zone, None)?);
         }
         let input = format!(
             "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
@@ -693,7 +693,7 @@ impl Harness {
                 for block in self.db.search_chat(query, after, before, before_turn)? {
                     let mut lines = Vec::new();
                     for row in &block {
-                        lines.push(Agent::chat_line(row, &zone, Some(SNIPPET))?);
+                        lines.push(Agent::transcript_line(row, &zone, Some(SNIPPET))?);
                     }
                     blocks.push(lines.join("\n"));
                 }
