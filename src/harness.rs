@@ -171,7 +171,7 @@ impl Harness {
         }
 
         let text = if !last_try {
-            self.run_agent(burst).await?
+            self.run_agent(burst, message).await?
         } else if message.is_reminder() {
             message.content.clone()
         } else {
@@ -188,11 +188,14 @@ impl Harness {
     /// Runs the model on the burst until it stops calling tools or reacts. Text that comes
     /// with tool calls is ignored. The model writes its reply after it sees the results. A
     /// tapback is the whole reply, and its text is empty.
-    async fn run_agent(&self, burst: &[UnansweredMessage]) -> Result<String> {
-        let message = burst.last().expect("a burst has a text");
+    async fn run_agent(
+        &self,
+        burst: &[UnansweredMessage],
+        message: &UnansweredMessage,
+    ) -> Result<String> {
         let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
         let mut context = Agent::context(&history, &self.prompt_context()?);
-        let saved = self.handle_burst(burst, &mut context).await?;
+        let saved = self.handle_burst(burst, message, &mut context).await?;
 
         let mut step = 0;
         let text = loop {
@@ -207,7 +210,7 @@ impl Harness {
 
             let mut results = Vec::new();
             for call in &calls {
-                results.push(self.run_tool(call, burst, saved).await?);
+                results.push(self.run_tool(call, burst, message, saved).await?);
             }
             // A `react` call ends the model's reply. A tapback means it has nothing to say.
             let failed = results.iter().any(|result| result.starts_with("error"));
@@ -221,15 +224,16 @@ impl Harness {
         };
 
         let first_message = history.len() == burst.len();
-        self.finish(text, burst, first_message, saved).await
+        self.finish(text, burst, message, first_message, saved)
+            .await
     }
 
     async fn handle_burst(
         &self,
         burst: &[UnansweredMessage],
+        message: &UnansweredMessage,
         context: &mut Vec<Value>,
     ) -> Result<bool> {
-        let message = burst.last().expect("a burst has a text");
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
         let links = Self::burst_links(&texts, message.is_reminder());
         let (links, asked) = self.agent.keep(&texts, links).await?;
@@ -332,9 +336,9 @@ impl Harness {
         &self,
         call: &std::result::Result<ToolCall, String>,
         burst: &[UnansweredMessage],
+        message: &UnansweredMessage,
         saved: bool,
     ) -> Result<String> {
-        let message = burst.last().expect("a burst has a text");
         let call = match call {
             Ok(call) => call,
             Err(error) => return Ok(format!("error: {error}")),
@@ -361,13 +365,13 @@ impl Harness {
         &self,
         text: String,
         burst: &[UnansweredMessage],
+        message: &UnansweredMessage,
         first_message: bool,
         saved: bool,
     ) -> Result<String> {
         if first_message {
             return Ok(GREETING.to_string());
         }
-        let message = burst.last().expect("a burst has a text");
         let tapback = serde_json::from_value::<Tapback>(text.clone().into());
         let (Ok(emoji), false) = (tapback, message.is_reminder()) else {
             return Ok(text);
