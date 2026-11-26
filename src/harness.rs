@@ -236,9 +236,9 @@ impl Harness {
     ) -> Result<bool> {
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
         let links = Self::burst_links(&texts, message.is_reminder());
-        let (links_to_save, asked) = self.agent.keep(&texts, links).await?;
+        let (links_to_save, links_to_read) = self.agent.keep(&texts, links).await?;
         let saved = !links_to_save.is_empty();
-        if !saved && asked.is_empty() {
+        if !saved && links_to_read.is_empty() {
             return Ok(false);
         }
 
@@ -252,8 +252,8 @@ impl Harness {
             result = self.save(message.id, &urls, note.as_deref()).await?;
             self.react(burst, Tapback::Like).await?;
         }
-        let (asked_text, images) = self.read_asked(&asked).await;
-        result += &asked_text;
+        let (read_text, images) = self.read_links(&links_to_read).await;
+        result += &read_text;
         result += "\n\nAnswer every other question or request in the newest messages in text.";
 
         Self::push_save_call(context, &urls, result, &images);
@@ -278,7 +278,7 @@ impl Harness {
         links
     }
 
-    /// The user's words in the burst, without the URLs. They are saved as the kept links'
+    /// The user's words in the burst, without the URLs. They are saved as the saved links'
     /// context.
     fn burst_words(texts: &[&str]) -> Option<String> {
         let mut words = Vec::new();
@@ -297,10 +297,10 @@ impl Harness {
 
     /// Reads each link the user only asked about. Returns a line for each one, and the photos
     /// among them.
-    async fn read_asked(&self, asked: &[Link]) -> (String, Vec<(String, Vec<u8>)>) {
+    async fn read_links(&self, links: &[Link]) -> (String, Vec<(String, Vec<u8>)>) {
         let mut text = String::new();
         let mut images = Vec::new();
-        for link in asked {
+        for link in links {
             let (page, media) = self.reader.read(&link.url, None, &self.agent).await;
             if let Some((mime, bytes)) = media {
                 if mime.starts_with("image/") {
