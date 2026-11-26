@@ -35,9 +35,9 @@ pub enum ToolCall {
     Cancel {
         id: i64,
     },
-    #[serde(rename = "time_zone")]
-    TimeZone {
-        time_zone: String,
+    Settings {
+        key: String,
+        value: String,
     },
 }
 
@@ -203,10 +203,11 @@ impl ToolCall {
                 }},
             }},
             { "type": "function", "function": {
-                "name": "time_zone",
-                "description": "Save the user's time zone when they tell you where they live or that they moved, with no reminder. Returns the new \"Now:\" line.",
-                "parameters": { "type": "object", "required": ["time_zone"], "properties": {
-                    "time_zone": { "type": "string", "description": "An IANA time zone, such as America/New_York." },
+                "name": "settings",
+                "description": "Change one of the user's settings.",
+                "parameters": { "type": "object", "required": ["key", "value"], "properties": {
+                    "key": { "type": "string", "enum": ["time_zone"], "description": "`time_zone`: the user's time zone. Change it when they say where they live or that they moved, with no reminder. Returns the new \"Now:\" line." },
+                    "value": { "type": "string", "description": "The new value. For `time_zone`, an IANA time zone, such as America/New_York." },
                 }},
             }},
         ])

@@ -304,7 +304,10 @@ impl Harness {
             ToolCall::Remind(remind) => self.remind(remind, message.id),
             ToolCall::Search(search) => self.search(search).await,
             ToolCall::Cancel { id } => self.cancel(*id),
-            ToolCall::TimeZone { time_zone } => self.set_time_zone(time_zone),
+            ToolCall::Settings { key, value } => match key.as_str() {
+                "time_zone" => self.set_time_zone(value),
+                _ => Ok(format!("error: there is no setting named {key}")),
+            },
         }
     }
 
