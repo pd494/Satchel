@@ -231,14 +231,7 @@ impl Harness {
     ) -> Result<bool> {
         let message = burst.last().expect("a burst has a text");
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
-        let mut seen = HashSet::new();
-        let links = texts
-            .iter()
-            .flat_map(|text| Link::find_all(text))
-            .filter(|link| {
-                !link.suspicious && !message.is_reminder() && seen.insert(link.url.clone())
-            })
-            .collect();
+        let links = Self::burst_links(&texts, message.is_reminder());
         let (links, asked) = self.agent.keep(&texts, links).await?;
         let saved = !links.is_empty();
         if !saved && asked.is_empty() {
@@ -248,27 +241,81 @@ impl Harness {
         let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
         let mut result = "Nothing saved.".to_string();
         if saved {
-            let words: Vec<String> = texts
-                .iter()
-                .map(|text| Link::split(text).0)
-                .filter(|rest| !rest.is_empty())
-                .collect();
-            let note = (!words.is_empty()).then(|| words.join("\n"));
+            let note = Self::burst_words(&texts);
             result = self.save(message.id, &urls, note.as_deref()).await?;
             self.react(burst, Tapback::Like).await?;
         }
+        let (asked_text, images) = self.read_asked(&asked).await;
+        result += &asked_text;
+        result += "\n\nAnswer every other question or request in the newest messages in text.";
 
+        Self::push_save_call(context, &urls, result, &images);
+        Ok(saved)
+    }
+
+    /// The links Clef may keep. A reminder's links were saved before. A URL sent twice counts
+    /// once.
+    fn burst_links(texts: &[&str], is_reminder: bool) -> Vec<Link> {
+        if is_reminder {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        let mut links = Vec::new();
+        for text in texts {
+            for link in Link::find_all(text) {
+                if !link.suspicious && seen.insert(link.url.clone()) {
+                    links.push(link);
+                }
+            }
+        }
+        links
+    }
+
+    /// The user's words in the burst, without the URLs. They are saved as the kept links'
+    /// context.
+    fn burst_words(texts: &[&str]) -> Option<String> {
+        let mut words = Vec::new();
+        for text in texts {
+            let (rest, _) = Link::split(text);
+            if !rest.is_empty() {
+                words.push(rest);
+            }
+        }
+        if words.is_empty() {
+            None
+        } else {
+            Some(words.join("\n"))
+        }
+    }
+
+    /// Reads each link the user only asked about. Returns a line for each one, and the photos
+    /// among them.
+    async fn read_asked(&self, asked: &[Link]) -> (String, Vec<(String, Vec<u8>)>) {
+        let mut text = String::new();
         let mut images = Vec::new();
-        for link in &asked {
-            let (text, media) = self.reader.read(&link.url, None, &self.agent).await;
-            images.extend(media.filter(|(mime, _)| mime.starts_with("image/")));
-            result += &format!(
-                "\nNot saved, since the user only asked about it: {}: {text}",
+        for link in asked {
+            let (page, media) = self.reader.read(&link.url, None, &self.agent).await;
+            if let Some((mime, bytes)) = media {
+                if mime.starts_with("image/") {
+                    images.push((mime, bytes));
+                }
+            }
+            text += &format!(
+                "\nNot saved, since the user only asked about it: {}: {page}",
                 link.url
             );
         }
-        result += "\n\nAnswer every other question or request in the newest messages in text.";
+        (text, images)
+    }
 
+    /// Adds a `save` call and its result to the context, as if the model had made the call.
+    /// The model then knows what was saved. The photos the user asked about follow.
+    fn push_save_call(
+        context: &mut Vec<Value>,
+        urls: &[String],
+        result: String,
+        images: &[(String, Vec<u8>)],
+    ) {
         let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
         context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
         Agent::push_results(context, vec![result]);
@@ -279,7 +326,6 @@ impl Harness {
                 .collect();
             context.push(json!({ "role": "user", "content": content }));
         }
-        Ok(saved)
     }
 
     async fn run_tool(
