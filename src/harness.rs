@@ -612,36 +612,39 @@ impl Harness {
         };
         let query = search.query.as_deref().map(str::trim);
         let query = query.filter(|query| !query.is_empty());
-        let (in_saved, in_chat) = match search.scope {
-            None => (true, true),
-            Some(Scope::Saved) => (true, false),
-            Some(Scope::Chat) => (false, true),
+        // Each try is (in_saved, in_chat). A scope that finds nothing falls back to the other one.
+        let tries = match search.scope {
+            None => vec![(true, true)],
+            Some(Scope::Saved) => vec![(true, false), (false, true)],
+            Some(Scope::Chat) => vec![(false, true), (true, false)],
         };
 
-        let mut sections = Vec::new();
-        if in_saved {
-            let lines = self.search_saved(query, after, before, &zone).await?;
-            if !lines.is_empty() {
-                sections.push(format!("Saved items:\n{}", lines.join("\n")));
-            }
-        }
-        if in_chat {
-            let mut blocks = Vec::new();
-            for block in self.db.search_chat(query, after, before, before_turn)? {
-                let mut lines = Vec::new();
-                for row in &block {
-                    lines.push(Agent::chat_line(row, &zone, Some(SNIPPET))?);
+        for (in_saved, in_chat) in tries {
+            let mut sections = Vec::new();
+            if in_saved {
+                let lines = self.search_saved(query, after, before, &zone).await?;
+                if !lines.is_empty() {
+                    sections.push(format!("Saved items:\n{}", lines.join("\n")));
                 }
-                blocks.push(lines.join("\n"));
             }
-            if !blocks.is_empty() {
-                sections.push(format!("Past chat:\n{}", blocks.join("\n\n")));
+            if in_chat {
+                let mut blocks = Vec::new();
+                for block in self.db.search_chat(query, after, before, before_turn)? {
+                    let mut lines = Vec::new();
+                    for row in &block {
+                        lines.push(Agent::chat_line(row, &zone, Some(SNIPPET))?);
+                    }
+                    blocks.push(lines.join("\n"));
+                }
+                if !blocks.is_empty() {
+                    sections.push(format!("Past chat:\n{}", blocks.join("\n\n")));
+                }
+            }
+            if !sections.is_empty() {
+                return Ok(ToolResult::Done(sections.join("\n\n")));
             }
         }
-        if sections.is_empty() {
-            return Ok(ToolResult::Done("Nothing matches.".to_string()));
-        }
-        Ok(ToolResult::Done(sections.join("\n\n")))
+        Ok(ToolResult::Done("Nothing matches.".to_string()))
     }
 
     async fn search_saved(
