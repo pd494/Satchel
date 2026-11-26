@@ -1,8 +1,6 @@
-use crate::db::{Role, Row, Setting, Summary};
 use crate::media::Link;
 use crate::tools::{ToolCall, ToolResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use jiff::{tz::TimeZone, Timestamp};
 use serde::Serialize;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
@@ -22,7 +20,6 @@ const MAX_TEXT: usize = 4_000;
 const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 /// Vectors are stored at this size. Queries must use the same size.
 const DIMENSIONS: u32 = 512;
-const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
@@ -71,67 +68,6 @@ impl Agent {
             tools: ToolCall::definitions(),
             eval_run: env.var("EVAL_RUN").ok().map(|run| run.to_string()),
         })
-    }
-
-    pub fn context(
-        settings: &[Setting],
-        summary: Option<&Summary>,
-        chat: &[Row],
-        now: &str,
-        zone: &TimeZone,
-    ) -> Result<Vec<Value>> {
-        let mut system = format!(
-            "{SYSTEM_PROMPT}\n\n# User settings\n\n{}",
-            Self::settings_text(settings, zone)?
-        );
-        if let Some(summary) = summary {
-            system.push_str(&format!("\n\n# Earlier in this chat\n\n{}", summary.text));
-        }
-        let mut context = vec![json!({ "role": "system", "content": system })];
-        for row in chat {
-            context.push(json!({ "role": row.role, "content": row.content }));
-        }
-        context.push(json!({ "role": "system", "content": now }));
-        Ok(context)
-    }
-
-    pub fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
-        let mut lines = Vec::new();
-        for setting in settings {
-            let said = Timestamp::from_second(setting.said_at)
-                .map_err(|error| error.to_string())?
-                .to_zoned_datetime(zone.clone())
-                .strftime("%Y-%m-%d");
-            lines.push(format!(
-                "- {}: {} (said {said})",
-                setting.key, setting.value
-            ));
-        }
-        if lines.is_empty() {
-            return Ok("None yet.".to_string());
-        }
-        Ok(lines.join("\n"))
-    }
-
-    pub fn transcript_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
-        let sent = Timestamp::from_second(row.created_at)
-            .map_err(|error| error.to_string())?
-            .to_zoned_datetime(zone.clone())
-            .strftime("%a %b %-d %Y %-I:%M %p")
-            .to_string();
-        let who = match row.role {
-            Role::User => "user",
-            Role::Assistant => "Satchel",
-        };
-        let one_line = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
-        if one_line.is_empty() {
-            return Ok(format!("- {sent}, {who}: (tapback)"));
-        }
-        let text = match max_chars {
-            Some(max_chars) => one_line.chars().take(max_chars).collect(),
-            None => one_line,
-        };
-        Ok(format!("- {sent}, {who}: {text}"))
     }
 
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its

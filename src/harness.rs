@@ -1,5 +1,5 @@
 use crate::agent::Agent;
-use crate::db::{Db, Saved, SettingChange, Turn, UnansweredMessage};
+use crate::db::{Db, Role, Row, Saved, Setting, SettingChange, Summary, Turn, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
 use crate::tools::{Remind, Scope, Search, Tapback, ToolCall, ToolResult};
@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
+const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 const COMPACT_PROMPT: &str = include_str!("prompts/compact.md");
 const COMPACT_AT_TOKENS: usize = 4_000;
 const KEEP_RECENT: usize = 10;
@@ -220,7 +221,7 @@ impl Harness {
         let through = summary.as_ref().map(|summary| summary.through);
         let chat = self.db.chat(through, Some(message.turn()))?;
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
-        let mut context = Agent::context(
+        let mut context = Self::context(
             &self.db.settings()?,
             summary.as_ref(),
             &chat,
@@ -579,6 +580,67 @@ impl Harness {
         Ok(ToolResult::Done(reply))
     }
 
+    fn context(
+        settings: &[Setting],
+        summary: Option<&Summary>,
+        chat: &[Row],
+        now: &str,
+        zone: &TimeZone,
+    ) -> Result<Vec<Value>> {
+        let mut system = format!(
+            "{SYSTEM_PROMPT}\n\n# User settings\n\n{}",
+            Self::settings_text(settings, zone)?
+        );
+        if let Some(summary) = summary {
+            system.push_str(&format!("\n\n# Earlier in this chat\n\n{}", summary.text));
+        }
+        let mut context = vec![json!({ "role": "system", "content": system })];
+        for row in chat {
+            context.push(json!({ "role": row.role, "content": row.content }));
+        }
+        context.push(json!({ "role": "system", "content": now }));
+        Ok(context)
+    }
+
+    fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
+        let mut lines = Vec::new();
+        for setting in settings {
+            let said = Timestamp::from_second(setting.said_at)
+                .map_err(|error| error.to_string())?
+                .to_zoned_datetime(zone.clone())
+                .strftime("%Y-%m-%d");
+            lines.push(format!(
+                "- {}: {} (said {said})",
+                setting.key, setting.value
+            ));
+        }
+        if lines.is_empty() {
+            return Ok("None yet.".to_string());
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn transcript_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
+        let sent = Timestamp::from_second(row.created_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone())
+            .strftime("%a %b %-d %Y %-I:%M %p")
+            .to_string();
+        let who = match row.role {
+            Role::User => "user",
+            Role::Assistant => "Satchel",
+        };
+        let one_line = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.is_empty() {
+            return Ok(format!("- {sent}, {who}: (tapback)"));
+        }
+        let text = match max_chars {
+            Some(max_chars) => one_line.chars().take(max_chars).collect(),
+            None => one_line,
+        };
+        Ok(format!("- {sent}, {who}: {text}"))
+    }
+
     /// When the summary and the chat after it pass `COMPACT_AT_TOKENS`, moves the oldest turns
     /// into the summary. The newest `KEEP_RECENT` messages stay. Otherwise it does nothing.
     async fn compact(&self) -> Result<()> {
@@ -615,14 +677,14 @@ impl Harness {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let mut lines = Vec::new();
         for row in &older {
-            lines.push(Agent::transcript_line(row, &zone, None)?);
+            lines.push(Self::transcript_line(row, &zone, None)?);
         }
         let input = format!(
             "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
             summary
                 .as_ref()
                 .map_or("(none)", |summary| summary.text.as_str()),
-            Agent::settings_text(&self.db.settings()?, &zone)?,
+            Self::settings_text(&self.db.settings()?, &zone)?,
             lines.join("\n")
         );
         let mut context = vec![
@@ -693,7 +755,7 @@ impl Harness {
                 for block in self.db.search_chat(query, after, before, before_turn)? {
                     let mut lines = Vec::new();
                     for row in &block {
-                        lines.push(Agent::transcript_line(row, &zone, Some(SNIPPET))?);
+                        lines.push(Self::transcript_line(row, &zone, Some(SNIPPET))?);
                     }
                     blocks.push(lines.join("\n"));
                 }
