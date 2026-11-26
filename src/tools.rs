@@ -51,12 +51,19 @@ pub struct Search {
 impl Search {
     /// `after` and `before` as Unix seconds, read as local times in `zone`.
     pub fn bounds(&self, zone: &TimeZone) -> Result<(Option<i64>, Option<i64>), String> {
-        let second = |at: Option<DateTime>| {
-            at.map(|at| zone.to_timestamp(at).map(|at| at.as_second()))
-                .transpose()
-                .map_err(|error| error.to_string())
+        let to_second = |at: DateTime| -> Result<i64, String> {
+            let timestamp = zone.to_timestamp(at).map_err(|error| error.to_string())?;
+            Ok(timestamp.as_second())
         };
-        Ok((second(self.after)?, second(self.before)?))
+        let after = match self.after {
+            Some(at) => Some(to_second(at)?),
+            None => None,
+        };
+        let before = match self.before {
+            Some(at) => Some(to_second(at)?),
+            None => None,
+        };
+        Ok((after, before))
     }
 }
 

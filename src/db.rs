@@ -62,7 +62,6 @@ const REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at,
     WHERE u.message_id = r.message_id AND u.media != 'note') AS urls \
     FROM saved AS r WHERE r.due_at IS NOT NULL";
 
-/// The columns of `Saved`.
 const SAVED: &str = "id, media, content, context, description, created_at, vector";
 
 #[derive(Deserialize)]
@@ -70,7 +69,6 @@ struct NextDue {
     due_at: Option<i64>,
 }
 
-/// A row of the `saved` table, as `SAVED` selects it.
 #[derive(Deserialize)]
 pub struct Saved {
     pub id: i64,

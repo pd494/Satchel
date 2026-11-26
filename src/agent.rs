@@ -174,9 +174,7 @@ impl Agent {
         url
     }
 
-    /// The embedding model's prefix for the text of a saved item.
     pub const SAVED_ITEM: &str = "title: none | text: ";
-    /// The embedding model's prefix for a search query.
     pub const SEARCH: &str = "task: search result | query: ";
 
     /// Embeds `text` (and optional media) as little-endian `f32` bytes. `prefix` is
