@@ -175,12 +175,12 @@ impl Agent {
     }
 
     /// The embedding model's prefix for the text of a saved item.
-    pub const DOCUMENT: &str = "title: none | text: ";
+    pub const SAVED_ITEM: &str = "title: none | text: ";
     /// The embedding model's prefix for a search query.
-    pub const QUERY: &str = "task: search result | query: ";
+    pub const SEARCH: &str = "task: search result | query: ";
 
     /// Embeds `text` (and optional media) as little-endian `f32` bytes. `prefix` is
-    /// `DOCUMENT` for a saved item, or `QUERY` for a search.
+    /// `SAVED_ITEM` or `SEARCH`.
     pub async fn embed(
         &self,
         prefix: &str,

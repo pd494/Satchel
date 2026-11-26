@@ -402,12 +402,12 @@ impl Harness {
             let (text, mut media) = self.reader.read(&link.url, row.context, &self.agent).await;
             let vector = match self
                 .agent
-                .embed(Agent::DOCUMENT, &text, media.as_ref())
+                .embed(Agent::SAVED_ITEM, &text, media.as_ref())
                 .await
             {
                 Err(error) if media.take().is_some() => {
                     console_error!("embed {url} with its media failed: {error}");
-                    self.agent.embed(Agent::DOCUMENT, &text, None).await?
+                    self.agent.embed(Agent::SAVED_ITEM, &text, None).await?
                 }
                 vector => vector?,
             };
@@ -423,7 +423,7 @@ impl Harness {
 
         if let Some(note) = note.filter(|_| urls.is_empty()) {
             let id = self.db.insert_saved(message_id, &Note(note.to_string()))?;
-            let vector = self.agent.embed(Agent::DOCUMENT, note, None).await?;
+            let vector = self.agent.embed(Agent::SAVED_ITEM, note, None).await?;
             self.db.set_read(id, note, vector)?;
             items.push(format!("- note: {note}"));
         }
@@ -525,7 +525,7 @@ impl Harness {
             return Ok("No saved items match.".to_string());
         }
         if !query.is_empty() {
-            let vector = self.agent.embed(Agent::QUERY, query, None).await?;
+            let vector = self.agent.embed(Agent::SEARCH, query, None).await?;
             rows = Self::rank(query, &vector, rows);
         }
         rows.truncate(SEARCH_RESULTS);
