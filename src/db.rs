@@ -435,8 +435,8 @@ impl Db {
     }
 
     /// Finds past messages in the turns before `before_turn`. Each match comes with `NEIGHBORS`
-    /// messages on each side. Matches that touch become one block. Returns the blocks oldest
-    /// first.
+    /// messages on each side. Matches that touch become one excerpt. Returns the excerpts
+    /// oldest first.
     pub fn search_chat(
         &self,
         query: Option<&str>,
@@ -475,27 +475,27 @@ impl Db {
         let hits: Vec<Row> = self.sql.exec(&select_query, Some(values))?.to_array()?;
 
         // Each hit and its neighbors, oldest first. Ranges that overlap or touch are joined.
-        let mut ranges: Vec<(i64, i64)> = Vec::new();
+        let mut hit_ranges: Vec<(i64, i64)> = Vec::new();
         for hit in &hits {
-            ranges.push((hit.id - NEIGHBORS, hit.id + NEIGHBORS));
+            hit_ranges.push((hit.id - NEIGHBORS, hit.id + NEIGHBORS));
         }
-        ranges.sort();
-        let mut joined: Vec<(i64, i64)> = Vec::new();
-        for (from, to) in ranges {
-            match joined.last_mut() {
+        hit_ranges.sort();
+        let mut merged_ranges: Vec<(i64, i64)> = Vec::new();
+        for (from, to) in hit_ranges {
+            match merged_ranges.last_mut() {
                 Some(last) if from <= last.1 + 1 => last.1 = last.1.max(to),
-                _ => joined.push((from, to)),
+                _ => merged_ranges.push((from, to)),
             }
         }
 
-        let block_query = format!("{ROW} WHERE id BETWEEN ? AND ? AND turn < ? ORDER BY id");
-        let mut blocks = Vec::new();
-        for (from, to) in joined {
+        let excerpt_query = format!("{ROW} WHERE id BETWEEN ? AND ? AND turn < ? ORDER BY id");
+        let mut excerpts = Vec::new();
+        for (from, to) in merged_ranges {
             let values = vec![from.into(), to.into(), before_turn.0.into()];
-            let block: Vec<Row> = self.sql.exec(&block_query, Some(values))?.to_array()?;
-            blocks.push(block);
+            let excerpt: Vec<Row> = self.sql.exec(&excerpt_query, Some(values))?.to_array()?;
+            excerpts.push(excerpt);
         }
-        Ok(blocks)
+        Ok(excerpts)
     }
 
     /// Counts one run for the user message `event_id`, before the run starts.

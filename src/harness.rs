@@ -596,14 +596,14 @@ impl Harness {
         now: &str,
         zone: &TimeZone,
     ) -> Result<Vec<Value>> {
-        let mut system = format!(
+        let mut system_prompt = format!(
             "{SYSTEM_PROMPT}\n\n# User settings\n\n{}",
             Self::settings_text(settings, zone)?
         );
         if let Some(summary) = summary {
-            system.push_str(&format!("\n\n# Earlier in this chat\n\n{}", summary.text));
+            system_prompt.push_str(&format!("\n\n# Earlier in this chat\n\n{}", summary.text));
         }
-        let mut context = vec![json!({ "role": "system", "content": system })];
+        let mut context = vec![json!({ "role": "system", "content": system_prompt })];
         for row in chat {
             context.push(json!({ "role": row.role, "content": row.content }));
         }
@@ -654,7 +654,7 @@ impl Harness {
     /// into the summary. The newest `KEEP_RECENT` messages stay. Otherwise it does nothing.
     async fn compact(&self) -> Result<()> {
         let summary = self.db.summary()?;
-        let rows = self
+        let chat_after_summary = self
             .db
             .chat(summary.as_ref().map(|summary| summary.through), None)?;
 
@@ -662,17 +662,17 @@ impl Harness {
         let mut chars = summary
             .as_ref()
             .map_or(0, |summary| summary.text.chars().count());
-        for row in &rows {
+        for row in &chat_after_summary {
             chars += row.content.chars().count();
         }
-        if chars / 4 < COMPACT_AT_TOKENS || rows.len() <= KEEP_RECENT {
+        if chars / 4 < COMPACT_AT_TOKENS || chat_after_summary.len() <= KEEP_RECENT {
             return Ok(());
         }
 
         // The oldest rows, up to the turn of the first kept row. A reply stays with its text.
-        let first_kept = rows[rows.len() - KEEP_RECENT].turn;
+        let first_kept = chat_after_summary[chat_after_summary.len() - KEEP_RECENT].turn;
         let mut messages_before_compaction = Vec::new();
-        for row in rows {
+        for row in chat_after_summary {
             if row.turn >= first_kept {
                 break;
             }
@@ -684,9 +684,9 @@ impl Harness {
 
         // One model call with the compact prompt returns the new summary and the facts.
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
-        let mut lines = Vec::new();
+        let mut transcript = Vec::new();
         for row in &messages_before_compaction {
-            lines.push(Self::transcript_line(row, &zone, None)?);
+            transcript.push(Self::transcript_line(row, &zone, None)?);
         }
         let input = format!(
             "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
@@ -694,7 +694,7 @@ impl Harness {
                 .as_ref()
                 .map_or("(none)", |summary| summary.text.as_str()),
             Self::settings_text(&self.db.settings()?, &zone)?,
-            lines.join("\n")
+            transcript.join("\n")
         );
         let mut context = vec![
             json!({ "role": "system", "content": COMPACT_PROMPT }),
@@ -760,9 +760,9 @@ impl Harness {
             found.push(format!("Saved items:\n{}", matching_saved.join("\n")));
         }
         let mut matching_chat = Vec::new();
-        for block in self.db.search_chat(query, after, before, before_turn)? {
+        for excerpt in self.db.search_chat(query, after, before, before_turn)? {
             let mut lines = Vec::new();
-            for row in &block {
+            for row in &excerpt {
                 lines.push(Self::transcript_line(row, &zone, Some(SNIPPET))?);
             }
             matching_chat.push(lines.join("\n"));
