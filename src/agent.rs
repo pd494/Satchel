@@ -82,11 +82,8 @@ impl Agent {
             "messages": context,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        // `None` is a reply to the user. The model gets the tools, and it answers with text, tool
-        // calls, or both.
-        // `Some` is a JSON Schema, such as the one `Harness::compact` sends. The model gets no
-        // tools, and Workers AI's JSON mode makes it answer with JSON in that shape. The two
-        // modes do not mix: with tools, the model could call a tool instead of writing the JSON.
+        // None: the model gets the tools and answers with text or tool calls.
+        // Some: the model gets no tools and answers with JSON in the schema's shape.
         match response_schema {
             Some(response_schema) => {
                 input["response_format"] =
