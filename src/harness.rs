@@ -662,21 +662,21 @@ impl Harness {
 
         // The oldest rows, up to the turn of the first kept row. A reply stays with its text.
         let first_kept = rows[rows.len() - KEEP_RECENT].turn;
-        let mut older = Vec::new();
+        let mut messages_before_compaction = Vec::new();
         for row in rows {
             if row.turn >= first_kept {
                 break;
             }
-            older.push(row);
+            messages_before_compaction.push(row);
         }
-        if older.is_empty() {
+        if messages_before_compaction.is_empty() {
             return Ok(());
         }
 
         // One model call with the compact prompt returns the new summary and the facts.
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let mut lines = Vec::new();
-        for row in &older {
+        for row in &messages_before_compaction {
             lines.push(Self::transcript_line(row, &zone, None)?);
         }
         let input = format!(
@@ -727,7 +727,10 @@ impl Harness {
                 Err(error) => console_error!("compaction fact {}: {error}", fact.key),
             }
         }
-        if !self.db.save_compaction(&older, new_summary, &facts)? {
+        if !self
+            .db
+            .save_compaction(&messages_before_compaction, new_summary, &facts)?
+        {
             console_error!("a reset deleted the chat during compaction");
         }
         Ok(())
