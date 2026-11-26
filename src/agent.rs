@@ -1,14 +1,15 @@
-use crate::db::Row;
+use crate::db::{Role, Row, Setting, SettingChange, Summary};
 use crate::media::Link;
-use crate::tools::ToolCall;
+use crate::tools::{ToolCall, ToolResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::Serialize;
+use jiff::{tz::TimeZone, Timestamp};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use worker::js_sys::{Array, Object, Promise, Reflect, Uint8Array};
 use worker::wasm_bindgen_futures::JsFuture;
 use worker::web_sys::Blob;
-use worker::{Env, Result};
+use worker::{console_error, Env, Result};
 
 const MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 /// Decides which links in a burst the user sent to keep. It returns a choice, not text.
@@ -22,6 +23,7 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 /// Vectors are stored at this size. Queries must use the same size.
 const DIMENSIONS: u32 = 512;
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
+const COMPACT_PROMPT: &str = include_str!("prompts/compact.md");
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
@@ -50,6 +52,25 @@ extern "C" {
     ) -> std::result::Result<Promise, JsValue>;
 }
 
+/// What one fold returns: the new summary of the older chat, and the setting changes it found.
+pub struct Compaction {
+    pub summary: String,
+    pub facts: Vec<SettingChange>,
+}
+
+/// The model's JSON for a fold, before each fact is checked.
+#[derive(Deserialize)]
+struct RawCompaction {
+    summary: String,
+    facts: Vec<RawFact>,
+}
+
+#[derive(Deserialize)]
+struct RawFact {
+    key: String,
+    value: String,
+}
+
 pub struct Agent {
     ai: AiBinding,
     tools: Value,
@@ -72,13 +93,134 @@ impl Agent {
         })
     }
 
-    pub fn context(history: &[Row], now: &str) -> Vec<Value> {
-        let system = format!("{SYSTEM_PROMPT}\n\n{now}");
+    /// The prompt, in a fixed order: the system prompt, the user's settings, and the summary of
+    /// the older chat, then the chat after the summary, then `now` (the "Now:" line and the
+    /// pending reminders) as its own system message. Only `now` changes on every call. The start
+    /// of the prompt stays the same between calls.
+    pub fn context(
+        settings: &[Setting],
+        summary: Option<&Summary>,
+        chat: &[Row],
+        now: &str,
+        zone: &TimeZone,
+    ) -> Result<Vec<Value>> {
+        let mut system = format!(
+            "{SYSTEM_PROMPT}\n\n# User settings\n\n{}",
+            Self::settings_text(settings, zone)?
+        );
+        if let Some(summary) = summary {
+            system.push_str(&format!("\n\n# Earlier in this chat\n\n{}", summary.text));
+        }
         let mut context = vec![json!({ "role": "system", "content": system })];
-        for row in history {
+        for row in chat {
             context.push(json!({ "role": row.role, "content": row.content }));
         }
-        context
+        context.push(json!({ "role": "system", "content": now }));
+        Ok(context)
+    }
+
+    /// One line per setting, with the date the user said it in `zone`, or "None yet.".
+    fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
+        let mut lines = Vec::new();
+        for setting in settings {
+            let said = Timestamp::from_second(setting.said_at)
+                .map_err(|error| error.to_string())?
+                .to_zoned_datetime(zone.clone())
+                .strftime("%Y-%m-%d");
+            lines.push(format!(
+                "- {}: {} (said {said})",
+                setting.key, setting.value
+            ));
+        }
+        if lines.is_empty() {
+            return Ok("None yet.".to_string());
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// A message as one line, with when it was sent and who sent it. `max_chars` cuts long
+    /// messages. `None` keeps the whole message.
+    pub fn chat_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
+        let sent = Timestamp::from_second(row.created_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone())
+            .strftime("%a %b %-d %Y %-I:%M %p")
+            .to_string();
+        let who = match row.role {
+            Role::User => "user",
+            Role::Assistant => "Satchel",
+        };
+        let one_line = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.is_empty() {
+            return Ok(format!("- {sent}, {who}: (tapback)"));
+        }
+        let text = match max_chars {
+            Some(max_chars) => one_line.chars().take(max_chars).collect(),
+            None => one_line,
+        };
+        Ok(format!("- {sent}, {who}: {text}"))
+    }
+
+    /// Folds `rows`, the oldest messages after the summary, into a new summary, and finds the
+    /// setting changes in them. A fact that fails to parse is logged and skipped. Bad JSON or an
+    /// empty summary is an error, and then nothing is written.
+    pub async fn compact(
+        &self,
+        summary: Option<&Summary>,
+        settings: &[Setting],
+        rows: &[Row],
+        zone: &TimeZone,
+    ) -> Result<Compaction> {
+        let mut chat = Vec::new();
+        for row in rows {
+            chat.push(Self::chat_line(row, zone, None)?);
+        }
+        let input_text = format!(
+            "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages to fold in:\n{}",
+            summary.map_or("(none)", |summary| summary.text.as_str()),
+            Self::settings_text(settings, zone)?,
+            chat.join("\n")
+        );
+        let schema = json!({
+            "type": "object",
+            "required": ["summary", "facts"],
+            "properties": {
+                "summary": { "type": "string" },
+                "facts": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["key", "value"],
+                    "properties": { "key": { "type": "string" }, "value": { "type": "string" } },
+                }},
+            },
+        });
+        let input = json!({
+            "messages": [
+                { "role": "system", "content": COMPACT_PROMPT },
+                { "role": "user", "content": input_text },
+            ],
+            "response_format": { "type": "json_schema", "json_schema": schema },
+            "chat_template_kwargs": { "enable_thinking": false },
+        });
+        let options = Self::gateway(json!({ "step": "compact" }));
+        let output = self.call(MODEL, &input, Some(&options)).await?;
+        let content = &output["choices"][0]["message"]["content"];
+        let raw: RawCompaction = match content.as_str() {
+            Some(text) => serde_json::from_str(&Self::clean(text))?,
+            None => serde_json::from_value(content.clone())?,
+        };
+
+        let summary = raw.summary.trim().to_string();
+        if summary.is_empty() {
+            return Err("the fold returned an empty summary".into());
+        }
+        let mut facts = Vec::new();
+        for fact in raw.facts {
+            match SettingChange::parse(&fact.key, &fact.value) {
+                Ok(change) => facts.push(change),
+                Err(error) => console_error!("fold fact {}: {error}", fact.key),
+            }
+        }
+        Ok(Compaction { summary, facts })
     }
 
     /// Calls the model once and adds its message to `context`. Returns its trimmed text and its
@@ -98,18 +240,23 @@ impl Agent {
         if let Some(run) = &self.eval_run {
             metadata["eval_run"] = json!(run);
         }
-        let options = json!({ "gateway": {
-            "id": "satchel",
-            "metadata": metadata,
-            "requestTimeoutMs": MODEL_TIMEOUT_MS,
-            "retries": { "maxAttempts": 3, "retryDelayMs": 500, "backoff": "exponential" },
-        } });
+        let options = Self::gateway(metadata);
         let mut output = self.call(MODEL, &input, Some(&options)).await?;
         let mut response = output["choices"][0]["message"].take();
         let text = Self::clean(response["content"].as_str().unwrap_or_default());
         let calls = Self::split_calls(&mut response);
         context.push(response);
         Ok((text, calls))
+    }
+
+    /// AI Gateway options for a `MODEL` call. `metadata` tags its log.
+    fn gateway(metadata: Value) -> Value {
+        json!({ "gateway": {
+            "id": "satchel",
+            "metadata": metadata,
+            "requestTimeoutMs": MODEL_TIMEOUT_MS,
+            "retries": { "maxAttempts": 3, "retryDelayMs": 500, "backoff": "exponential" },
+        } })
     }
 
     /// Asks Clef about each of `links`. Returns the links to save, and the links the user only
@@ -244,7 +391,7 @@ impl Agent {
     }
 
     /// Adds one tool message per result, matched to the tool call ids in the last response.
-    pub fn push_results(context: &mut Vec<Value>, results: Vec<String>) {
+    pub fn push_results(context: &mut Vec<Value>, results: Vec<ToolResult>) {
         let mut ids = Vec::new();
         if let Some(last) = context.last() {
             if let Some(tool_calls) = last["tool_calls"].as_array() {
@@ -253,8 +400,9 @@ impl Agent {
                 }
             }
         }
-        for (id, content) in ids.into_iter().zip(results) {
-            context.push(json!({ "role": "tool", "tool_call_id": id, "content": content }));
+        for (id, result) in ids.into_iter().zip(results) {
+            context
+                .push(json!({ "role": "tool", "tool_call_id": id, "content": result.into_text() }));
         }
     }
 

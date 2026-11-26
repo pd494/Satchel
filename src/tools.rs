@@ -19,6 +19,22 @@ pub enum Tapback {
     Question,
 }
 
+/// What a tool tells the model. An `Error` tells the model to fix its call or tell the user.
+pub enum ToolResult {
+    Done(String),
+    Error(String),
+}
+
+impl ToolResult {
+    /// The text of the tool message. An error starts with "error: ".
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Done(text) => text,
+            Self::Error(text) => format!("error: {text}"),
+        }
+    }
+}
+
 /// A model tool call, read from its `{ "name": ..., "arguments": ... }` function object.
 #[derive(Deserialize)]
 #[serde(tag = "name", content = "arguments", rename_all = "lowercase")]
@@ -44,8 +60,17 @@ pub enum ToolCall {
 #[derive(Deserialize)]
 pub struct Search {
     pub query: Option<String>,
+    /// Where to look. `None` looks in both saved items and past chats.
+    pub scope: Option<Scope>,
     after: Option<DateTime>,
     before: Option<DateTime>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    Saved,
+    Chat,
 }
 
 impl Search {
@@ -175,11 +200,12 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "search",
-                "description": "Find saved links, files, and notes. Returns up to 10 results, best first, each with its URL.",
+                "description": "Find saved links, files, and notes, and past chat messages. Returns up to 10 saved items, best first, each with its URL, and up to 5 past messages, each with the messages around it.",
                 "parameters": { "type": "object", "properties": {
-                    "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"austin apartment\". Omit it to list the newest saves." },
-                    "after": { "type": "string", "description": "Only items saved at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },
-                    "before": { "type": "string", "description": "Only items saved before this local date and time, such as 2026-11-23T00:00:00. Omit it unless the user names a time." },
+                    "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"tokyo trip\". Omit it to list the newest saves, or, with `after` or `before`, everything from that time." },
+                    "scope": { "type": "string", "enum": ["saved", "chat"], "description": "`saved`: only saved items. `chat`: only past messages. Omit it to search both." },
+                    "after": { "type": "string", "description": "Only items saved, or messages sent, at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },
+                    "before": { "type": "string", "description": "Only items saved, or messages sent, before this local date and time, such as 2026-11-23T00:00:00. Omit it unless the user names a time." },
                 }},
             }},
             { "type": "function", "function": {
@@ -204,10 +230,10 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "settings",
-                "description": "Change one of the user's settings.",
+                "description": "Set, change, or remove a lasting fact about the user, a preference, or a rule for how you reply. Every setting is in the \"User settings\" list in each prompt.",
                 "parameters": { "type": "object", "required": ["key", "value"], "properties": {
-                    "key": { "type": "string", "enum": ["time_zone"], "description": "`time_zone`: the user's time zone. Change it when they say where they live or that they moved, with no reminder. Returns the new \"Now:\" line." },
-                    "value": { "type": "string", "description": "The new value. For `time_zone`, an IANA time zone, such as America/New_York." },
+                    "key": { "type": "string", "description": "A short snake_case name, such as diet, partner_name, or reply_style. Use a key from the \"User settings\" list to change it. `time_zone` is the user's time zone: change it when they say where they live or that they moved, with no reminder. It returns the new \"Now:\" line." },
+                    "value": { "type": "string", "description": "The value, in a few words, such as \"vegetarian\" or \"one word only\". For `time_zone`, an IANA time zone, such as America/New_York. An empty value removes the key." },
                 }},
             }},
         ])

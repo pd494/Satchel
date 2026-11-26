@@ -1,6 +1,6 @@
 use crate::media::Media;
 use jiff::{tz::TimeZone, Span, Timestamp, ZonedDateTime};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use worker::{Result, SqlStorage, SqlStorageValue};
 /// ```text
 /// +----+-----------+------------------+----------+----------+----------+------+------------+
@@ -12,6 +12,11 @@ use worker::{Result, SqlStorage, SqlStorageValue};
 /// +----+-----------+------------------+----------+----------+----------+------+------------+
 /// ```
 /// `sent` on a user message means it was answered, by its own reply or a later one.
+/// `chat` is each message with its turn: a reply belongs to the turn of the text it answers.
+/// `messages_fts` indexes every message's text for `search`. Messages are never deleted.
+/// `settings` holds what the user said about themselves. A `NULL` value is a removal, kept with
+/// its date so that a fold of older messages cannot bring the old value back.
+/// `summary` is one row: the summary of every turn up to and including `through`.
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS messages (
     id         INTEGER PRIMARY KEY,
@@ -25,6 +30,18 @@ CREATE TABLE IF NOT EXISTS messages (
     CHECK ((role = 'user') = (event_id IS NOT NULL)),
     CHECK ((role = 'assistant') = (reply_to IS NOT NULL))
 ) STRICT;
+
+CREATE VIEW IF NOT EXISTS chat AS
+    SELECT m.id, COALESCE(u.id, m.id) AS turn, m.role, m.content, m.created_at
+    FROM messages AS m LEFT JOIN messages AS u ON u.event_id = m.reply_to;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content, content = 'messages', content_rowid = 'id', tokenize = 'porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts (rowid, content) VALUES (new.id, new.content);
+END;
 
 CREATE TABLE IF NOT EXISTS saved (
     id          INTEGER PRIMARY KEY,
@@ -47,8 +64,15 @@ CREATE TABLE IF NOT EXISTS saved (
 CREATE INDEX IF NOT EXISTS saved_due ON saved (due_at) WHERE due_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
+    key     TEXT PRIMARY KEY,
+    value   TEXT,
+    said_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS summary (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    through INTEGER NOT NULL,
+    text    TEXT NOT NULL
 ) STRICT;
 "#;
 
@@ -63,6 +87,12 @@ const REMINDERS: &str = "SELECT r.id, r.content, r.due_at, r.repeat, r.until_at,
     FROM saved AS r WHERE r.due_at IS NOT NULL";
 
 const SAVED: &str = "id, media, content, context, description, created_at, vector";
+
+const ROW: &str = "SELECT chat.id, chat.turn, chat.role, chat.content, chat.created_at FROM chat";
+
+/// Past messages one chat search returns. Each comes with `AROUND` messages on each side.
+const CHAT_HITS: i64 = 5;
+const AROUND: i64 = 3;
 
 #[derive(Deserialize)]
 struct NextDue {
@@ -85,10 +115,34 @@ pub struct Saved {
     pub vector: Option<Vec<u8>>,
 }
 
+/// A user text and the reply to it share one turn: the id of the text. Only rows read from the
+/// database make one. A message id or a time cannot be passed where a turn belongs.
+#[derive(Clone, Copy, Deserialize, PartialEq, PartialOrd)]
+#[serde(transparent)]
+pub struct Turn(i64);
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// A row of the `chat` view.
 #[derive(Deserialize)]
 pub struct Row {
-    pub role: String,
+    id: i64,
+    pub turn: Turn,
+    pub role: Role,
     pub content: String,
+    pub created_at: i64,
+}
+
+/// The summary of every turn up to and including `through`.
+#[derive(Deserialize)]
+pub struct Summary {
+    pub through: Turn,
+    pub text: String,
 }
 
 #[derive(Deserialize)]
@@ -103,9 +157,52 @@ pub struct UnansweredMessage {
     pub response: Option<String>,
 }
 
+/// A setting the user has. Removed settings are never read.
 #[derive(Deserialize)]
-struct Setting {
-    value: String,
+pub struct Setting {
+    pub key: String,
+    pub value: String,
+    /// When the user said it.
+    pub said_at: i64,
+}
+
+/// One change to the user's settings, from the `settings` tool, `remind`, or compaction.
+pub enum SettingChange {
+    TimeZone(TimeZone),
+    Set { key: String, value: String },
+    Remove { key: String },
+}
+
+impl UnansweredMessage {
+    /// A user message starts its own turn.
+    pub fn turn(&self) -> Turn {
+        Turn(self.id)
+    }
+}
+
+impl SettingChange {
+    /// Reads the `{ key, value }` the model sends. An empty value removes the key.
+    pub fn parse(key: &str, value: &str) -> std::result::Result<Self, String> {
+        let key = key.trim().to_lowercase();
+        let value = value.trim();
+        if key.is_empty() {
+            return Err("the key is empty".to_string());
+        }
+        if key == "time_zone" {
+            if value.is_empty() {
+                return Err("time_zone cannot be removed. Send the new zone.".to_string());
+            }
+            let zone = TimeZone::get(value).map_err(|error| error.to_string())?;
+            return Ok(Self::TimeZone(zone));
+        }
+        if value.is_empty() {
+            return Ok(Self::Remove { key });
+        }
+        Ok(Self::Set {
+            key,
+            value: value.to_string(),
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -224,18 +321,81 @@ impl Db {
         Ok(())
     }
 
-    /// Returns the user's IANA time zone name, if they gave one.
-    pub fn time_zone(&self) -> Result<Option<String>> {
-        let select_query = "SELECT value FROM settings WHERE key = 'time_zone'";
-        let mut rows: Vec<Setting> = self.sql.exec(select_query, None)?.to_array()?;
-        Ok(rows.pop().map(|row| row.value))
+    /// Returns the user's settings, by key.
+    pub fn settings(&self) -> Result<Vec<Setting>> {
+        let select_query =
+            "SELECT key, value, said_at FROM settings WHERE value IS NOT NULL ORDER BY key";
+        self.sql.exec(select_query, None)?.to_array()
     }
 
-    pub fn set_time_zone(&self, name: &str) -> Result<()> {
-        let upsert_query = "INSERT INTO settings (key, value) VALUES ('time_zone', ?) \
-            ON CONFLICT (key) DO UPDATE SET value = excluded.value";
-        self.sql.exec(upsert_query, Some(vec![name.into()]))?;
+    /// Returns the user's IANA time zone name, if they gave one.
+    pub fn time_zone(&self) -> Result<Option<String>> {
+        for setting in self.settings()? {
+            if setting.key == "time_zone" {
+                return Ok(Some(setting.value));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Writes `change`, said at `said_at`. A newer statement wins: a change said before the
+    /// stored one changes nothing. The same value keeps its first date.
+    pub fn change_setting(&self, change: &SettingChange, said_at: i64) -> Result<()> {
+        let (key, value) = match change {
+            SettingChange::TimeZone(zone) => {
+                let name = zone.iana_name().ok_or("the time zone has no IANA name")?;
+                ("time_zone", Some(name))
+            }
+            SettingChange::Set { key, value } => (key.as_str(), Some(value.as_str())),
+            SettingChange::Remove { key } => (key.as_str(), None),
+        };
+        let upsert_query = "INSERT INTO settings (key, value, said_at) VALUES (?, ?, ?) \
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value, said_at = excluded.said_at \
+            WHERE excluded.said_at >= settings.said_at AND excluded.value IS NOT settings.value";
+        self.sql.exec(
+            upsert_query,
+            Some(vec![key.into(), value.into(), said_at.into()]),
+        )?;
         Ok(())
+    }
+
+    pub fn summary(&self) -> Result<Option<Summary>> {
+        let select_query = "SELECT through, text FROM summary";
+        let mut rows: Vec<Summary> = self.sql.exec(select_query, None)?.to_array()?;
+        Ok(rows.pop())
+    }
+
+    /// Writes what one fold of `rows` found: the facts, then the summary up to the last row. A
+    /// reset during the model call deletes the rows, and then nothing is written. Returns
+    /// whether it wrote.
+    ///
+    /// The facts count as said at the first folded message. A setting the tool wrote during or
+    /// after these messages is newer, and it wins.
+    pub fn save_fold(&self, rows: &[Row], summary: &str, facts: &[SettingChange]) -> Result<bool> {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return Ok(false);
+        };
+        let select_query = format!("{ROW} WHERE id = ? AND created_at = ?");
+        let found: Vec<Row> = self
+            .sql
+            .exec(
+                &select_query,
+                Some(vec![last.id.into(), last.created_at.into()]),
+            )?
+            .to_array()?;
+        if found.is_empty() {
+            return Ok(false);
+        }
+
+        // Facts first. A failure before the summary write leaves the summary where it was.
+        for fact in facts {
+            self.change_setting(fact, first.created_at)?;
+        }
+        let upsert_query = "INSERT INTO summary (id, through, text) VALUES (1, ?, ?) \
+            ON CONFLICT (id) DO UPDATE SET through = excluded.through, text = excluded.text";
+        self.sql
+            .exec(upsert_query, Some(vec![last.turn.0.into(), summary.into()]))?;
+        Ok(true)
     }
 
     /// Inserts the user's message; returns `false` if `event_id` was already saved.
@@ -274,24 +434,85 @@ impl Db {
         Ok(())
     }
 
-    /// Returns the last `limit` messages up to and including row `up_to`, oldest first.
-    pub fn load_history(&self, up_to: i64, limit: usize) -> Result<Vec<Row>> {
-        let select_query = "SELECT m.role, m.content FROM messages AS m \
-            LEFT JOIN messages AS u ON u.event_id = m.reply_to \
-            WHERE COALESCE(u.id, m.id) <= ? \
-            ORDER BY COALESCE(u.id, m.id) DESC, m.id DESC LIMIT ?";
-        let mut rows: Vec<Row> = self
-            .sql
-            .exec(
-                select_query,
-                Some(vec![
-                    SqlStorageValue::Integer(up_to),
-                    SqlStorageValue::Integer(limit as i64),
-                ]),
-            )?
-            .to_array()?;
-        rows.reverse();
-        Ok(rows)
+    /// Returns the messages in the turns after `after`, up to and including `up_to`, oldest
+    /// first. `None` leaves that side open.
+    pub fn chat(&self, after: Option<Turn>, up_to: Option<Turn>) -> Result<Vec<Row>> {
+        // A message's id is never below its turn. `chat.id > ?1` keeps the same rows and lets
+        // SQLite skip the older ones.
+        let select_query = format!(
+            "{ROW} WHERE (?1 IS NULL OR (chat.id > ?1 AND turn > ?1)) \
+            AND (?2 IS NULL OR turn <= ?2) ORDER BY turn, id"
+        );
+        let values = vec![
+            after.map(|turn| turn.0).into(),
+            up_to.map(|turn| turn.0).into(),
+        ];
+        self.sql.exec(&select_query, Some(values))?.to_array()
+    }
+
+    /// Finds past messages in the turns before `before_turn`. With a `query`, the best matches
+    /// for its words come first. Without one, the newest messages between `after` and `before`
+    /// come first. Each match comes with the `AROUND` messages on each side, and matches that
+    /// touch are joined. Returns one block of messages per group, oldest first.
+    pub fn search_chat(
+        &self,
+        query: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+        before_turn: Turn,
+    ) -> Result<Vec<Vec<Row>>> {
+        // An FTS5 query: each word, quoted, as a prefix, joined by OR.
+        let mut words = Vec::new();
+        for word in query
+            .unwrap_or_default()
+            .split(|c: char| !c.is_alphanumeric())
+        {
+            if !word.is_empty() {
+                words.push(format!("\"{word}\"*"));
+            }
+        }
+        if words.is_empty() && after.is_none() && before.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let filter = "turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
+            AND (?3 IS NULL OR created_at < ?3)";
+        let select_query = if words.is_empty() {
+            format!("{ROW} WHERE {filter} ORDER BY id DESC LIMIT {CHAT_HITS}")
+        } else {
+            format!(
+                "{ROW} JOIN messages_fts AS f ON f.rowid = chat.id \
+                WHERE {filter} AND messages_fts MATCH ?4 ORDER BY f.rank LIMIT {CHAT_HITS}"
+            )
+        };
+        let mut values = vec![before_turn.0.into(), after.into(), before.into()];
+        if !words.is_empty() {
+            values.push(words.join(" OR ").into());
+        }
+        let hits: Vec<Row> = self.sql.exec(&select_query, Some(values))?.to_array()?;
+
+        // Each hit and its neighbors, oldest first. Ranges that overlap or touch are joined.
+        let mut ranges: Vec<(i64, i64)> = Vec::new();
+        for hit in &hits {
+            ranges.push((hit.id - AROUND, hit.id + AROUND));
+        }
+        ranges.sort();
+        let mut joined: Vec<(i64, i64)> = Vec::new();
+        for (from, to) in ranges {
+            match joined.last_mut() {
+                Some(last) if from <= last.1 + 1 => last.1 = last.1.max(to),
+                _ => joined.push((from, to)),
+            }
+        }
+
+        let block_query = format!("{ROW} WHERE id BETWEEN ? AND ? AND turn < ? ORDER BY id");
+        let mut blocks = Vec::new();
+        for (from, to) in joined {
+            let values = vec![from.into(), to.into(), before_turn.0.into()];
+            let block: Vec<Row> = self.sql.exec(&block_query, Some(values))?.to_array()?;
+            blocks.push(block);
+        }
+        Ok(blocks)
     }
 
     /// Counts one run for the user message `event_id`, before the run starts.

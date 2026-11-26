@@ -1,16 +1,19 @@
 use crate::agent::Agent;
-use crate::db::{Db, Saved, UnansweredMessage};
+use crate::db::{Db, Saved, SettingChange, Turn, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
-use crate::tools::{Remind, Search, Tapback, ToolCall};
+use crate::tools::{Remind, Scope, Search, Tapback, ToolCall, ToolResult};
 use jiff::{tz::TimeZone, Timestamp};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
-/// Past messages the model sees with each new message.
-const HISTORY_LIMIT: usize = 40;
+/// Compaction runs when the summary and the chat in the prompt reach about this many tokens.
+/// Raise it for a model with a larger, cheaper context window.
+const COMPACT_AT_TOKENS: usize = 4_000;
+/// The newest messages that compaction keeps word for word.
+const KEEP_RECENT: usize = 10;
 
 /// Runs before a message gets `SORRY` instead.
 const MAX_ATTEMPTS: i64 = 3;
@@ -28,7 +31,7 @@ const SEARCH_RESULTS: usize = 10;
 const RRF_K: f32 = 60.0;
 const SNIPPET: usize = 300;
 
-const NOT_PENDING: &str = "error: that reminder already fired or was canceled.";
+const NOT_PENDING: &str = "that reminder already fired or was canceled.";
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
@@ -86,9 +89,8 @@ impl Harness {
         Ok(())
     }
 
-    /// Replies to every unanswered message, oldest first. A reply is stored before it is sent,
-    /// so a failed send only resends it. After `MAX_ATTEMPTS` runs, a message gets `SORRY`,
-    /// and it is marked sent even if that send fails. A burst still inside `DEBOUNCE` waits.
+    /// Replies to every unanswered message. When every text has its reply, compacts the chat if
+    /// it grew too long. Texts that arrive while compaction runs get their replies after it.
     /// Returns how long until the next reminder or waiting burst, or `None` if none is pending.
     pub async fn inbox(&self, space_id: &str) -> Result<Option<Duration>> {
         // Show the user that Satchel read the chat. A failure here does not stop the replies.
@@ -98,6 +100,26 @@ impl Harness {
 
         self.queue_due_reminders()?;
 
+        let mut waiting = self.reply_all(space_id).await?;
+        // A fold never takes a turn that waits for its reply. A failed fold changes nothing,
+        // and the next `inbox` tries again.
+        if waiting.is_none() {
+            if let Err(error) = self.compact().await {
+                console_error!("compaction failed: {error}");
+            }
+            waiting = self.reply_all(space_id).await?;
+        }
+
+        // Read the next reminder last. A `remind` call in this run may have set one.
+        let wake = [self.db.next_due()?, waiting].into_iter().flatten().min();
+        Ok(wake.map(Self::until))
+    }
+
+    /// Replies to every unanswered message, oldest first. A reply is stored before it is sent.
+    /// A failed send only resends it. After `MAX_ATTEMPTS` runs, a message gets `SORRY`,
+    /// and it is marked sent even if that send fails. A burst still inside `DEBOUNCE` waits.
+    /// Returns when that burst is due, if one waits.
+    async fn reply_all(&self, space_id: &str) -> Result<Option<i64>> {
         let mut waiting = None;
         loop {
             let burst = Self::next_turn(self.db.unanswered()?);
@@ -137,10 +159,7 @@ impl Harness {
             }
             sent?;
         }
-
-        // Read the next reminder after the loop. A `remind` call in this run may have set one.
-        let wake = [self.db.next_due()?, waiting].into_iter().flatten().min();
-        Ok(wake.map(Self::until))
+        Ok(waiting)
     }
 
     /// Typing dots are a nicety. A failure does not stop the reply.
@@ -193,8 +212,17 @@ impl Harness {
         burst: &[UnansweredMessage],
         message: &UnansweredMessage,
     ) -> Result<String> {
-        let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
-        let mut context = Agent::context(&history, &self.prompt_context()?);
+        let summary = self.db.summary()?;
+        let through = summary.as_ref().map(|summary| summary.through);
+        let chat = self.db.chat(through, Some(message.turn()))?;
+        let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
+        let mut context = Agent::context(
+            &self.db.settings()?,
+            summary.as_ref(),
+            &chat,
+            &self.prompt_context()?,
+            &zone,
+        )?;
         let saved = self.handle_burst(burst, message, &mut context).await?;
 
         let mut step = 0;
@@ -213,7 +241,9 @@ impl Harness {
                 results.push(self.run_tool(call, burst, message, saved).await?);
             }
             // A `react` call ends the model's reply. A tapback means it has nothing to say.
-            let failed = results.iter().any(|result| result.starts_with("error"));
+            let failed = results
+                .iter()
+                .any(|result| matches!(result, ToolResult::Error(_)));
             let reacted = calls
                 .iter()
                 .any(|call| matches!(call, Ok(ToolCall::React { .. })));
@@ -223,7 +253,7 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        let first_message = history.len() == burst.len();
+        let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
             .await
     }
@@ -249,7 +279,10 @@ impl Harness {
         let mut result = "Nothing saved.".to_string();
         if saved {
             let note = Self::burst_words(&texts, &links_to_read);
-            result = self.save(message.id, &urls, note.as_deref()).await?;
+            result = self
+                .save(message.id, &urls, note.as_deref())
+                .await?
+                .into_text();
             self.react(burst, Tapback::Like).await?;
         }
         let (read_text, images) = self.read_links(&links_to_read).await;
@@ -328,7 +361,7 @@ impl Harness {
     ) {
         let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
         context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
-        Agent::push_results(context, vec![result]);
+        Agent::push_results(context, vec![ToolResult::Done(result)]);
         if !images.is_empty() {
             let content: Vec<Value> = images
                 .iter()
@@ -344,10 +377,10 @@ impl Harness {
         burst: &[UnansweredMessage],
         message: &UnansweredMessage,
         saved: bool,
-    ) -> Result<String> {
+    ) -> Result<ToolResult> {
         let call = match call {
             Ok(call) => call,
-            Err(error) => return Ok(format!("error: {error}")),
+            Err(error) => return Ok(ToolResult::Error(error.clone())),
         };
         match call {
             ToolCall::Save { urls, note } => self.save(message.id, urls, note.as_deref()).await,
@@ -355,15 +388,12 @@ impl Harness {
                 if !saved && !message.is_reminder() {
                     self.react(burst, *emoji).await?;
                 }
-                Ok("ok".to_string())
+                Ok(ToolResult::Done("ok".to_string()))
             }
             ToolCall::Remind(remind) => self.remind(remind, message.id),
-            ToolCall::Search(search) => self.search(search).await,
+            ToolCall::Search(search) => self.search(search, burst[0].turn()).await,
             ToolCall::Cancel { id } => self.cancel(*id),
-            ToolCall::Settings { key, value } => match key.as_str() {
-                "time_zone" => self.set_time_zone(value),
-                _ => Ok(format!("error: there is no setting named {key}")),
-            },
+            ToolCall::Settings { key, value } => self.settings(key, value),
         }
     }
 
@@ -398,18 +428,23 @@ impl Harness {
 
     /// Adds `note` to each saved URL, then reads and embeds it. Without URLs, saves `note` on its
     /// own. Returns each item's search text for the model to check.
-    async fn save(&self, message_id: i64, urls: &[String], note: Option<&str>) -> Result<String> {
+    async fn save(
+        &self,
+        message_id: i64,
+        urls: &[String],
+        note: Option<&str>,
+    ) -> Result<ToolResult> {
         let mut items = Vec::new();
         for url in urls {
             let Some(link) = Link::find_all(url).pop() else {
-                return Ok(format!("error: {url} is not a URL"));
+                return Ok(ToolResult::Error(format!("{url} is not a URL")));
             };
             match File::parse(link.url.as_str()) {
                 Some(file) => self.db.insert_saved(message_id, &file)?,
                 None => self.db.insert_saved(message_id, &link)?,
             };
             let Some(row) = self.db.add_context(link.url.as_str(), note)? else {
-                return Ok(format!("error: {url} is not saved"));
+                return Ok(ToolResult::Error(format!("{url} is not saved")));
             };
             let (text, mut media) = self.reader.read(&link.url, row.context, &self.agent).await;
             let vector = match self
@@ -441,25 +476,30 @@ impl Harness {
         }
 
         if items.is_empty() {
-            return Ok("error: nothing to save".to_string());
+            return Ok(ToolResult::Error("nothing to save".to_string()));
         }
-        Ok(format!("ok. Search text:\n{}", items.join("\n")))
+        Ok(ToolResult::Done(format!(
+            "ok. Search text:\n{}",
+            items.join("\n")
+        )))
     }
 
-    fn remind(&self, remind: &Remind, message_id: i64) -> Result<String> {
+    fn remind(&self, remind: &Remind, message_id: i64) -> Result<ToolResult> {
         let saved_zone = self.time_zone()?;
+        let now = Timestamp::now().as_second();
         if let (Some(zone), None) = (&remind.at_zone, &saved_zone) {
-            if let Some(name) = zone.iana_name() {
-                self.db.set_time_zone(name)?;
-            }
-            return Ok(format!(
-                "error: the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
+            self.db
+                .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
+            return Ok(ToolResult::Error(format!(
+                "the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
                 Self::now_line(Some(zone))
-            ));
+            )));
         }
 
-        if remind.schedule.due_at <= Timestamp::now().as_second() {
-            return Ok("error: that time has already passed".to_string());
+        if remind.schedule.due_at <= now {
+            return Ok(ToolResult::Error(
+                "that time has already passed".to_string(),
+            ));
         }
 
         let id = match remind.id {
@@ -482,16 +522,18 @@ impl Harness {
                     Self::local_time(remind.schedule.due_at, &zone)?
                 )
             }
-            None if remind.id.is_some() => return Ok(NOT_PENDING.to_string()),
+            None if remind.id.is_some() => {
+                return Ok(ToolResult::Error(NOT_PENDING.to_string()));
+            }
             None => "ok".to_string(),
         };
 
         self.db.set_reminder(id, Some(&remind.schedule))?;
-        if let Some(name) = remind.at_zone.as_ref().and_then(TimeZone::iana_name) {
-            self.db.set_time_zone(name)?;
+        if let Some(zone) = &remind.at_zone {
+            self.db
+                .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
         }
-
-        Ok(reply)
+        Ok(ToolResult::Done(reply))
     }
 
     fn time_zone(&self) -> Result<Option<TimeZone>> {
@@ -503,40 +545,138 @@ impl Harness {
         ))
     }
 
-    fn cancel(&self, id: i64) -> Result<String> {
+    fn cancel(&self, id: i64) -> Result<ToolResult> {
         let Some(reminder) = self.db.reminder(id)? else {
-            return Ok(NOT_PENDING.to_string());
+            return Ok(ToolResult::Error(NOT_PENDING.to_string()));
         };
         self.db.set_reminder(id, None)?;
-        Ok(format!(
+        Ok(ToolResult::Done(format!(
             "ok, canceled the \"{}\" reminder. Tell the user.",
             reminder.content
-        ))
+        )))
     }
 
-    fn set_time_zone(&self, name: &str) -> Result<String> {
-        let zone = match TimeZone::get(name) {
-            Ok(zone) => zone,
-            Err(error) => return Ok(format!("error: {error}")),
+    /// Sets, changes, or removes one of the user's settings. A new time zone returns the new
+    /// "Now:" line.
+    fn settings(&self, key: &str, value: &str) -> Result<ToolResult> {
+        let change = match SettingChange::parse(key, value) {
+            Ok(change) => change,
+            Err(error) => return Ok(ToolResult::Error(error)),
         };
-        self.db.set_time_zone(zone.iana_name().unwrap_or(name))?;
-        Ok(format!("ok. {}", Self::now_line(Some(&zone))))
+        self.db
+            .change_setting(&change, Timestamp::now().as_second())?;
+        let reply = match &change {
+            SettingChange::TimeZone(zone) => format!("ok. {}", Self::now_line(Some(zone))),
+            SettingChange::Set { .. } => "ok".to_string(),
+            SettingChange::Remove { key } => format!("ok, removed {key}"),
+        };
+        Ok(ToolResult::Done(reply))
     }
 
-    async fn search(&self, search: &Search) -> Result<String> {
+    /// When the summary and the chat after it reach `COMPACT_AT_TOKENS`, folds the oldest
+    /// messages into the summary, and writes the setting changes in them. The newest
+    /// `KEEP_RECENT` messages stay. Messages are never deleted: `search` still finds them.
+    async fn compact(&self) -> Result<()> {
+        let summary = self.db.summary()?;
+        let rows = self
+            .db
+            .chat(summary.as_ref().map(|summary| summary.through), None)?;
+
+        // Size: about 4 characters a token.
+        let mut chars = summary
+            .as_ref()
+            .map_or(0, |summary| summary.text.chars().count());
+        for row in &rows {
+            chars += row.content.chars().count();
+        }
+        if chars / 4 < COMPACT_AT_TOKENS || rows.len() <= KEEP_RECENT {
+            return Ok(());
+        }
+
+        // The oldest rows, up to the turn of the first kept row. A reply stays with its text.
+        let first_kept = rows[rows.len() - KEEP_RECENT].turn;
+        let mut fold = Vec::new();
+        for row in rows {
+            if row.turn >= first_kept {
+                break;
+            }
+            fold.push(row);
+        }
+        if fold.is_empty() {
+            return Ok(());
+        }
+
+        let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
+        let compaction = self
+            .agent
+            .compact(summary.as_ref(), &self.db.settings()?, &fold, &zone)
+            .await?;
+        if !self
+            .db
+            .save_fold(&fold, &compaction.summary, &compaction.facts)?
+        {
+            console_error!("a reset deleted the chat during compaction");
+        }
+        Ok(())
+    }
+
+    /// Searches saved items, past chat, or both. Chat search covers the turns before
+    /// `before_turn`, the current burst.
+    async fn search(&self, search: &Search, before_turn: Turn) -> Result<ToolResult> {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let (after, before) = match search.bounds(&zone) {
             Ok(bounds) => bounds,
-            Err(error) => return Ok(format!("error: {error}")),
+            Err(error) => return Ok(ToolResult::Error(error)),
         };
+        let query = search.query.as_deref().map(str::trim);
+        let query = query.filter(|query| !query.is_empty());
+        let (in_saved, in_chat) = match search.scope {
+            None => (true, true),
+            Some(Scope::Saved) => (true, false),
+            Some(Scope::Chat) => (false, true),
+        };
+
+        let mut sections = Vec::new();
+        if in_saved {
+            let lines = self.search_saved(query, after, before, &zone).await?;
+            if !lines.is_empty() {
+                sections.push(format!("Saved items:\n{}", lines.join("\n")));
+            }
+        }
+        if in_chat {
+            let mut blocks = Vec::new();
+            for block in self.db.search_chat(query, after, before, before_turn)? {
+                let mut lines = Vec::new();
+                for row in &block {
+                    lines.push(Agent::chat_line(row, &zone, Some(SNIPPET))?);
+                }
+                blocks.push(lines.join("\n"));
+            }
+            if !blocks.is_empty() {
+                sections.push(format!("Past chat:\n{}", blocks.join("\n\n")));
+            }
+        }
+        if sections.is_empty() {
+            return Ok(ToolResult::Done("Nothing matches.".to_string()));
+        }
+        Ok(ToolResult::Done(sections.join("\n\n")))
+    }
+
+    /// The saved items that best match `query`, one line each. Without a query, the newest.
+    async fn search_saved(
+        &self,
+        query: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+        zone: &TimeZone,
+    ) -> Result<Vec<String>> {
         let mut rows = self.db.searchable(after, before)?;
         if rows.is_empty() {
-            return Ok("No saved items match.".to_string());
+            return Ok(Vec::new());
         }
 
         // With no query, the newest saves come first.
-        let query = search.query.as_deref().map(str::trim);
-        if let Some(query) = query.filter(|query| !query.is_empty()) {
+        if let Some(query) = query {
             let vector = self.agent.embed(Agent::SEARCH, query, None).await?;
             rows = Self::rank(query, &vector, rows);
         }
@@ -562,7 +702,7 @@ impl Harness {
                 ));
             }
         }
-        Ok(lines.join("\n"))
+        Ok(lines)
     }
 
     fn rank(query: &str, query_vector: &[u8], rows: Vec<Saved>) -> Vec<Saved> {
