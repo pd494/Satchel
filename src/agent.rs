@@ -112,7 +112,8 @@ impl Agent {
         Ok((text, calls))
     }
 
-    /// Splits `links` into the ones the user sent to keep and the ones they only asked about.
+    /// Asks Clef about each of `links`. Returns the links to save, and the links the user only
+    /// asked about, which Satchel reads to answer.
     pub async fn save_or_read(
         &self,
         texts: &[&str],
