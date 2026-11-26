@@ -61,6 +61,7 @@ on allCases()
 		{"s-find-note", "whats the internet password at the cabin", "text-only", "otter42"}, ¬
 		{"s-find-repo", "that async rust library i saved", "text", "github.com"}, ¬
 		{"s-find-missing", "send me that pasta recipe", "text-only", ""}, ¬
+		{"s-find-missing-2", "where's that hotel booking i saved", "text-only", ""}, ¬
 		{"s-list", "what have i saved so far", "text", ""}, ¬
 		{"s-pick-after-list", "send me the sourdough one", "text", "wikipedia.org"}, ¬
 		{"s-find-exact", "send me the tokio link", "text", "github.com"}, ¬
