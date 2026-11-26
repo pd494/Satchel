@@ -144,6 +144,11 @@ on allCases()
 		{"f-recall-locker", "which locker is mine", "text-only", "312"}, ¬
 		{"r-raw-neighbor", "whats the upstairs guys name again", "text-only", "Omar"}, ¬
 		{"r-raw-grandma", "how old did grandma turn", "text-only", "91"}, ¬
+		{"r-ask-vague", "whats that guys name", "text", ""}, ¬
+		{"r-ask-detail", "the one who lives above me", "text-only", "Omar"}, ¬
+		{"r-ask-missing", "what was my old landlords name", "text", ""}, ¬
+		{"r-ask-missing-2", "idk the place before this one", "text", ""}, ¬
+		{"r-ask-missing-3", "no clue honestly", "text-only", "not"}, ¬
 		{"m-recall-note", "the code for the place??", "text-only", "4417"}, ¬
 		{"m-recall-link", "that neighborhood link", "text", "wikipedia.org"}, ¬
 		{"m-saved-list", "what do u have of mine", "text", ""}, ¬
