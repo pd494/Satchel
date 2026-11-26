@@ -80,6 +80,11 @@ on allCases()
 		{"c-chat", "ugh mondays", "text-only", ""}, ¬
 		{"c-find-corgi", "send me the zoomies dog clip", "text", "tiktok.com"}, ¬
 		{"c-find-curry", "that curry reel", "text", "instagram.com"}, ¬
+		{"o-x", "https://x.com/elonmusk/status/1585341984679469056", "tapback", ""}, ¬
+		{"o-instagram", "https://www.instagram.com/reel/C0JKhWRx5zv/", "tapback", ""}, ¬
+		{"o-reddit", "https://www.reddit.com/r/rust/comments/1fh8gq5/", "tapback", ""}, ¬
+		{"o-spotify", "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8", "tapback", ""}, ¬
+		{"o-pinterest", "https://www.pinterest.com/pin/1196337398574536/", "tapback", ""}, ¬
 		{"burst-link-off-topic", "https://en.wikipedia.org/wiki/Bagel||what's the weather in sf today?", "both", ""}, ¬
 		{"burst-two-links-one-asked", "https://github.com/cloudflare/workers-rs||https://example.org/sketchy-deal is this one a scam?", "both", ""}, ¬
 		{"burst-messy", "whats the capital of peru||https://en.wikipedia.org/wiki/Lima||also save this pic||file:~/Pictures/satchel-test/sample-photo.jpg", "both", "lima"}, ¬
