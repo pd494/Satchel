@@ -236,13 +236,13 @@ impl Harness {
     ) -> Result<bool> {
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
         let links = Self::burst_links(&texts, message.is_reminder());
-        let (links, asked) = self.agent.keep(&texts, links).await?;
-        let saved = !links.is_empty();
+        let (kept, asked) = self.agent.keep(&texts, links).await?;
+        let saved = !kept.is_empty();
         if !saved && asked.is_empty() {
             return Ok(false);
         }
 
-        let urls: Vec<String> = links.iter().map(|link| link.url.to_string()).collect();
+        let urls: Vec<String> = kept.iter().map(|link| link.url.to_string()).collect();
         let mut result = "Nothing saved.".to_string();
         if saved {
             let note = Self::burst_words(&texts);
