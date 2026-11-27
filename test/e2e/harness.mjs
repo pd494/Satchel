@@ -3,7 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { createHmac, randomUUID } from "node:crypto";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,8 @@ const BUILD_TIMEOUT_MS = 15 * 60_000;
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** A Linq CDN file with a new id. */
+/** A Linq CDN file with a new id. The fake Linq serves the bytes of a file with this name in
+ * test/e2e/files. Other names get a 404. */
 export function file(name) {
   const id = randomUUID();
   return { id, url: `https://cdn.linqapp.com/attachments/partners/e2e/${id}/${name}` };
@@ -40,13 +41,19 @@ export function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
-/** The fake Linq. `requests` holds every request except marking the chat read. Set
- * `refuseNextSend` to answer the next message send with a 500. */
+/** The fake Linq and its file host. `requests` holds every request except marking the chat read
+ * and file downloads. Set `refuseNextSend` to answer the next message send with a 500. */
 export const linq = {
   requests: [],
   refused: 0,
   refuseNextSend: false,
   server: createServer(async (req, res) => {
+    const download = req.url.match(/^\/attachments\/partners\/e2e\/[^/]+\/([^/]+)$/);
+    if (download) {
+      const path = new URL(`files/${download[1]}`, import.meta.url);
+      if (!existsSync(path)) return res.writeHead(404).end();
+      return res.writeHead(200, { "content-type": "application/octet-stream" }).end(readFileSync(path));
+    }
     const body = await readJson(req);
     if (linq.refuseNextSend && req.url.endsWith("/messages")) {
       linq.refuseNextSend = false;
@@ -89,6 +96,7 @@ export async function startWorker(args) {
       "--port", String(WORKER_PORT),
       "--persist-to", storage,
       "--var", `LINQ_API:http://127.0.0.1:${linqPort}`,
+      "--var", `LINQ_CDN:http://127.0.0.1:${linqPort}`,
       "--var", "LINQ_API_KEY:e2e",
       "--var", `LINQ_WEBHOOK_SECRET:whsec_${WEBHOOK_KEY.toString("base64")}`,
       ...args,
@@ -151,13 +159,14 @@ export function eventOf(request) {
   return null;
 }
 
-/** Reads the reactions, text, links, and files out of the requests for `eventId`. A reply to
- * another event goes in `late`. */
-export function summarize(requests, eventId) {
+/** Reads the reactions, text, links, and files out of the requests for `eventIds`, one event or a
+ * list of them. A reply to another event goes in `late`. */
+export function summarize(requests, eventIds) {
+  const ids = [eventIds].flat();
   const summary = { at: requests[0]?.at, reactions: [], texts: [], links: [], files: [], voices: [], late: [] };
   for (const request of requests) {
     const event = eventOf(request);
-    if (event !== null && event !== eventId) {
+    if (event !== null && !ids.includes(event)) {
       summary.late.push(event);
     } else if (request.path.endsWith("/reactions")) {
       summary.reactions.push(request.body.type);

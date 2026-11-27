@@ -45,4 +45,5 @@ jobs:
         with:
           node-version: 24
       - run: node test/check-prompt-leaks.mjs
-      - run: node --check test/bench/chat-search.mjs
+      - run: for script in test/e2e/live.mjs test/e2e/harness.mjs; do node --check "$script"; done
+      - run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12

@@ -60,6 +60,15 @@ const NOT_ASKED: &str = "not done. The user's own messages do not ask for this c
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
 
+/// What the newest messages saved.
+enum Saves {
+    Nothing,
+    /// Links or files, and the messages ask for more, such as a question or a fact.
+    AndMore,
+    /// Only links or files, maybe with a comment. The 👍 is the whole reply.
+    Only,
+}
+
 /// The model's JSON from the compact prompt.
 #[derive(Deserialize)]
 struct Compaction {
@@ -142,6 +151,14 @@ impl Harness {
                 console_error!("compaction failed: {error}");
             }
             burst_due_at = self.reply_all(space_id).await?;
+        }
+
+        // A text that came in while this ran set its own alarm, and the alarm this returns
+        // replaces it. It waits out its debounce, not the next reminder. A text Satchel kept
+        // after a failed send is tried again now.
+        if burst_due_at.is_none() {
+            let waiting = Self::next_turn(self.db.unanswered()?);
+            burst_due_at = waiting.last().map(|message| message.created_at + DEBOUNCE);
         }
 
         // Wake for the next reminder or the waiting burst, whichever comes first.
@@ -262,7 +279,16 @@ impl Harness {
             &zone,
         )?;
         let context_length_before_burst = context.len();
-        let saved = self.handle_burst(burst, message, &mut context).await?;
+        let saves = self.handle_burst(burst, message, &mut context).await?;
+        let saved = !matches!(saves, Saves::Nothing);
+        let first_message = summary.is_none() && chat.len() == burst.len();
+        // Gemma texted after links it only had to save: "what's this one about?" about readable
+        // pages, and "got it, saved!".
+        if matches!(saves, Saves::Only) {
+            return self
+                .finish(String::new(), burst, message, first_message, saved)
+                .await;
+        }
 
         // Satchel fetches and sends only the URLs the user sent in the chat, and saved URLs. A due
         // reminder is a user message, but the model wrote its note.
@@ -367,7 +393,6 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
             .await
     }
@@ -377,13 +402,15 @@ impl Harness {
         burst: &[UnansweredMessage],
         message: &UnansweredMessage,
         context: &mut Vec<Value>,
-    ) -> Result<bool> {
+    ) -> Result<Saves> {
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
         let links = Self::burst_links(&texts, message.is_reminder());
-        let (links_to_save, links_to_read) = self.agent.save_or_read(&texts, links).await?;
+        let burst_links = self.agent.save_or_read(&texts, links).await?;
+        let links_to_save = burst_links.to_save;
+        let links_to_read = burst_links.to_read;
         let saved = !links_to_save.is_empty();
         if !saved && links_to_read.is_empty() {
-            return Ok(false);
+            return Ok(Saves::Nothing);
         }
 
         let urls: Vec<String> = links_to_save
@@ -404,7 +431,13 @@ impl Harness {
         result += "\n\nAnswer every other question or request in the newest messages in text.";
 
         Self::push_save_call(context, &urls, result, &images);
-        Ok(saved)
+        if !saved {
+            Ok(Saves::Nothing)
+        } else if burst_links.asks_more || !links_to_read.is_empty() {
+            Ok(Saves::AndMore)
+        } else {
+            Ok(Saves::Only)
+        }
     }
 
     /// The links Clef may keep. A reminder's links were saved before. A URL sent twice counts
@@ -498,6 +531,30 @@ impl Harness {
         };
         match call {
             ToolCall::Save { urls, note } => {
+                // Clef saved the links it kept from the newest texts before the model ran. The
+                // model saves only a link that is saved, or one from the user text just before
+                // the newest texts, as in "is this legit? <link>" and then "ok save it". Gemma
+                // once saved a file name the user typed as a website.
+                let mut links_before_burst = Vec::new();
+                for row in self.db.recent_user_texts(burst[0].id)? {
+                    if row.id < burst[0].id {
+                        for link in Link::find_all(&row.content) {
+                            links_before_burst.push(link.url);
+                        }
+                    }
+                }
+                for url in urls {
+                    let Some(link) = Link::find_all(url).pop() else {
+                        return Ok(ToolResult::Error(format!("{url} is not a URL")));
+                    };
+                    if !self.db.is_saved(link.url.as_str())?
+                        && !links_before_burst.contains(&link.url)
+                    {
+                        return Ok(ToolResult::Error(format!(
+                            "{url} cannot be saved: it is not saved, and the user did not send it before these messages."
+                        )));
+                    }
+                }
                 self.save(message.id, burst[0].id, urls, note.as_deref())
                     .await
             }
@@ -539,7 +596,7 @@ impl Harness {
         }
 
         // After untrusted text, a change to settings or reminders runs only when the user's own
-        // texts ask for it. A new reminder in the saved time zone is fine.
+        // texts ask for it. A new reminder is fine.
         let change = match call {
             ToolCall::Settings { key, value } if value.trim().is_empty() => {
                 format!("remove the setting {key}")
@@ -549,18 +606,8 @@ impl Harness {
                 Some(reminder) => format!("cancel the reminder \"{}\"", reminder.content),
                 None => return Ok(None),
             },
-            ToolCall::Remind(remind) => {
-                let changes_zone = match &remind.at_zone {
-                    Some(zone) => self.db.time_zone()?.as_deref() != zone.iana_name(),
-                    None => false,
-                };
-                if remind.id.is_some() {
-                    format!("move the reminder \"{}\"", remind.note)
-                } else if changes_zone {
-                    format!("set a reminder in a new time zone for \"{}\"", remind.note)
-                } else {
-                    return Ok(None);
-                }
+            ToolCall::Remind(remind) if remind.id.is_some() => {
+                format!("move the reminder \"{}\"", remind.note)
             }
             _ => return Ok(None),
         };
@@ -649,13 +696,11 @@ impl Harness {
         urls: &[String],
         note: Option<&str>,
     ) -> Result<ToolResult> {
-        // A note sticks only to links from the newest texts or the user text just before them.
-        // Gemma once glued a note about a wedding onto seven older files. The words of a note
-        // that names older links are saved as a note of their own.
-        let recent_user_texts = match note {
-            Some(_) => self.db.recent_user_texts(burst_start)?,
-            None => Vec::new(),
-        };
+        // A note sticks to links from the newest texts or the user text just before them, and to
+        // one older saved link, as in "the rust one is for my side project". Gemma once glued a
+        // note about a wedding onto seven older files. The words of a note that names more than
+        // one older link are saved as a note of their own.
+        let recent_user_texts = self.db.recent_user_texts(burst_start)?;
         let mut recent_links = Vec::new();
         for row in &recent_user_texts {
             for link in Link::find_all(&row.content) {
@@ -668,11 +713,14 @@ impl Harness {
             let Some(link) = Link::find_all(url).pop() else {
                 return Ok(ToolResult::Error(format!("{url} is not a URL")));
             };
-            if note.is_none() || recent_links.contains(&link.url) {
+            if recent_links.contains(&link.url) {
                 urls_to_save.push(url.as_str());
             } else {
                 older_urls.push(url.as_str());
             }
+        }
+        if note.is_none() || older_urls.len() == 1 {
+            urls_to_save.append(&mut older_urls);
         }
 
         let mut items = Vec::new();
@@ -737,10 +785,16 @@ impl Harness {
         if let (Some(zone), None) = (&remind.at_zone, &saved_zone) {
             self.db
                 .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
-            return Ok(ToolResult::Error(format!(
+            // The "Now:" line was in UTC. A date such as "tomorrow" worked out from it is right
+            // when the date in the user's zone is the same.
+            let utc_date = Timestamp::now().to_zoned_datetime(TimeZone::UTC).date();
+            let local_date = Timestamp::now().to_zoned_datetime(zone.clone()).date();
+            if utc_date != local_date {
+                return Ok(ToolResult::Error(format!(
                 "the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
-                Self::now_line(Some(zone))
-            )));
+                    Self::now_line(Some(zone))?
+                )));
+            }
         }
 
         if remind.schedule.due_at <= now {
@@ -776,10 +830,6 @@ impl Harness {
         };
 
         self.db.set_reminder(id, Some(&remind.schedule))?;
-        if let Some(zone) = &remind.at_zone {
-            self.db
-                .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
-        }
         Ok(ToolResult::Done(reply))
     }
 
@@ -811,7 +861,7 @@ impl Harness {
         self.db
             .change_setting(&change, Timestamp::now().as_second())?;
         let reply = match &change {
-            SettingChange::TimeZone(zone) => format!("ok. {}", Self::now_line(Some(zone))),
+            SettingChange::TimeZone(zone) => format!("ok. {}", Self::now_line(Some(zone))?),
             SettingChange::Set { .. } => "ok".to_string(),
             SettingChange::Remove { key } => format!("ok, removed {key}"),
         };
@@ -1295,14 +1345,19 @@ impl Harness {
 
     fn prompt_context(&self) -> Result<String> {
         let time_zone = self.time_zone()?;
-        let mut text = Self::now_line(time_zone.as_ref());
+        let mut text = Self::now_line(time_zone.as_ref())?;
         let reminders = self.db.reminders()?;
         if !reminders.is_empty() {
             let zone = time_zone.unwrap_or(TimeZone::UTC);
             text.push_str("\nPending reminders:");
             for reminder in reminders {
                 let schedule = &reminder.schedule;
-                let mut when = Self::local_time(schedule.due_at, &zone)?;
+                // The same form as `at`, so a move can copy the date and change the time.
+                let mut when = Timestamp::from_second(schedule.due_at)
+                    .map_err(|error| error.to_string())?
+                    .to_zoned_datetime(zone.clone())
+                    .strftime("%a %Y-%m-%dT%H:%M:%S")
+                    .to_string();
                 if let Some(repeat) = schedule.repeat {
                     when.push_str(&format!(", repeat {repeat}"));
                 }
@@ -1320,13 +1375,21 @@ impl Harness {
         Ok(text)
     }
 
-    fn now_line(time_zone: Option<&TimeZone>) -> String {
+    fn now_line(time_zone: Option<&TimeZone>) -> Result<String> {
         let now = Timestamp::now().to_zoned_datetime(time_zone.cloned().unwrap_or(TimeZone::UTC));
         let mut line = format!("Now: {}.", now.strftime("%A, %Y-%m-%d %H:%M:%S in %Q"));
         if time_zone.is_none() {
             line.push_str(" The user's time zone is unknown.");
         }
-        line
+        // Gemma once worked out "friday" as a Monday. It copies the date from this list.
+        line.push_str(" The next 7 days:");
+        let mut day = now.date();
+        for _ in 0..7 {
+            day = day.tomorrow().map_err(|error| error.to_string())?;
+            line.push_str(&format!(" {}", day.strftime("%a %Y-%m-%d")));
+        }
+        line.push('.');
+        Ok(line)
     }
 
     /// Sends each part of `text` as its own message. Linq requires a link or media part to be
