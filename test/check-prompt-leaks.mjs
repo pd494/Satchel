@@ -19,10 +19,10 @@ const prompts = readdirSync(new URL("../src/prompts", import.meta.url)).map((nam
 
 let leaks = 0;
 for (const text of tests) {
-  const words = normalize(text);
-  if (words.split(" ").length < 4) continue;
+  const normalized = normalize(text);
+  if (normalized.split(" ").length < 4) continue;
   for (const [name, prompt] of prompts) {
-    if (prompt.includes(words)) {
+    if (prompt.includes(normalized)) {
       console.error(`src/prompts/${name} contains the test text "${text}"`);
       leaks += 1;
     }

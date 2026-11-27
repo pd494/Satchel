@@ -120,7 +120,7 @@ pub enum Role {
 
 #[derive(Clone, Deserialize)]
 pub struct Row {
-    id: i64,
+    pub id: i64,
     pub turn: Turn,
     pub role: Role,
     pub content: String,
@@ -443,7 +443,7 @@ impl Db {
     }
 
     /// The messages of one turn: a user text and the reply to it, oldest first.
-    pub fn turn(&self, turn: Turn) -> Result<Vec<Row>> {
+    pub fn turn_messages(&self, turn: Turn) -> Result<Vec<Row>> {
         let select_query = format!("{ROW} WHERE turn = ? ORDER BY id");
         self.sql
             .exec(&select_query, Some(vec![turn.0.into()]))?

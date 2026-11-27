@@ -287,13 +287,6 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        // A reply that is only a tapback emoji, such as "👍", goes out as that tapback.
-        let mut text = text;
-        if let Ok(tapback) = serde_json::from_value::<Tapback>(json!(text)) {
-            self.react(burst, tapback).await?;
-            text = String::new();
-        }
-
         let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
             .await
@@ -482,29 +475,26 @@ impl Harness {
         // A note sticks only to links from the newest texts or the user text just before them.
         // Gemma once glued a note about a wedding onto seven older files. The words of a note
         // that names older links are saved as a note of their own.
-        let mut linked = Vec::new();
-        let mut skipped = Vec::new();
-        let recent = match note {
+        let recent_user_texts = match note {
             Some(_) => self.db.recent_user_texts(burst_start)?,
             None => Vec::new(),
         };
+        let mut urls_to_save = Vec::new();
+        let mut older_urls = Vec::new();
         for url in urls {
-            let mut is_recent = note.is_none();
-            for row in &recent {
-                if row.content.contains(url.as_str()) {
-                    is_recent = true;
-                    break;
-                }
-            }
+            let is_recent = note.is_none()
+                || recent_user_texts
+                    .iter()
+                    .any(|row| row.content.contains(url.as_str()));
             if is_recent {
-                linked.push(url);
+                urls_to_save.push(url.as_str());
             } else {
-                skipped.push(url.as_str());
+                older_urls.push(url.as_str());
             }
         }
 
         let mut items = Vec::new();
-        for url in linked.iter().copied() {
+        for &url in &urls_to_save {
             let Some(link) = Link::find_all(url).pop() else {
                 return Ok(ToolResult::Error(format!("{url} is not a URL")));
             };
@@ -537,13 +527,13 @@ impl Harness {
             items.push(format!("- {url}: {text}{media}"));
         }
 
-        if !skipped.is_empty() {
+        if !older_urls.is_empty() {
             items.push(format!(
                 "- not added to {}: those links were not in the newest messages",
-                skipped.join(", ")
+                older_urls.join(", ")
             ));
         }
-        if let Some(note) = note.filter(|_| linked.is_empty()) {
+        if let Some(note) = note.filter(|_| urls_to_save.is_empty()) {
             let id = self.db.insert_saved(message_id, &Note(note.to_string()))?;
             let vector = self.agent.embed(Agent::SAVED_ITEM, note, None).await?;
             self.db.set_read(id, note, vector)?;
@@ -831,8 +821,8 @@ impl Harness {
         Ok(ToolResult::Done(found.join("\n\n")))
     }
 
-    /// The user's past messages that best answer `query`, one line each. Without a query, the
-    /// newest in the time window.
+    /// The past messages from both sides that best answer `query`, each with the rest of its turn.
+    /// Without a query, the newest in the time window.
     async fn search_chat(
         &self,
         query: Option<&str>,
@@ -860,8 +850,8 @@ impl Harness {
             .db
             .chat_matches(Some(query), after, before, before_turn, CHAT_MATCHES)?
         {
-            let text = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
-            if !seen.insert(text.to_lowercase()) {
+            let one_line = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !seen.insert(one_line.to_lowercase()) {
                 continue;
             }
             candidates.push(row);
@@ -879,15 +869,9 @@ impl Harness {
         let mut owners = Vec::new();
         for (owner, row) in candidates.iter().enumerate() {
             let chars: Vec<char> = row.content.chars().collect();
-            let mut start = 0;
-            loop {
-                let end = (start + PASSAGE).min(chars.len());
-                passages.push(chars[start..end].iter().collect::<String>());
+            for passage in Self::split_passages(&chars) {
+                passages.push(passage);
                 owners.push(owner);
-                if end == chars.len() {
-                    break;
-                }
-                start += PASSAGE_STEP;
             }
         }
 
@@ -910,19 +894,14 @@ impl Harness {
 
         // Lookalikes: a passage that shares at least half its words with one already shown adds
         // nothing, such as the same question asked again.
-        let words = |text: &str| -> HashSet<String> {
-            text.split(|c: char| !c.is_alphanumeric())
-                .filter(|word| word.chars().count() > 2)
-                .map(str::to_lowercase)
-                .collect()
-        };
-        let mut shown: Vec<HashSet<String>> = Vec::new();
+        let mut shown_words: Vec<HashSet<String>> = Vec::new();
         let mut shown_turns: Vec<Turn> = Vec::new();
         let mut lines = Vec::new();
         for (_, owner, passage) in ranked {
-            let passage_words = words(&passages[passage]);
+            let passage_words: HashSet<String> =
+                Self::words(&passages[passage]).into_iter().collect();
             let mut lookalike = false;
-            for other in &shown {
+            for other in &shown_words {
                 let shared = passage_words.intersection(other).count();
                 let all = passage_words.union(other).count();
                 if all > 0 && shared as f32 / all as f32 >= LOOKALIKE {
@@ -933,7 +912,7 @@ impl Harness {
             if lookalike {
                 continue;
             }
-            shown.push(passage_words);
+            shown_words.push(passage_words);
 
             // A match shows its whole turn, so "what did you say about the sandwich" gets
             // Satchel's reply next to the user's text. The match shows its best passage.
@@ -942,8 +921,8 @@ impl Harness {
                 continue;
             }
             shown_turns.push(hit.turn);
-            for mut row in self.db.turn(hit.turn)? {
-                if row.created_at == hit.created_at && row.content == hit.content {
+            for mut row in self.db.turn_messages(hit.turn)? {
+                if row.id == hit.id {
                     row.content = passages[passage].clone();
                     lines.push(Self::transcript_line(&row, zone, None)?);
                 } else {
@@ -991,40 +970,36 @@ impl Harness {
                 .chars()
                 .collect();
             snippets.push(one_line.iter().take(SNIPPET).collect::<String>());
-            if query.is_none() || one_line.len() <= SNIPPET {
-                continue;
-            }
-            let mut start = 0;
-            loop {
-                let end = (start + PASSAGE).min(one_line.len());
-                passages.push(one_line[start..end].iter().collect::<String>());
-                owners.push(owner);
-                if end == one_line.len() {
-                    break;
+            if query.is_some() && one_line.len() > SNIPPET {
+                for passage in Self::split_passages(&one_line) {
+                    passages.push(passage);
+                    owners.push(owner);
                 }
-                start += PASSAGE_STEP;
             }
         }
-        if let (Some(query), false) = (query, passages.is_empty()) {
-            // A long result shows its two best passages in their order. A filename word at the
-            // end can win the top score, and the second passage then still holds the answer.
-            let scores = self.agent.rerank(query, &passages).await?;
-            let mut best: Vec<Vec<(f32, usize)>> = vec![Vec::new(); rows.len()];
-            for (passage, (&owner, &score)) in owners.iter().zip(&scores).enumerate() {
-                best[owner].push((score, passage));
-            }
-            for (owner, scored) in best.iter_mut().enumerate() {
-                if scored.is_empty() {
-                    continue;
+        if let Some(query) = query {
+            if !passages.is_empty() {
+                // A long result shows its two best passages in their order. A filename word at
+                // the end can win the top score, and the second passage then still holds the
+                // answer.
+                let scores = self.agent.rerank(query, &passages).await?;
+                let mut scored_passages: Vec<Vec<(f32, usize)>> = vec![Vec::new(); rows.len()];
+                for (passage, (&owner, &score)) in owners.iter().zip(&scores).enumerate() {
+                    scored_passages[owner].push((score, passage));
                 }
-                scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-                let mut picked: Vec<usize> = scored.iter().take(2).map(|&(_, p)| p).collect();
-                picked.sort();
-                let mut parts = Vec::new();
-                for passage in picked {
-                    parts.push(passages[passage].as_str());
+                for (owner, scored) in scored_passages.iter_mut().enumerate() {
+                    if scored.is_empty() {
+                        continue;
+                    }
+                    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+                    scored.truncate(2);
+                    scored.sort_by_key(|&(_, passage)| passage);
+                    let mut top_two = Vec::new();
+                    for &(_, passage) in scored.iter() {
+                        top_two.push(passages[passage].as_str());
+                    }
+                    snippets[owner] = top_two.join(" … ");
                 }
-                snippets[owner] = parts.join(" … ");
             }
         }
 
@@ -1048,14 +1023,30 @@ impl Harness {
         Ok(lines)
     }
 
+    /// Overlapping passages of `PASSAGE` characters, each `PASSAGE_STEP` after the last. The last
+    /// passage ends at the end of the text.
+    fn split_passages(chars: &[char]) -> Vec<String> {
+        let mut passages = Vec::new();
+        let mut start = 0;
+        loop {
+            let end = (start + PASSAGE).min(chars.len());
+            passages.push(chars[start..end].iter().collect::<String>());
+            if end == chars.len() {
+                return passages;
+            }
+            start += PASSAGE_STEP;
+        }
+    }
+
+    /// A text's words: lowercase, and longer than 2 characters.
+    fn words(text: &str) -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|word| word.chars().count() > 2)
+            .map(str::to_lowercase)
+            .collect()
+    }
+
     fn rank(query: &str, query_vector: &[u8], rows: Vec<Saved>) -> Vec<Saved> {
-        // A text's words: lowercase, and longer than 2 characters.
-        let words = |text: &str| -> Vec<String> {
-            text.split(|c: char| !c.is_alphanumeric())
-                .filter(|word| word.chars().count() > 2)
-                .map(str::to_lowercase)
-                .collect()
-        };
         // A vector is stored as little-endian `f32` bytes.
         let floats = |bytes: &[u8]| -> Vec<f32> {
             let (chunks, _) = bytes.as_chunks::<4>();
@@ -1066,13 +1057,13 @@ impl Harness {
         };
         let length = |vector: &[f32]| vector.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-        let query_words = words(query);
+        let query_words = Self::words(query);
         let query_vector = floats(query_vector);
         let mut word_hits = Vec::new();
         let mut closeness = Vec::new();
         for row in &rows {
             // Word hits: the query words that start a word in the row's search text.
-            let row_words = words(row.description.as_deref().unwrap_or_default());
+            let row_words = Self::words(row.description.as_deref().unwrap_or_default());
             let mut hits = 0;
             for word in &query_words {
                 if row_words

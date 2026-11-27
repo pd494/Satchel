@@ -26,7 +26,7 @@ const DIMENSIONS: u32 = 512;
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
 /// A compaction or a media reading. Each writes a long text, and no one waits on it.
-const COMPACTION_TIMEOUT_MS: u32 = 60_000;
+const LONG_TEXT_TIMEOUT_MS: u32 = 60_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
 
@@ -96,20 +96,20 @@ impl Agent {
         });
         // None: the model gets the tools and answers with text or tool calls.
         // Some: the model gets no tools and answers with JSON in the schema's shape.
-        match response_schema {
+        let timeout_ms = match response_schema {
             Some(response_schema) => {
                 input["response_format"] =
-                    json!({ "type": "json_schema", "json_schema": response_schema })
+                    json!({ "type": "json_schema", "json_schema": response_schema });
+                LONG_TEXT_TIMEOUT_MS
             }
-            None => input["tools"] = self.tools.clone(),
-        }
+            None => {
+                input["tools"] = self.tools.clone();
+                MODEL_TIMEOUT_MS
+            }
+        };
         if let Some(run) = &self.eval_run {
             metadata["eval_run"] = json!(run);
         }
-        let timeout_ms = match response_schema {
-            Some(_) => COMPACTION_TIMEOUT_MS,
-            None => MODEL_TIMEOUT_MS,
-        };
         let options = Self::gateway(metadata, timeout_ms);
         let mut output = self.call(MODEL, &input, Some(&options)).await?;
         let mut response = output["choices"][0]["message"].take();
@@ -244,7 +244,7 @@ impl Agent {
             "max_tokens": 400,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        let options = Self::gateway(json!({ "step": "read_media" }), COMPACTION_TIMEOUT_MS);
+        let options = Self::gateway(json!({ "step": "read_media" }), LONG_TEXT_TIMEOUT_MS);
         let output = self.call(MODEL, &input, Some(&options)).await?;
         let text = output["choices"][0]["message"]["content"].as_str();
         Ok(Self::clean(text.ok_or("the media reading is missing")?))
@@ -319,7 +319,7 @@ impl Agent {
     }
 
     /// Removes what Gemma sometimes leaks into its text: a thinking block before `<channel|>`,
-    /// special tokens like `<|file_separator|>`, and zero-width characters.
+    /// special tokens like `<|file_separator|>`, HTML tags, and zero-width characters.
     fn clean(text: &str) -> String {
         // U+200D stays: it joins emoji such as 🧘‍♀️.
         let mut text = text.replace(['\u{200B}', '\u{200C}', '\u{FEFF}'], "");

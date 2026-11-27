@@ -102,16 +102,16 @@ impl Reader {
                 // A video's text is what it shows plus what is said. A part that fails, such as a
                 // video with no speech, is left out.
                 let video = (essence.to_string(), bytes);
-                let mut parts = Vec::new();
+                let mut video_text = Vec::new();
                 match agent.read_media(&video).await {
-                    Ok(seen) => parts.push(seen),
+                    Ok(seen) => video_text.push(seen),
                     Err(error) => console_error!("read the video {url} failed: {error}"),
                 }
                 match agent.transcribe(&video.1).await {
-                    Ok(speech) => parts.push(speech),
+                    Ok(speech) => video_text.push(speech),
                     Err(error) => console_error!("transcribe {url} failed: {error}"),
                 }
-                (parts.join("\n"), Some(video))
+                (video_text.join("\n"), Some(video))
             }
             ("audio", _) => (agent.transcribe(&bytes).await?, None),
             _ => (agent.read_document(name, essence, &bytes).await?, None),

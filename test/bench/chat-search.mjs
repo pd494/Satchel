@@ -19,14 +19,14 @@ import { DatabaseSync } from "node:sqlite";
 
 const source = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 const harness = source("src/harness.rs");
-const constant = (name) => Number(harness.match(new RegExp(`const ${name}: \\w+ = ([\\d_]+);`))[1].replaceAll("_", ""));
+const constant = (name) => Number(harness.match(new RegExp(`const ${name}: \\w+ = ([\\d_.]+);`))[1].replaceAll("_", ""));
 const CHAT_MATCHES = constant("CHAT_MATCHES");
 const CHAT_CANDIDATES = constant("CHAT_CANDIDATES");
 const CHAT_HITS = constant("CHAT_HITS");
 const PASSAGE = constant("PASSAGE");
 const PASSAGE_STEP = constant("PASSAGE_STEP");
 const SNIPPET = constant("SNIPPET");
-const LOOKALIKE = Number(harness.match(/const LOOKALIKE: f32 = ([\d.]+);/)[1]);
+const LOOKALIKE = constant("LOOKALIKE");
 const RERANK_MODEL = source("src/agent.rs").match(/const RERANK_MODEL: &str = "([^"]+)"/)[1];
 const SCHEMA = source("src/db.rs").match(/pub const SCHEMA: &str = r#"([\s\S]*?)"#;/)[1];
 const ACCOUNT = source("wrangler.jsonc").match(/"account_id":\s*"(\w+)"/)[1];
@@ -104,18 +104,25 @@ async function searchChat(query) {
 
   // Lookalikes: skip a passage that shares at least LOOKALIKE of its words with one already shown.
   const words = (text) => new Set(text.split(/[^\p{L}\p{N}]+/u).filter((w) => [...w].length > 2).map((w) => w.toLowerCase()));
-  const shown = [];
+  const shownWords = [];
   const shownTurns = new Set();
   const lines = [];
   for (const { passage } of ranked) {
     const passageWords = words(passages[passage]);
-    const lookalike = shown.some((other) => {
-      const shared = [...passageWords].filter((w) => other.has(w)).length;
-      const all = new Set([...passageWords, ...other]).size;
-      return all > 0 && shared / all >= LOOKALIKE;
-    });
+    let lookalike = false;
+    for (const other of shownWords) {
+      let shared = 0;
+      for (const word of passageWords) {
+        if (other.has(word)) shared += 1;
+      }
+      const all = passageWords.size + other.size - shared;
+      if (all > 0 && shared / all >= LOOKALIKE) {
+        lookalike = true;
+        break;
+      }
+    }
     if (lookalike) continue;
-    shown.push(passageWords);
+    shownWords.push(passageWords);
 
     // A match shows its whole turn: the user's text and Satchel's reply.
     const hit = candidates[owners[passage]];
@@ -135,6 +142,7 @@ const plainSearch = (query) =>
   db.prepare(`SELECT chat.content FROM chat JOIN messages_fts AS f ON f.rowid = chat.id
               WHERE messages_fts MATCH ? ORDER BY f.rank LIMIT ${CHAT_HITS}`).all(ftsQuery(query)).map((row) => row.content.slice(0, SNIPPET));
 
+const answerable = corpus.questions.filter((q) => q.answer !== null).length;
 for (const style of ["question", "query"]) {
   console.log(`queries ${style === "question" ? "as the user texts them" : "as Gemma writes them"}:`);
   for (const [name, search] of [["plain word search", plainSearch], ["current chat search", searchChat]]) {
@@ -149,7 +157,6 @@ for (const style of ["question", "query"]) {
       else if (shown.toLowerCase().includes(item.answer.toLowerCase())) visible += 1;
       else misses.push(item.question);
     }
-    const answerable = corpus.questions.filter((q) => q.answer !== null).length;
     console.log(`  ${name}: answer visible ${visible}/${answerable}, results on no-answer questions ${junk}/${corpus.questions.length - answerable}, average ${Math.round(chars / corpus.questions.length)} characters`);
     if (misses.length) console.log(`    missed: ${misses.join(" | ")}`);
   }
