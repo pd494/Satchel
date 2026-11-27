@@ -1006,13 +1006,25 @@ impl Harness {
             }
         }
         if let (Some(query), false) = (query, passages.is_empty()) {
+            // A long result shows its two best passages in their order. A filename word at the
+            // end can win the top score, and the second passage then still holds the answer.
             let scores = self.agent.rerank(query, &passages).await?;
-            let mut best = vec![f32::MIN; rows.len()];
-            for ((passage, &owner), &score) in passages.iter().zip(&owners).zip(&scores) {
-                if score > best[owner] {
-                    best[owner] = score;
-                    snippets[owner] = passage.clone();
+            let mut best: Vec<Vec<(f32, usize)>> = vec![Vec::new(); rows.len()];
+            for (passage, (&owner, &score)) in owners.iter().zip(&scores).enumerate() {
+                best[owner].push((score, passage));
+            }
+            for (owner, scored) in best.iter_mut().enumerate() {
+                if scored.is_empty() {
+                    continue;
                 }
+                scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let mut picked: Vec<usize> = scored.iter().take(2).map(|&(_, p)| p).collect();
+                picked.sort();
+                let mut parts = Vec::new();
+                for passage in picked {
+                    parts.push(passages[passage].as_str());
+                }
+                snippets[owner] = parts.join(" … ");
             }
         }
 
