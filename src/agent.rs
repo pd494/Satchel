@@ -25,6 +25,8 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 const DIMENSIONS: u32 = 512;
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
+/// A JSON reply is a compaction. It writes a long summary, and no one waits on it.
+const COMPACTION_TIMEOUT_MS: u32 = 60_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
 
@@ -104,7 +106,11 @@ impl Agent {
         if let Some(run) = &self.eval_run {
             metadata["eval_run"] = json!(run);
         }
-        let options = Self::gateway(metadata);
+        let timeout_ms = match response_schema {
+            Some(_) => COMPACTION_TIMEOUT_MS,
+            None => MODEL_TIMEOUT_MS,
+        };
+        let options = Self::gateway(metadata, timeout_ms);
         let mut output = self.call(MODEL, &input, Some(&options)).await?;
         let mut response = output["choices"][0]["message"].take();
         let text = match &response["content"] {
@@ -117,11 +123,11 @@ impl Agent {
         Ok((text, calls))
     }
 
-    fn gateway(metadata: Value) -> Value {
+    fn gateway(metadata: Value, timeout_ms: u32) -> Value {
         json!({ "gateway": {
             "id": "satchel",
             "metadata": metadata,
-            "requestTimeoutMs": MODEL_TIMEOUT_MS,
+            "requestTimeoutMs": timeout_ms,
             "retries": { "maxAttempts": 3, "retryDelayMs": 500, "backoff": "exponential" },
         } })
     }
@@ -233,7 +239,7 @@ impl Agent {
             "max_tokens": 400,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        let options = Self::gateway(json!({ "step": "read_image" }));
+        let options = Self::gateway(json!({ "step": "read_image" }), MODEL_TIMEOUT_MS);
         let output = self.call(MODEL, &input, Some(&options)).await?;
         let text = output["choices"][0]["message"]["content"].as_str();
         Ok(Self::clean(text.ok_or("the image reading is missing")?))
@@ -271,7 +277,7 @@ impl Agent {
             contexts.push(json!({ "text": passage }));
         }
         let input = json!({ "query": query, "contexts": contexts });
-        let options = Self::gateway(json!({ "step": "rerank" }));
+        let options = Self::gateway(json!({ "step": "rerank" }), MODEL_TIMEOUT_MS);
         let output = self.call(RERANK_MODEL, &input, Some(&options)).await?;
         let ranked: Vec<Ranked> = serde_json::from_value(output["response"].clone())?;
         let mut scores = vec![0.0; passages.len()];

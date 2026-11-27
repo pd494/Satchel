@@ -431,6 +431,17 @@ impl Db {
         self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
+    /// The user's texts from `first_id` on, plus the user text just before it.
+    pub fn recent_user_texts(&self, first_id: i64) -> Result<Vec<Row>> {
+        let select_query = format!(
+            "{ROW} WHERE chat.role = 'user' AND chat.id >= \
+            (SELECT COALESCE(MAX(id), 0) FROM messages WHERE role = 'user' AND id < ?1)"
+        );
+        self.sql
+            .exec(&select_query, Some(vec![first_id.into()]))?
+            .to_array()
+    }
+
     /// The messages of one turn: a user text and the reply to it, oldest first.
     pub fn turn(&self, turn: Turn) -> Result<Vec<Row>> {
         let select_query = format!("{ROW} WHERE turn = ? ORDER BY id");

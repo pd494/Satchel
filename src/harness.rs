@@ -13,6 +13,9 @@ use worker::{console_error, Env, Result, SqlStorage};
 const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
 const COMPACT_PROMPT: &str = include_str!("prompts/compact.md");
 const COMPACT_AT_TOKENS: usize = 4_000;
+/// The longest summary compaction may write, about 400 words. The prompt asks for 300. Without a
+/// cap the summary grew with every compaction until the call timed out.
+const SUMMARY_MAX_CHARS: usize = 2_400;
 const KEEP_RECENT: usize = 10;
 
 /// Runs before a message gets `SORRY` instead.
@@ -311,7 +314,7 @@ impl Harness {
         if saved {
             let note = Self::burst_words(&texts, &links_to_read);
             result = self
-                .save(message.id, &urls, note.as_deref())
+                .save(message.id, burst[0].id, &urls, note.as_deref())
                 .await?
                 .into_text();
             self.react(burst, Tapback::Like).await?;
@@ -414,7 +417,10 @@ impl Harness {
             Err(error) => return Ok(ToolResult::Error(error.clone())),
         };
         match call {
-            ToolCall::Save { urls, note } => self.save(message.id, urls, note.as_deref()).await,
+            ToolCall::Save { urls, note } => {
+                self.save(message.id, burst[0].id, urls, note.as_deref())
+                    .await
+            }
             ToolCall::React { emoji } => {
                 if !saved && !message.is_reminder() {
                     self.react(burst, *emoji).await?;
@@ -462,11 +468,36 @@ impl Harness {
     async fn save(
         &self,
         message_id: i64,
+        burst_start: i64,
         urls: &[String],
         note: Option<&str>,
     ) -> Result<ToolResult> {
-        let mut items = Vec::new();
+        // A note sticks only to links from the newest texts or the user text just before them.
+        // Gemma once glued a note about a wedding onto seven older files. The words of a note
+        // that names older links are saved as a note of their own.
+        let mut linked = Vec::new();
+        let mut skipped = Vec::new();
+        let recent = match note {
+            Some(_) => self.db.recent_user_texts(burst_start)?,
+            None => Vec::new(),
+        };
         for url in urls {
+            let mut is_recent = note.is_none();
+            for row in &recent {
+                if row.content.contains(url.as_str()) {
+                    is_recent = true;
+                    break;
+                }
+            }
+            if is_recent {
+                linked.push(url);
+            } else {
+                skipped.push(url.as_str());
+            }
+        }
+
+        let mut items = Vec::new();
+        for url in linked.iter().copied() {
             let Some(link) = Link::find_all(url).pop() else {
                 return Ok(ToolResult::Error(format!("{url} is not a URL")));
             };
@@ -499,7 +530,13 @@ impl Harness {
             items.push(format!("- {url}: {text}{media}"));
         }
 
-        if let Some(note) = note.filter(|_| urls.is_empty()) {
+        if !skipped.is_empty() {
+            items.push(format!(
+                "- not added to {}: those links were not in the newest messages",
+                skipped.join(", ")
+            ));
+        }
+        if let Some(note) = note.filter(|_| linked.is_empty()) {
             let id = self.db.insert_saved(message_id, &Note(note.to_string()))?;
             let vector = self.agent.embed(Agent::SAVED_ITEM, note, None).await?;
             self.db.set_read(id, note, vector)?;
@@ -719,7 +756,7 @@ impl Harness {
             "type": "object",
             "required": ["summary", "facts"],
             "properties": {
-                "summary": { "type": "string" },
+                "summary": { "type": "string", "maxLength": SUMMARY_MAX_CHARS },
                 "facts": { "type": "array", "items": {
                     "type": "object",
                     "required": ["key", "value"],
