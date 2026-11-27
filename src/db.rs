@@ -532,7 +532,7 @@ impl Db {
     /// so its text never counts.
     pub fn is_saved(&self, url: &str) -> Result<bool> {
         let select_query =
-            format!("SELECT {SAVED} FROM saved WHERE content = ? AND media != 'note'");
+            format!("SELECT {SAVED} FROM saved WHERE content = ? AND media != 'note' LIMIT 1");
         let rows: Vec<Saved> = self
             .sql
             .exec(&select_query, Some(vec![url.into()]))?

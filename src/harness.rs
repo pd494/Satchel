@@ -268,10 +268,11 @@ impl Harness {
         // reminder is a user message, but the model wrote its note.
         let mut user_urls = HashSet::new();
         for row in &chat {
-            if matches!(row.role, Role::User) && !row.content.starts_with(REMINDER_DUE) {
-                for link in Link::find_all(&row.content) {
-                    user_urls.insert(link.url.to_string());
-                }
+            if !matches!(row.role, Role::User) || row.content.starts_with(REMINDER_DUE) {
+                continue;
+            }
+            for link in Link::find_all(&row.content) {
+                user_urls.insert(link.url.to_string());
             }
         }
 
@@ -281,7 +282,7 @@ impl Harness {
             message.is_reminder() || context.len() > context_length_before_burst;
 
         let mut step = 0;
-        let mut text = loop {
+        let text = loop {
             let (text, calls) = self
                 .agent
                 .run_model(
@@ -291,45 +292,57 @@ impl Harness {
                 )
                 .await?;
             step += 1;
-            if calls.is_empty() {
+            if calls.is_empty() || step == MAX_STEPS {
                 // A web page can ask for a reply link that carries the user's data, such as
                 // `https://evil.example/?code=4521`. The model writes the reply again without it.
+                // After the last step, the reply drops it.
                 let unknown_urls = self.unknown_urls(&text, &user_urls)?;
-                if unknown_urls.is_empty() || step == MAX_STEPS {
+                if unknown_urls.is_empty() {
                     break text;
                 }
-                let retry = format!(
-                    "Satchel did not send that reply. It has URLs the user did not send or save: {}. Write the reply again without them.",
-                    unknown_urls.join(", ")
-                );
-                context.push(json!({ "role": "system", "content": retry }));
-                continue;
-            }
-            if step == MAX_STEPS {
-                break text;
+                if step < MAX_STEPS {
+                    let retry = format!(
+                        "Satchel did not send that reply. It has URLs the user did not send or save: {}. Write the reply again without them.",
+                        unknown_urls.join(", ")
+                    );
+                    context.push(json!({ "role": "system", "content": retry }));
+                    continue;
+                }
+                console_error!("dropped {unknown_urls:?} from the reply");
+                let (mut reply_without_urls, urls) = Link::split(&text);
+                for url in urls {
+                    if !unknown_urls.contains(&url) {
+                        reply_without_urls.push('\n');
+                        reply_without_urls.push_str(&url);
+                    }
+                }
+                break reply_without_urls;
             }
 
             let mut results = Vec::new();
+            let mut read_text_this_step = false;
             for call in &calls {
                 let refusal = match call {
                     Ok(call) => self.refusal(call, read_untrusted, &user_urls)?,
                     Err(_) => None,
                 };
-                match refusal {
-                    Some(refusal) => results.push(ToolResult::Error(refusal)),
-                    None => results.push(self.run_tool(call, burst, message, saved).await?),
-                }
-            }
-            // The model sees a search result, or a saved page's text, only in the next step.
-            for (call, result) in calls.iter().zip(&results) {
+                let result = match refusal {
+                    Some(refusal) => ToolResult::Error(refusal),
+                    None => self.run_tool(call, burst, message, saved).await?,
+                };
                 let reads_text = match call {
                     Ok(ToolCall::Search(_)) => true,
                     Ok(ToolCall::Save { urls, .. }) => !urls.is_empty(),
                     _ => false,
                 };
                 if reads_text && matches!(result, ToolResult::Done(_)) {
-                    read_untrusted = true;
+                    read_text_this_step = true;
                 }
+                results.push(result);
+            }
+            // The model sees a search result, or a saved page's text, only in the next step.
+            if read_text_this_step {
+                read_untrusted = true;
             }
             // A `react` call ends the model's reply. A tapback means it has nothing to say.
             let failed = results
@@ -343,20 +356,6 @@ impl Harness {
             }
             Agent::push_results(&mut context, results);
         };
-
-        // The last step has no retry. Its unknown URLs are not sent.
-        let unknown_urls = self.unknown_urls(&text, &user_urls)?;
-        if !unknown_urls.is_empty() {
-            console_error!("dropped {unknown_urls:?} from the reply");
-            let (mut reply_without_urls, urls) = Link::split(&text);
-            for url in urls {
-                if !unknown_urls.contains(&url) {
-                    reply_without_urls.push('\n');
-                    reply_without_urls.push_str(&url);
-                }
-            }
-            text = reply_without_urls;
-        }
 
         let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
