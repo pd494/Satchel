@@ -159,13 +159,14 @@ export function eventOf(request) {
   return null;
 }
 
-/** Reads the reactions, text, links, and files out of the requests for `eventId`. A reply to
- * another event goes in `late`. */
-export function summarize(requests, eventId) {
+/** Reads the reactions, text, links, and files out of the requests for `eventIds`, one event or a
+ * list of them. A reply to another event goes in `late`. */
+export function summarize(requests, eventIds) {
+  const ids = [eventIds].flat();
   const summary = { at: requests[0]?.at, reactions: [], texts: [], links: [], files: [], voices: [], late: [] };
   for (const request of requests) {
     const event = eventOf(request);
-    if (event !== null && event !== eventId) {
+    if (event !== null && !ids.includes(event)) {
       summary.late.push(event);
     } else if (request.path.endsWith("/reactions")) {
       summary.reactions.push(request.body.type);

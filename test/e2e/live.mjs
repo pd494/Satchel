@@ -19,6 +19,7 @@
 //
 // Run: node test/e2e/live.mjs
 // Run some scenarios: EVAL_SCENARIOS=links,files node test/e2e/live.mjs
+// Run one shard of three: EVAL_SHARD=2/3 node test/e2e/live.mjs
 
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -32,6 +33,8 @@ const REPLY_TIMEOUT_MS = 180_000;
 const QUIET_MS = 5_000;
 const REPEAT_WAIT_MS = 20_000;
 const ONLY = process.env.EVAL_SCENARIOS?.split(",") ?? null;
+// "2/3" runs every third scenario, starting with the second. CI runs three shards side by side.
+const [SHARD, SHARDS] = (process.env.EVAL_SHARD ?? "1/1").split("/").map(Number);
 const TOKEN = process.env.CLOUDFLARE_API_TOKEN ?? JSON.parse(execSync("npx wrangler auth token --json").toString()).token;
 const RUN = process.env.EVAL_RUN ?? `local-${new Date().toISOString()}`;
 const RUN_STARTED = new Date().toISOString();
@@ -90,7 +93,8 @@ const ramble = (n) => {
 };
 
 // A case is [name, message, expected kind, needle, after]. Names are unique across scenarios.
-// tapback: a reaction and no text. text-only: text, no reaction, no file. any: any reply.
+// tapback: a reaction and no text. text-only: text, no reaction, no file. text: text and no file,
+// with or without the 👍 that every saved link gets. any: any reply.
 // file: the file with the needle as its id is sent back. voice: the same, as a voice memo.
 // link: the needle is sent as a link.
 // A null message sends nothing. The case waits for a reminder to fire. A list of messages is sent
@@ -175,7 +179,7 @@ const SCENARIOS = [
     intent: "Save a link and answer a question about it in the same turn.",
     chain: true,
     cases: [
-      ["save-and-answer", `save ${BOOK} and tell me what it is`, "text-only", "", { saved: BOOK }],
+      ["save-and-answer", `save ${BOOK} and tell me what it is`, "text", "", { saved: BOOK }],
       ["recall-after-answer", "what was that book link?", "link", BOOK],
     ],
     saved: [BOOK],
@@ -220,7 +224,7 @@ const SCENARIOS = [
   {
     name: "link-in-reminder",
     intent: "Keep a reminder's link with the reminder.",
-    cases: [["remind-with-link", "remind me tomorrow at 9 am pacific time to read this https://example.com/article", "text-only", ""]],
+    cases: [["remind-with-link", "remind me tomorrow at 9 am pacific time to read this https://example.com/article", "text", ""]],
     saved: ["https://example.com/article"],
     zone: LA,
     reminders: [{ word: "read", hour: 9, urls: ["https://example.com/article"] }],
@@ -421,7 +425,11 @@ function check(kind, needle, summary) {
     if (summary.reactions.length > 0) return "reacted";
     if (sentFile) return "sent a file";
   }
-  if (needle && kind === "text-only" && !text.toLowerCase().includes(needle.toLowerCase())) return `text lacks "${needle}"`;
+  if (kind === "text") {
+    if (!text && summary.links.length === 0) return "no text";
+    if (sentFile) return "sent a file";
+  }
+  if (needle && (kind === "text-only" || kind === "text") && !text.toLowerCase().includes(needle.toLowerCase())) return `text lacks "${needle}"`;
   if (kind === "file" && !summary.files.includes(needle)) return "did not send the saved file";
   if (kind === "voice" && !summary.voices.includes(needle)) return "did not send the saved voice memo";
   if (kind === "link" && !summary.links.includes(needle)) return `did not send ${needle}`;
@@ -558,27 +566,35 @@ Does the reply meet the rule? Answer "unknown" if you cannot tell.`;
     properties: { verdict: { type: "string", enum: ["pass", "fail", "unknown"] }, reason: { type: "string", maxLength: 200 } },
     required: ["verdict", "reason"],
   };
-  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/ai/run/${MODEL}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages: [{ role: "user", content: prompt }],
-      response_format: { type: "json_schema", json_schema: schema },
-      chat_template_kwargs: { enable_thinking: false },
-    }),
-  });
-  const body = await response.json();
-  const content = body.result?.choices?.[0]?.message?.content;
-  if (!body.success || !content) return `the judge did not answer: ${JSON.stringify(body.errors)}`;
-  const { verdict, reason } = JSON.parse(content);
-  return verdict === "fail" ? `the judge says: ${reason}` : null;
+  // Workers AI sometimes times out. Each try is a new request.
+  let errors = null;
+  for (let tries = 0; tries < 5; tries++) {
+    if (tries > 0) await sleep(3_000);
+    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/ai/run/${MODEL}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: prompt }],
+        response_format: { type: "json_schema", json_schema: schema },
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+    });
+    const body = await response.json();
+    const content = body.result?.choices?.[0]?.message?.content;
+    if (body.success && content) {
+      const { verdict, reason } = JSON.parse(content);
+      return verdict === "fail" ? `the judge says: ${reason}` : null;
+    }
+    errors = body.errors;
+  }
+  return `the judge did not answer: ${JSON.stringify(errors)}`;
 }
 
 /** What a case expects, in words, for the report. */
 function expected(kind, needle, after) {
-  const words = { tapback: "a tapback and no text", "text-only": "a text, no tapback or file", file: "the saved file sent back", voice: "the saved voice memo sent back", any: "any plain reply" };
+  const words = { tapback: "a tapback and no text", "text-only": "a text, no tapback or file", text: "a text, with or without a tapback", file: "the saved file sent back", voice: "the saved voice memo sent back", any: "any plain reply" };
   let reply = words[kind];
-  if (kind === "text-only" && needle) reply = `a text with "${needle}"`;
+  if ((kind === "text-only" || kind === "text") && needle) reply = `a text with "${needle}"`;
   if (kind === "link") reply = `${needle} sent as a link`;
   if (after?.absent) reply += `, without "${after.absent}"`;
   if (after?.judge) reply += `. ${after.judge}`;
@@ -682,8 +698,9 @@ async function runScenario(scenario) {
   for (const [name, message, kind, needle, after] of scenario.cases) {
     results.set(name, { scenario: scenario.name, verdict: "pass", reason: null, reply: null, message, expected: expected(kind, needle, after) });
     const start = linq.requests.length;
-    let sent = null;
-    for (const text of message === null ? [] : [message].flat()) sent = await send(user, name, text);
+    const sentIds = [];
+    for (const text of message === null ? [] : [message].flat()) sentIds.push(await send(user, name, text));
+    const sent = sentIds.at(-1) ?? null;
     const requests = await reply(start);
     let duplicateReason = null;
     if (after?.duplicate) {
@@ -696,7 +713,7 @@ async function runScenario(scenario) {
     // A nudge replies to the reminder's own event.
     const eventId = sent ?? (requests[0] && eventOf(requests[0]));
     caseOf.set(eventId, name);
-    const summary = summarize(requests, eventId);
+    const summary = summarize(requests, sentIds.length > 0 ? sentIds : eventId);
     results.get(name).reply = describe(summary);
     for (const event of summary.late) {
       if (caseOf.has(event)) fail(caseOf.get(event), "replied again after the turn ended", false);
@@ -719,8 +736,9 @@ async function runScenario(scenario) {
 let crashed = false;
 try {
   await startWorker(["--var", `EVAL_RUN:${RUN}`]);
-  for (const scenario of SCENARIOS) {
+  for (const [index, scenario] of SCENARIOS.entries()) {
     if (ONLY && !ONLY.includes(scenario.name)) continue;
+    if (index % SHARDS !== SHARD - 1) continue;
     const failed = await runScenario(scenario);
     if (failed) {
       console.log(`\n# ${scenario.name}, second run`);
