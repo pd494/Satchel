@@ -55,7 +55,7 @@ const ftsQuery = (query) => query.split(/[^0-9A-Za-z]+/).filter(Boolean).map((wo
 
 // Db::chat_matches with a query: both sides of the chat, best word match first.
 const chatMatches = (query, limit) =>
-  db.prepare(`SELECT chat.id, chat.content FROM chat JOIN messages_fts AS f ON f.rowid = chat.id
+  db.prepare(`SELECT chat.id, chat.turn, chat.content FROM chat JOIN messages_fts AS f ON f.rowid = chat.id
               WHERE messages_fts MATCH ? ORDER BY f.rank LIMIT ${limit}`).all(ftsQuery(query));
 
 async function rerank(query, passages) {
@@ -105,6 +105,7 @@ async function searchChat(query) {
   // Lookalikes: skip a passage that shares at least LOOKALIKE of its words with one already shown.
   const words = (text) => new Set(text.split(/[^\p{L}\p{N}]+/u).filter((w) => [...w].length > 2).map((w) => w.toLowerCase()));
   const shown = [];
+  const shownTurns = new Set();
   const lines = [];
   for (const { passage } of ranked) {
     const passageWords = words(passages[passage]);
@@ -115,8 +116,15 @@ async function searchChat(query) {
     });
     if (lookalike) continue;
     shown.push(passageWords);
-    lines.push(passages[passage]);
-    if (lines.length === CHAT_HITS) break;
+
+    // A match shows its whole turn: the user's text and Satchel's reply.
+    const hit = candidates[owners[passage]];
+    if (shownTurns.has(hit.turn)) continue;
+    shownTurns.add(hit.turn);
+    for (const row of db.prepare("SELECT id, content FROM chat WHERE turn = ? ORDER BY id").all(hit.turn)) {
+      lines.push(row.id === hit.id ? passages[passage] : row.content.slice(0, SNIPPET));
+    }
+    if (shownTurns.size === CHAT_HITS) break;
   }
   return lines;
 }

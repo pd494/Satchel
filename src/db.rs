@@ -431,6 +431,14 @@ impl Db {
         self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
+    /// The messages of one turn: a user text and the reply to it, oldest first.
+    pub fn turn(&self, turn: Turn) -> Result<Vec<Row>> {
+        let select_query = format!("{ROW} WHERE turn = ? ORDER BY id");
+        self.sql
+            .exec(&select_query, Some(vec![turn.0.into()]))?
+            .to_array()
+    }
+
     /// Past messages from both sides in the turns before `before_turn`, between `after` and
     /// `before`. With a `query`, the best word matches come first. Without one, the newest.
     pub fn chat_matches(

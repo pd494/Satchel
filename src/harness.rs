@@ -779,7 +779,10 @@ impl Harness {
             found.push(format!("Past chat:\n{}", matching_chat.join("\n")));
         }
         if found.is_empty() {
-            return Ok(ToolResult::Done("Nothing matches.".to_string()));
+            return Ok(ToolResult::Done(
+                "Nothing matches. Search again with fewer or other words, or without the dates."
+                    .to_string(),
+            ));
         }
         Ok(ToolResult::Done(found.join("\n\n")))
     }
@@ -870,6 +873,7 @@ impl Harness {
                 .collect()
         };
         let mut shown: Vec<HashSet<String>> = Vec::new();
+        let mut shown_turns: Vec<Turn> = Vec::new();
         let mut lines = Vec::new();
         for (_, owner, passage) in ranked {
             let passage_words = words(&passages[passage]);
@@ -886,10 +890,23 @@ impl Harness {
                 continue;
             }
             shown.push(passage_words);
-            let mut row = candidates[owner].clone();
-            row.content = passages[passage].clone();
-            lines.push(Self::transcript_line(&row, zone, None)?);
-            if lines.len() == CHAT_HITS as usize {
+
+            // A match shows its whole turn, so "what did you say about the sandwich" gets
+            // Satchel's reply next to the user's text. The match shows its best passage.
+            let hit = &candidates[owner];
+            if shown_turns.contains(&hit.turn) {
+                continue;
+            }
+            shown_turns.push(hit.turn);
+            for mut row in self.db.turn(hit.turn)? {
+                if row.created_at == hit.created_at && row.content == hit.content {
+                    row.content = passages[passage].clone();
+                    lines.push(Self::transcript_line(&row, zone, None)?);
+                } else {
+                    lines.push(Self::transcript_line(&row, zone, Some(SNIPPET))?);
+                }
+            }
+            if shown_turns.len() == CHAT_HITS as usize {
                 break;
             }
         }
@@ -915,6 +932,14 @@ impl Harness {
         }
         rows.truncate(SEARCH_RESULTS);
 
+        // A text's words: lowercase, and longer than 2 characters.
+        let words = |text: &str| -> Vec<String> {
+            text.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| word.chars().count() > 2)
+                .map(str::to_lowercase)
+                .collect()
+        };
+
         // One line per result. A link or file starts with its URL. A note shows its text.
         let mut lines = Vec::new();
         for row in &rows {
@@ -923,9 +948,43 @@ impl Harness {
                 .to_zoned_datetime(zone.clone())
                 .strftime("%a %b %-d %Y")
                 .to_string();
+            // The part of the search text with the most query words, so a long note or file
+            // shows the lines that match, not only its start.
             let text = row.description.as_deref().unwrap_or_default();
-            let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            let snippet: String = one_line.chars().take(SNIPPET).collect();
+            let one_line: Vec<char> = text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .collect();
+            let mut snippet: String = one_line.iter().take(SNIPPET).collect();
+            if let Some(query) = query {
+                let query_words = words(query);
+                let mut best_hits = 0;
+                let mut start = 0;
+                while start < one_line.len() {
+                    let end = (start + SNIPPET).min(one_line.len());
+                    let part: String = one_line[start..end].iter().collect();
+                    let part_words = words(&part);
+                    let mut hits = 0;
+                    for word in &query_words {
+                        for part_word in &part_words {
+                            if part_word.starts_with(word.as_str()) {
+                                hits += 1;
+                                break;
+                            }
+                        }
+                    }
+                    if hits > best_hits {
+                        best_hits = hits;
+                        snippet = part;
+                    }
+                    if end == one_line.len() {
+                        break;
+                    }
+                    start += SNIPPET / 2;
+                }
+            }
             if row.media == "note" {
                 lines.push(format!("- note, saved {saved}: {snippet}"));
             } else {

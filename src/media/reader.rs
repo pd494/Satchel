@@ -94,8 +94,21 @@ impl Reader {
             ("text", "html") => return self.page(url, &final_url, &bytes).await,
             ("text", sub) if sub.contains("vcard") => (Self::vcard(&bytes), None),
             ("text", _) => (String::from_utf8_lossy(&bytes).into(), None),
-            ("image", _) => (String::new(), Some(self.jpeg(bytes).await?)),
-            ("video", "mp4" | "quicktime") => (String::new(), Some((essence.into(), bytes))),
+            ("image", _) => {
+                let jpeg = self.jpeg(bytes).await?;
+                (agent.read_image(&jpeg).await?, Some(jpeg))
+            }
+            ("video", "mp4" | "quicktime") => {
+                // A video's speech becomes its text. A video with no speech keeps no text.
+                let speech = match agent.transcribe(&bytes).await {
+                    Ok(speech) => speech,
+                    Err(error) => {
+                        console_error!("transcribe {url} failed: {error}");
+                        String::new()
+                    }
+                };
+                (speech, Some((essence.into(), bytes)))
+            }
             ("audio", _) => (agent.transcribe(&bytes).await?, None),
             _ => (agent.read_document(name, essence, &bytes).await?, None),
         })

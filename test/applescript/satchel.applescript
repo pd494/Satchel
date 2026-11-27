@@ -251,6 +251,36 @@ on allCases()
 		{"p6-q-wallpaper", "send me the wallpaper pic", "attachment", ""}, ¬
 		{"p6-q-toggle", "that screenshot with the toggle thing", "attachment", ""}, ¬
 		{"p6-q-austin", "whats the rent on the austin lease", "text-only", "850"}, ¬
+		{"v-travel", "that travel thing", "text", ""}, ¬
+		{"v-numbers", "the screenshot with the numbers", "text", ""}, ¬
+		{"v-toggle", "that toggle screen", "text", ""}, ¬
+		{"v-purple", "the purple pic", "text", ""}, ¬
+		{"v-aptdoc", "my apartment doc", "text", ""}, ¬
+		{"v-code", "what was that code thing again", "text", ""}, ¬
+		{"v-building", "the guy from the building whats his name", "text", ""}, ¬
+		{"v-sandwich", "what did u say when i got mad about the sandwich", "text", ""}, ¬
+		{"v-owe", "how much do i owe", "text", ""}, ¬
+		{"v-flightnum", "whats the flight number", "text", ""}, ¬
+		{"v-dog", "the dog thing when was that", "text", ""}, ¬
+		{"v-couch", "how much was that couch", "text", ""}, ¬
+		{"v-cat", "cat schedule?", "text", ""}, ¬
+		{"v-health", "what did you tell me about my health stuff", "text", ""}, ¬
+		{"m2-video-hike", "file:~/Pictures/satchel-test/video-hike.mp4", "tapback", ""}, ¬
+		{"m2-memo", "file:~/Pictures/satchel-test/memo-plumber.m4a", "tapback", ""}, ¬
+		{"m2-pin", "file:~/Pictures/satchel-test/pin-bakery.loc.vcf||best morning buns", "tapback", ""}, ¬
+		{"m2-packing", "file:~/Pictures/satchel-test/packing-list.txt", "tapback", ""}, ¬
+		{"m2-budget", "file:~/Pictures/satchel-test/budget.csv||budget", "tapback", ""}, ¬
+		{"m2-itinerary", "file:~/Pictures/satchel-test/itinerary.docx", "tapback", ""}, ¬
+		{"m2-video-silent", "file:~/Pictures/satchel-test/sample-video.mp4", "tapback", ""}, ¬
+		{"m2-q-video", "that hike video", "text", ""}, ¬
+		{"m2-q-meet", "where were we meeting after the hike", "text-only", "Pelican"}, ¬
+		{"m2-q-plumber", "whens the plumber coming", "text-only", "Thursday"}, ¬
+		{"m2-q-garage", "garage code?", "text-only", "2580"}, ¬
+		{"m2-q-bakery", "that bakery place", "text", ""}, ¬
+		{"m2-q-cooler", "did i put the cooler on the list", "text-only", "cooler"}, ¬
+		{"m2-q-groceries", "groceries budget?", "text-only", "450"}, ¬
+		{"m2-q-flight", "flight home from portugal", "text-only", "1347"}, ¬
+		{"m2-q-port", "what time is the port thing", "text-only", "4"}, ¬
 		{"remind-fires", "", "text-only", "water"}}
 end allCases
 

@@ -17,6 +17,7 @@ const ASK: &str = "Only answer a question about this link, such as whether it is
 const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
 /// Scores how well each passage answers a query. It writes no text.
 const RERANK_MODEL: &str = "@cf/baai/bge-reranker-base";
+const READ_IMAGE: &str = "Write what this image shows in one short line. Then write every piece of visible text, exactly as written, one item per line. If there is no text, write only the first line.";
 /// The most characters one embedding reads. The model reads about 8,000 tokens.
 const MAX_TEXT: usize = 4_000;
 const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
@@ -219,6 +220,23 @@ impl Agent {
             .as_str()
             .ok_or("the embedding is missing")?;
         Ok(BASE64.decode(vector).map_err(|error| error.to_string())?)
+    }
+
+    /// What a saved image shows, in one line, then every piece of its visible text. Search reads
+    /// this text, so a screenshot's gate, total, or code can be found and quoted later.
+    pub async fn read_image(&self, (mime, bytes): &(String, Vec<u8>)) -> Result<String> {
+        let input = json!({
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": READ_IMAGE },
+                { "type": "image_url", "image_url": { "url": Self::data_url(mime, bytes) } },
+            ]}],
+            "max_tokens": 400,
+            "chat_template_kwargs": { "enable_thinking": false },
+        });
+        let options = Self::gateway(json!({ "step": "read_image" }));
+        let output = self.call(MODEL, &input, Some(&options)).await?;
+        let text = output["choices"][0]["message"]["content"].as_str();
+        Ok(Self::clean(text.ok_or("the image reading is missing")?))
     }
 
     pub async fn transcribe(&self, audio: &[u8]) -> Result<String> {
