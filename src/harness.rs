@@ -263,6 +263,15 @@ impl Harness {
         )?;
         let context_length_before_burst = context.len();
         let saved = self.handle_burst(burst, message, &mut context).await?;
+        let first_message = summary.is_none() && chat.len() == burst.len();
+        // Links and files with no words: the 👍 is the whole reply. Gemma asked "what's this one
+        // about?" about readable pages and photos.
+        let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
+        if saved && Self::burst_words(&texts, &[]).is_none() {
+            return self
+                .finish(String::new(), burst, message, first_message, saved)
+                .await;
+        }
 
         // Satchel fetches and sends only the URLs the user sent in the chat, and saved URLs. A due
         // reminder is a user message, but the model wrote its note.
@@ -367,7 +376,6 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
             .await
     }
