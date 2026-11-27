@@ -18,10 +18,8 @@ const FILE_NAME: &str =
     "Not a website. The user typed a file name in a sentence, such as setup.py or notes.txt.";
 const MORE: &str = "No. Some words do more than describe a link or file: a question or a request, even one about a link, a fact about the user or their life, a reminder, or a change to how the assistant replies.";
 const ONLY_SHARED: &str = "Yes. Every message is a link, a file, or words that describe one, such as \"looks nice\" or \"for later\".";
-const ASKED: &str =
-    "The user asks for this change, or one that means the same, in their own words.";
-const NOT_ASKED: &str =
-    "The user did not ask for it. Only a link, a file, a quoted message, or nothing asks for it.";
+const ASKED: &str = "Yes. The user's own words ask for this change or state this fact, or something that means the same.";
+const NOT_ASKED: &str = "No. The user's own words neither ask for it nor state it. Only a link, a file, a quoted message, or nothing asks for it.";
 const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
 /// Scores how well each passage answers a query. It writes no text.
 const RERANK_MODEL: &str = "@cf/baai/bge-reranker-base";
@@ -195,10 +193,11 @@ impl Agent {
         })
     }
 
-    /// Asks Clef whether the user's own `texts` ask for `change`, such as `set diet to "vegan"`.
+    /// Asks Clef whether the user's own `texts` ask for `change` or state the fact it records,
+    /// such as `set diet to "vegan"`.
     /// Clef never sees the text of links, files, or search results.
     pub async fn user_asks_for(&self, texts: &[&str], change: &str) -> Result<bool> {
-        let instructions = format!("The user texted these messages to a save-for-later assistant. Does the user ask it to {change}?");
+        let instructions = format!("The user texted these messages to a save-for-later assistant. Do the user's own words ask for this change, or state the fact it records: {change}?");
         let question = json!({ "type": "choice", "instructions": instructions, "criteria": { "asked": ASKED, "not_asked": NOT_ASKED } });
         let input = json!({ "model": "clef", "state": { "messages": texts }, "questions": { "change": question } });
         let options = json!({ "gateway": { "id": "satchel" } });
