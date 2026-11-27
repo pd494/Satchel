@@ -523,6 +523,30 @@ impl Harness {
         };
         match call {
             ToolCall::Save { urls, note } => {
+                // Clef saved the links it kept from the newest texts before the model ran. The
+                // model saves only a link that is saved, or one from the user text just before
+                // the newest texts, as in "is this legit? <link>" and then "ok save it". Gemma
+                // once saved a file name the user typed as a website.
+                let mut links_before_burst = Vec::new();
+                for row in self.db.recent_user_texts(burst[0].id)? {
+                    if row.id < burst[0].id {
+                        for link in Link::find_all(&row.content) {
+                            links_before_burst.push(link.url);
+                        }
+                    }
+                }
+                for url in urls {
+                    let Some(link) = Link::find_all(url).pop() else {
+                        return Ok(ToolResult::Error(format!("{url} is not a URL")));
+                    };
+                    if !self.db.is_saved(link.url.as_str())?
+                        && !links_before_burst.contains(&link.url)
+                    {
+                        return Ok(ToolResult::Error(format!(
+                            "{url} cannot be saved: it is not saved, and the user did not send it before these messages."
+                        )));
+                    }
+                }
                 self.save(message.id, burst[0].id, urls, note.as_deref())
                     .await
             }
@@ -674,11 +698,10 @@ impl Harness {
         urls: &[String],
         note: Option<&str>,
     ) -> Result<ToolResult> {
-        // A link is saved only when it is in the newest texts or the user text just before them,
-        // or is already saved. Gemma once saved a link the user never sent. A note sticks to the
-        // newest links and to one older link, as in "the rust one is for my side project". Gemma
-        // once glued a note about a wedding onto seven older files. The words of a note that
-        // names more than one older link are saved as a note of their own.
+        // A note sticks to links from the newest texts or the user text just before them, and to
+        // one older saved link, as in "the rust one is for my side project". Gemma once glued a
+        // note about a wedding onto seven older files. The words of a note that names more than
+        // one older link are saved as a note of their own.
         let recent_user_texts = self.db.recent_user_texts(burst_start)?;
         let mut recent_links = Vec::new();
         for row in &recent_user_texts {
@@ -694,12 +717,8 @@ impl Harness {
             };
             if recent_links.contains(&link.url) {
                 urls_to_save.push(url.as_str());
-            } else if self.db.is_saved(link.url.as_str())? {
-                older_urls.push(url.as_str());
             } else {
-                return Ok(ToolResult::Error(format!(
-                    "{url} is not in the newest messages or the saves. Copy URLs exactly."
-                )));
+                older_urls.push(url.as_str());
             }
         }
         if note.is_none() || older_urls.len() == 1 {
