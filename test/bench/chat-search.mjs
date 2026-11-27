@@ -10,8 +10,9 @@
 // read from the Rust source. A change there then shows up here. Only the reranker calls Workers AI,
 // about 2 neurons a question.
 //
-// Run: node test/bench/chat-search.mjs
-// It needs `CLOUDFLARE_API_TOKEN` or a wrangler login.
+// Run: node test/bench/chat-search.mjs (eval.yml runs it nightly)
+// It needs `CLOUDFLARE_API_TOKEN` or a wrangler login. It exits with 1 when the current search
+// shows fewer than MIN_VISIBLE answers in either query style.
 
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -142,6 +143,7 @@ const plainSearch = (query) =>
   db.prepare(`SELECT chat.content FROM chat JOIN messages_fts AS f ON f.rowid = chat.id
               WHERE messages_fts MATCH ? ORDER BY f.rank LIMIT ${CHAT_HITS}`).all(ftsQuery(query)).map((row) => row.content.slice(0, SNIPPET));
 
+const MIN_VISIBLE = 26;
 const answerable = corpus.questions.filter((q) => q.answer !== null).length;
 for (const style of ["question", "query"]) {
   console.log(`queries ${style === "question" ? "as the user texts them" : "as Gemma writes them"}:`);
@@ -159,5 +161,6 @@ for (const style of ["question", "query"]) {
     }
     console.log(`  ${name}: answer visible ${visible}/${answerable}, results on no-answer questions ${junk}/${corpus.questions.length - answerable}, average ${Math.round(chars / corpus.questions.length)} characters`);
     if (misses.length) console.log(`    missed: ${misses.join(" | ")}`);
+    if (search === searchChat && visible < MIN_VISIBLE) process.exitCode = 1;
   }
 }

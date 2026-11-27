@@ -27,6 +27,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: node test/check-prompt-leaks.mjs
+      - run: node --check test/bench/chat-search.mjs
       - run: cargo fmt --check
       - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
       - run: cargo clippy --all-targets -- -D warnings
