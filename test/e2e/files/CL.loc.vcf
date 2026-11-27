@@ -1,0 +1,8 @@
+BEGIN:VCARD
+VERSION:3.0
+PRODID:-//Apple Inc.//iPhone OS 18.0//EN
+N:;Current Location;;;
+FN:Tartine Bakery
+item1.URL;type=pref:http://maps.apple.com/?ll=37.761400\,-122.424100&q=Tartine%20Bakery
+item1.X-ABLabel:map url
+END:VCARD

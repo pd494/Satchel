@@ -46,9 +46,11 @@ pub type Read = (String, Option<(String, Vec<u8>)>);
 pub struct Reader {
     images: Images,
     providers: OnceCell<Vec<(String, Vec<WildMatch>)>>,
+    cdn: Option<String>,
 }
 
 impl Reader {
+    /// `LINQ_CDN` overrides the Linq file host. The end-to-end tests point it at a fake Linq.
     pub fn from_env(env: &Env) -> Result<Self> {
         let images = Reflect::get(env, &"IMAGES".into())?;
         if images.is_undefined() {
@@ -57,6 +59,7 @@ impl Reader {
         Ok(Self {
             images: images.unchecked_into(),
             providers: OnceCell::new(),
+            cdn: env.var("LINQ_CDN").ok().map(|cdn| cdn.to_string()),
         })
     }
 
@@ -81,7 +84,11 @@ impl Reader {
     }
 
     async fn try_read(&self, url: &Url, is_file: bool, agent: &Agent) -> Result<Read> {
-        let (final_url, mime, bytes) = Self::get(url.as_str()).await?;
+        let fetch_url = match (&self.cdn, is_file) {
+            (Some(cdn), true) => url.as_str().replacen("https://cdn.linqapp.com", cdn, 1),
+            _ => url.to_string(),
+        };
+        let (final_url, mime, bytes) = Self::get(&fetch_url).await?;
         let final_url = Url::parse(&final_url).unwrap_or_else(|_| url.clone());
         let name = final_url.path().rsplit('/').next().unwrap_or_default();
         // A Linq file's name tells its type.

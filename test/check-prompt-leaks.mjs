@@ -13,7 +13,7 @@ const tests = [];
 for (const [, text] of read("test/applescript/satchel.applescript").matchAll(/\{"[\w-]+", "((?:[^"\\]|\\.)*)"/g)) {
   for (const part of text.split("||")) tests.push(part);
 }
-for (const { question } of JSON.parse(read("test/bench/chat-corpus.json")).questions) tests.push(question);
+for (const [, quoted, template] of read("test/e2e/live.mjs").matchAll(/"((?:[^"\\]|\\.)*)"|`([^`]*)`/g)) tests.push(quoted ?? template);
 
 const prompts = readdirSync(new URL("../src/prompts", import.meta.url)).map((name) => [name, normalize(read(`src/prompts/${name}`))]);
 
