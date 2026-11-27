@@ -173,6 +173,11 @@ impl SettingChange {
         if key.is_empty() {
             return Err("the key is empty".to_string());
         }
+        // Each setting is one line of the prompt. A line break would let one value add more settings.
+        let breaks_line = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+        if key.chars().any(breaks_line) || value.chars().any(breaks_line) {
+            return Err("the key and the value must each be one line".to_string());
+        }
         if key == "time_zone" {
             if value.is_empty() {
                 return Err("time_zone cannot be removed. Send the new zone.".to_string());
@@ -521,6 +526,18 @@ impl Db {
             .exec(&update_query, Some(values))?
             .to_array()?
             .pop())
+    }
+
+    /// Whether a saved link or file has the URL `url`. A note or a reminder is the model's words,
+    /// so its text never counts.
+    pub fn is_saved(&self, url: &str) -> Result<bool> {
+        let select_query =
+            format!("SELECT {SAVED} FROM saved WHERE content = ? AND media != 'note' LIMIT 1");
+        let rows: Vec<Saved> = self
+            .sql
+            .exec(&select_query, Some(vec![url.into()]))?
+            .to_array()?;
+        Ok(!rows.is_empty())
     }
 
     /// Stores the search text of saved item `id`, as its description, and its embedding.
