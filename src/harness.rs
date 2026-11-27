@@ -649,13 +649,12 @@ impl Harness {
         urls: &[String],
         note: Option<&str>,
     ) -> Result<ToolResult> {
-        // A note sticks only to links from the newest texts or the user text just before them.
-        // Gemma once glued a note about a wedding onto seven older files. The words of a note
-        // that names older links are saved as a note of their own.
-        let recent_user_texts = match note {
-            Some(_) => self.db.recent_user_texts(burst_start)?,
-            None => Vec::new(),
-        };
+        // A link is saved only when it is in the newest texts or the user text just before them,
+        // or is already saved. Gemma once saved a link the user never sent. A note sticks to the
+        // newest links and to one older link, as in "the rust one is for my side project". Gemma
+        // once glued a note about a wedding onto seven older files. The words of a note that
+        // names more than one older link are saved as a note of their own.
+        let recent_user_texts = self.db.recent_user_texts(burst_start)?;
         let mut recent_links = Vec::new();
         for row in &recent_user_texts {
             for link in Link::find_all(&row.content) {
@@ -668,11 +667,18 @@ impl Harness {
             let Some(link) = Link::find_all(url).pop() else {
                 return Ok(ToolResult::Error(format!("{url} is not a URL")));
             };
-            if note.is_none() || recent_links.contains(&link.url) {
+            if recent_links.contains(&link.url) {
                 urls_to_save.push(url.as_str());
-            } else {
+            } else if self.db.is_saved(link.url.as_str())? {
                 older_urls.push(url.as_str());
+            } else {
+                return Ok(ToolResult::Error(format!(
+                    "{url} is not in the newest messages or the saves. Copy URLs exactly."
+                )));
             }
+        }
+        if note.is_none() || older_urls.len() == 1 {
+            urls_to_save.append(&mut older_urls);
         }
 
         let mut items = Vec::new();
