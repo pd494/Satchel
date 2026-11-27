@@ -60,6 +60,15 @@ const NOT_ASKED: &str = "not done. The user's own messages do not ask for this c
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
 
+/// What the newest messages saved.
+enum Saves {
+    Nothing,
+    /// Links or files, and the messages ask for more, such as a question or a fact.
+    AndMore,
+    /// Only links or files, maybe with a comment. The 👍 is the whole reply.
+    Only,
+}
+
 /// The model's JSON from the compact prompt.
 #[derive(Deserialize)]
 struct Compaction {
@@ -262,12 +271,12 @@ impl Harness {
             &zone,
         )?;
         let context_length_before_burst = context.len();
-        let saved = self.handle_burst(burst, message, &mut context).await?;
+        let saves = self.handle_burst(burst, message, &mut context).await?;
+        let saved = !matches!(saves, Saves::Nothing);
         let first_message = summary.is_none() && chat.len() == burst.len();
-        // Links and files with no words: the 👍 is the whole reply. Gemma asked "what's this one
-        // about?" about readable pages and photos.
-        let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
-        if saved && Self::burst_words(&texts, &[]).is_none() {
+        // Gemma texted after links it only had to save: "what's this one about?" about readable
+        // pages, and "got it, saved!".
+        if matches!(saves, Saves::Only) {
             return self
                 .finish(String::new(), burst, message, first_message, saved)
                 .await;
@@ -385,13 +394,15 @@ impl Harness {
         burst: &[UnansweredMessage],
         message: &UnansweredMessage,
         context: &mut Vec<Value>,
-    ) -> Result<bool> {
+    ) -> Result<Saves> {
         let texts: Vec<&str> = burst.iter().map(|text| text.content.as_str()).collect();
         let links = Self::burst_links(&texts, message.is_reminder());
-        let (links_to_save, links_to_read) = self.agent.save_or_read(&texts, links).await?;
+        let burst_links = self.agent.save_or_read(&texts, links).await?;
+        let links_to_save = burst_links.to_save;
+        let links_to_read = burst_links.to_read;
         let saved = !links_to_save.is_empty();
         if !saved && links_to_read.is_empty() {
-            return Ok(false);
+            return Ok(Saves::Nothing);
         }
 
         let urls: Vec<String> = links_to_save
@@ -412,7 +423,13 @@ impl Harness {
         result += "\n\nAnswer every other question or request in the newest messages in text.";
 
         Self::push_save_call(context, &urls, result, &images);
-        Ok(saved)
+        if !saved {
+            Ok(Saves::Nothing)
+        } else if burst_links.asks_more || !links_to_read.is_empty() {
+            Ok(Saves::AndMore)
+        } else {
+            Ok(Saves::Only)
+        }
     }
 
     /// The links Clef may keep. A reminder's links were saved before. A URL sent twice counts
