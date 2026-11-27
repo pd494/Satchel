@@ -153,6 +153,14 @@ impl Harness {
             burst_due_at = self.reply_all(space_id).await?;
         }
 
+        // A text that came in while this ran set its own alarm, and the alarm this returns
+        // replaces it. It waits out its debounce, not the next reminder. A text Satchel kept
+        // after a failed send is tried again now.
+        if burst_due_at.is_none() {
+            let waiting = Self::next_turn(self.db.unanswered()?);
+            burst_due_at = waiting.last().map(|message| message.created_at + DEBOUNCE);
+        }
+
         // Wake for the next reminder or the waiting burst, whichever comes first.
         let wake_at = match (self.db.next_due()?, burst_due_at) {
             (Some(reminder), Some(burst)) => reminder.min(burst),
