@@ -777,10 +777,16 @@ impl Harness {
         if let (Some(zone), None) = (&remind.at_zone, &saved_zone) {
             self.db
                 .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
-            return Ok(ToolResult::Error(format!(
+            // The "Now:" line was in UTC. A date such as "tomorrow" worked out from it is right
+            // when the date in the user's zone is the same.
+            let utc_date = Timestamp::now().to_zoned_datetime(TimeZone::UTC).date();
+            let local_date = Timestamp::now().to_zoned_datetime(zone.clone()).date();
+            if utc_date != local_date {
+                return Ok(ToolResult::Error(format!(
                 "the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
-                Self::now_line(Some(zone))
-            )));
+                    Self::now_line(Some(zone))
+                )));
+            }
         }
 
         if remind.schedule.due_at <= now {
@@ -1338,7 +1344,12 @@ impl Harness {
             text.push_str("\nPending reminders:");
             for reminder in reminders {
                 let schedule = &reminder.schedule;
-                let mut when = Self::local_time(schedule.due_at, &zone)?;
+                // The same form as `at`, so a move can copy the date and change the time.
+                let mut when = Timestamp::from_second(schedule.due_at)
+                    .map_err(|error| error.to_string())?
+                    .to_zoned_datetime(zone.clone())
+                    .strftime("%a %Y-%m-%dT%H:%M:%S")
+                    .to_string();
                 if let Some(repeat) = schedule.repeat {
                     when.push_str(&format!(", repeat {repeat}"));
                 }
