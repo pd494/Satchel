@@ -2,9 +2,9 @@
 // search, and keep the change only if the numbers say so.
 //
 // chat-corpus.json holds 117 messages from a live test chat: long texts with one detail in the
-// middle, short questions asked more than once, and Satchel's replies. Each question names the
-// words that only its answer contains. A question with no answer checks what search returns when
-// nothing fits.
+// middle, short questions asked more than once, and Satchel's replies. Each question has the user's
+// words, the short query Gemma would send, and the words only its answer contains. A question with
+// no answer checks what search returns when nothing fits. Each run tries both query styles.
 //
 // The steps copy `Harness::search_chat` and `Db::chat_matches`. The constants and the schema are
 // read from the Rust source, so a change there shows up here. Only the reranker calls Workers AI,
@@ -21,13 +21,12 @@ const source = (path) => readFileSync(new URL(`../../${path}`, import.meta.url),
 const harness = source("src/harness.rs");
 const constant = (name) => Number(harness.match(new RegExp(`const ${name}: \\w+ = ([\\d_]+);`))[1].replaceAll("_", ""));
 const CHAT_MATCHES = constant("CHAT_MATCHES");
-const RERANK_CANDIDATES = constant("RERANK_CANDIDATES");
+const CHAT_CANDIDATES = constant("CHAT_CANDIDATES");
 const CHAT_HITS = constant("CHAT_HITS");
 const PASSAGE = constant("PASSAGE");
 const PASSAGE_STEP = constant("PASSAGE_STEP");
-const QUESTION_LENGTH = constant("QUESTION_LENGTH");
 const SNIPPET = constant("SNIPPET");
-const QUESTION_WORDS = harness.match(/const QUESTION_WORDS: \[&str; \d+\] = \[([^\]]+)\]/)[1].match(/"(\w+)"/g).map((w) => w.slice(1, -1));
+const LOOKALIKE = Number(harness.match(/const LOOKALIKE: f32 = ([\d.]+);/)[1]);
 const RERANK_MODEL = source("src/agent.rs").match(/const RERANK_MODEL: &str = "([^"]+)"/)[1];
 const SCHEMA = source("src/db.rs").match(/pub const SCHEMA: &str = r#"([\s\S]*?)"#;/)[1];
 const ACCOUNT = source("wrangler.jsonc").match(/"account_id":\s*"(\w+)"/)[1];
@@ -54,10 +53,10 @@ for (const [n, { role, content }] of corpus.messages.entries()) {
 
 const ftsQuery = (query) => query.split(/[^0-9A-Za-z]+/).filter(Boolean).map((word) => `"${word}"*`).join(" OR ");
 
-// Db::chat_matches with a query: the user's own messages, best word match first.
+// Db::chat_matches with a query: both sides of the chat, best word match first.
 const chatMatches = (query, limit) =>
   db.prepare(`SELECT chat.id, chat.content FROM chat JOIN messages_fts AS f ON f.rowid = chat.id
-              WHERE chat.role = 'user' AND messages_fts MATCH ? ORDER BY f.rank LIMIT ${limit}`).all(ftsQuery(query));
+              WHERE messages_fts MATCH ? ORDER BY f.rank LIMIT ${limit}`).all(ftsQuery(query));
 
 async function rerank(query, passages) {
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/ai/run/${RERANK_MODEL}`, {
@@ -77,13 +76,11 @@ async function searchChat(query) {
   const candidates = [];
   const seen = new Set();
   for (const row of chatMatches(query, CHAT_MATCHES)) {
-    const text = row.content.trim().toLowerCase();
-    const firstWord = text.match(/^[\p{L}\p{N}']*/u)[0].replaceAll("'", "");
-    const question = [...text].length < QUESTION_LENGTH && (text.endsWith("?") || QUESTION_WORDS.includes(firstWord));
-    if (question || seen.has(text)) continue;
+    const text = row.content.split(/\s+/).filter(Boolean).join(" ").toLowerCase();
+    if (seen.has(text)) continue;
     seen.add(text);
     candidates.push(row);
-    if (candidates.length === RERANK_CANDIDATES) break;
+    if (candidates.length === CHAT_CANDIDATES) break;
   }
   if (candidates.length === 0) return [];
 
@@ -103,7 +100,25 @@ async function searchChat(query) {
   for (const [passage, owner] of owners.entries()) {
     if (!best.has(owner) || scores[passage] > best.get(owner).score) best.set(owner, { score: scores[passage], passage });
   }
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, CHAT_HITS).map(({ passage }) => passages[passage]);
+  const ranked = [...best.values()].sort((a, b) => b.score - a.score);
+
+  // Lookalikes: skip a passage that shares at least LOOKALIKE of its words with one already shown.
+  const words = (text) => new Set(text.split(/[^\p{L}\p{N}]+/u).filter((w) => [...w].length > 2).map((w) => w.toLowerCase()));
+  const shown = [];
+  const lines = [];
+  for (const { passage } of ranked) {
+    const passageWords = words(passages[passage]);
+    const lookalike = shown.some((other) => {
+      const shared = [...passageWords].filter((w) => other.has(w)).length;
+      const all = new Set([...passageWords, ...other]).size;
+      return all > 0 && shared / all >= LOOKALIKE;
+    });
+    if (lookalike) continue;
+    shown.push(passageWords);
+    lines.push(passages[passage]);
+    if (lines.length === CHAT_HITS) break;
+  }
+  return lines;
 }
 
 // The design before reranking, for comparison: the top word matches of all messages, cut to
@@ -112,19 +127,22 @@ const plainSearch = (query) =>
   db.prepare(`SELECT chat.content FROM chat JOIN messages_fts AS f ON f.rowid = chat.id
               WHERE messages_fts MATCH ? ORDER BY f.rank LIMIT ${CHAT_HITS}`).all(ftsQuery(query)).map((row) => row.content.slice(0, SNIPPET));
 
-for (const [name, search] of [["plain word search", plainSearch], ["reranked passages (current)", searchChat]]) {
-  let visible = 0;
-  let junk = 0;
-  let chars = 0;
-  const misses = [];
-  for (const { question, answer } of corpus.questions) {
-    const shown = (await search(question)).join("\n");
-    chars += shown.length;
-    if (answer === null) junk += shown ? 1 : 0;
-    else if (shown.toLowerCase().includes(answer.toLowerCase())) visible += 1;
-    else misses.push(question);
+for (const style of ["question", "query"]) {
+  console.log(`queries ${style === "question" ? "as the user texts them" : "as Gemma writes them"}:`);
+  for (const [name, search] of [["plain word search", plainSearch], ["current chat search", searchChat]]) {
+    let visible = 0;
+    let junk = 0;
+    let chars = 0;
+    const misses = [];
+    for (const item of corpus.questions) {
+      const shown = (await search(item[style])).join("\n");
+      chars += shown.length;
+      if (item.answer === null) junk += shown ? 1 : 0;
+      else if (shown.toLowerCase().includes(item.answer.toLowerCase())) visible += 1;
+      else misses.push(item.question);
+    }
+    const answerable = corpus.questions.filter((q) => q.answer !== null).length;
+    console.log(`  ${name}: answer visible ${visible}/${answerable}, results on no-answer questions ${junk}/${corpus.questions.length - answerable}, average ${Math.round(chars / corpus.questions.length)} characters`);
+    if (misses.length) console.log(`    missed: ${misses.join(" | ")}`);
   }
-  const answerable = corpus.questions.filter((q) => q.answer !== null).length;
-  console.log(`${name}: answer visible ${visible}/${answerable}, results on no-answer questions ${junk}/${corpus.questions.length - answerable}, average ${Math.round(chars / corpus.questions.length)} characters`);
-  if (misses.length) console.log(`  missed: ${misses.join(" | ")}`);
 }

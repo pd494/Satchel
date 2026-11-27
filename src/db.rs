@@ -431,7 +431,7 @@ impl Db {
         self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
-    /// The user's own past messages in the turns before `before_turn`, between `after` and
+    /// Past messages from both sides in the turns before `before_turn`, between `after` and
     /// `before`. With a `query`, the best word matches come first. Without one, the newest.
     pub fn chat_matches(
         &self,
@@ -455,7 +455,7 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let filter = "chat.role = 'user' AND turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
+        let filter = "turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
             AND (?3 IS NULL OR created_at < ?3)";
         let select_query = if words.is_empty() {
             format!("{ROW} WHERE {filter} ORDER BY id DESC LIMIT {limit}")

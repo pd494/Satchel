@@ -472,115 +472,153 @@
  "questions": [
   {
    "question": "how old did grandma turn",
+   "query": "grandma age birthday",
    "answer": "91 last month"
   },
   {
    "question": "whats the upstairs guys name again",
+   "query": "upstairs guy name neighbor",
    "answer": "Omar"
   },
   {
    "question": "the one who lives above me",
+   "query": "upstairs neighbor name",
    "answer": "Omar"
   },
   {
    "question": "whats the basement thing number",
+   "query": "storage unit basement number",
    "answer": "B214"
   },
   {
    "question": "when do we gotta leave for the castle day",
+   "query": "sintra castle train time",
    "answer": "9:40"
   },
   {
    "question": "whats my badge number",
+   "query": "badge number",
    "answer": "88213"
   },
   {
    "question": "what cant i eat",
-   "answer": "allergic to cashews"
+   "query": "allergy food can't eat",
+   "answer": "cashews"
   },
   {
    "question": "when is theos birthday",
+   "query": "Theo birthday",
    "answer": "march 9"
   },
   {
    "question": "whats my trainers name",
+   "query": "trainer name gym",
    "answer": "trainer is called Bruno"
   },
   {
    "question": "which locker is mine",
+   "query": "gym locker number",
    "answer": "its 312"
   },
   {
    "question": "who cuts my hair now",
+   "query": "haircut barber",
    "answer": "named Lou"
   },
   {
    "question": "whats my plate",
+   "query": "car license plate",
    "answer": "7XKR219"
   },
   {
    "question": "where is book club",
+   "query": "book club location",
    "answer": "Mira's apartment"
   },
   {
    "question": "when is the work trip",
+   "query": "work trip offsite dates",
    "answer": "january 15"
   },
   {
    "question": "who was the plant lady",
+   "query": "plant nursery owner name",
    "answer": "named Rosa"
   },
   {
    "question": "what time am i supposed to be in bed",
+   "query": "bedtime sleep goal",
    "answer": "10:30"
   },
   {
    "question": "what was i getting my dad",
+   "query": "gift dad",
    "answer": "knee brace"
   },
   {
    "question": "when is my cousin coming",
+   "query": "cousin visit",
    "answer": "february for a long weekend"
   },
   {
    "question": "what shop fixed my car",
+   "query": "car repair shop",
    "answer": "Ruiz Auto"
   },
   {
    "question": "who covered for me at standup",
+   "query": "covered standup coworker",
    "answer": "Dana covered"
   },
   {
    "question": "how much did i save on subscriptions",
+   "query": "subscriptions savings cancelled",
    "answer": "45 dollars"
   },
   {
    "question": "whats the wifi at the place",
+   "query": "airbnb wifi password",
    "answer": "alfama2026"
   },
   {
    "question": "what did dev want to rent",
+   "query": "dev rent",
    "answer": "scooters"
   },
   {
    "question": "when does mom want to call",
+   "query": "mom video call time",
    "answer": "sunday at noon"
   },
   {
    "question": "what was the dentist thing",
+   "query": "dentist appointment",
    "answer": "dec 4"
   },
   {
    "question": "what was my old landlords name",
+   "query": "old landlord name",
    "answer": null
   },
   {
    "question": "whats my blood type",
+   "query": "blood type",
    "answer": null
   },
   {
    "question": "what did we talk abt new years 2019",
+   "query": "new years 2019",
    "answer": null
+  },
+  {
+   "question": "what did you say when i tried to delete everything",
+   "query": "delete chat",
+   "answer": "nice try"
+  },
+  {
+   "question": "what did you say about the offsite presentation",
+   "query": "offsite presentation",
+   "answer": "little stressful"
   }
  ]
 }

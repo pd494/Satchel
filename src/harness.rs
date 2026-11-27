@@ -23,7 +23,7 @@ const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 const REMINDER_EVENT_PREFIX: &str = "reminder:";
 
 /// Seconds Satchel waits after a text for more texts. Texts sent together then get one reply.
-const DEBOUNCE: i64 = 5;
+const DEBOUNCE: i64 = 2;
 /// The most model calls in one reply. It stops a model that keeps calling tools.
 const MAX_STEPS: usize = 6;
 
@@ -32,17 +32,13 @@ const RRF_K: f32 = 60.0;
 const SNIPPET: usize = 300;
 /// Chat search: the word matches read, the matches scored, and the lines returned.
 const CHAT_MATCHES: i64 = 60;
-const RERANK_CANDIDATES: usize = 20;
+const CHAT_CANDIDATES: usize = 30;
 const CHAT_HITS: i64 = 5;
 /// The characters in one passage, and the start of the next. Passages overlap.
 const PASSAGE: usize = 320;
 const PASSAGE_STEP: usize = 200;
-/// A message shorter than this that ends in "?" or starts with one of these words is a question.
-const QUESTION_LENGTH: usize = 120;
-const QUESTION_WORDS: [&str; 19] = [
-    "what", "whats", "where", "wheres", "when", "whens", "who", "whos", "how", "which", "why",
-    "is", "are", "do", "does", "did", "can", "could", "should",
-];
+/// A passage that shares at least this part of its words with one already shown is a lookalike.
+const LOOKALIKE: f32 = 0.5;
 
 /// Sits next to the newest messages. The same rule in the system prompt alone does not make the
 /// model search.
@@ -809,27 +805,20 @@ impl Harness {
             return Ok(lines);
         };
 
-        // Candidates: word matches that state something. A short question, such as the user
-        // asking this same thing before, states no fact. A repeated text adds nothing.
+        // Candidates: the best word matches from both sides of the chat. A repeated text adds
+        // nothing.
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
         for row in self
             .db
             .chat_matches(Some(query), after, before, before_turn, CHAT_MATCHES)?
         {
-            let text = row.content.trim().to_lowercase();
-            let first_word: String = text
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '\'')
-                .filter(|c| *c != '\'')
-                .collect();
-            let question = text.chars().count() < QUESTION_LENGTH
-                && (text.ends_with('?') || QUESTION_WORDS.contains(&first_word.as_str()));
-            if question || !seen.insert(text) {
+            let text = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !seen.insert(text.to_lowercase()) {
                 continue;
             }
             candidates.push(row);
-            if candidates.len() == RERANK_CANDIDATES {
+            if candidates.len() == CHAT_CANDIDATES {
                 break;
             }
         }
@@ -872,11 +861,37 @@ impl Harness {
         }
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
 
+        // Lookalikes: a passage that shares at least half its words with one already shown adds
+        // nothing, such as the same question asked again.
+        let words = |text: &str| -> HashSet<String> {
+            text.split(|c: char| !c.is_alphanumeric())
+                .filter(|word| word.chars().count() > 2)
+                .map(str::to_lowercase)
+                .collect()
+        };
+        let mut shown: Vec<HashSet<String>> = Vec::new();
         let mut lines = Vec::new();
-        for (_, owner, passage) in ranked.into_iter().take(CHAT_HITS as usize) {
+        for (_, owner, passage) in ranked {
+            let passage_words = words(&passages[passage]);
+            let mut lookalike = false;
+            for other in &shown {
+                let shared = passage_words.intersection(other).count();
+                let all = passage_words.union(other).count();
+                if all > 0 && shared as f32 / all as f32 >= LOOKALIKE {
+                    lookalike = true;
+                    break;
+                }
+            }
+            if lookalike {
+                continue;
+            }
+            shown.push(passage_words);
             let mut row = candidates[owner].clone();
             row.content = passages[passage].clone();
             lines.push(Self::transcript_line(&row, zone, None)?);
+            if lines.len() == CHAT_HITS as usize {
+                break;
+            }
         }
         Ok(lines)
     }
