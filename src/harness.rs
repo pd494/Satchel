@@ -1,16 +1,19 @@
 use crate::agent::Agent;
-use crate::db::{Db, Saved, UnansweredMessage};
+use crate::db::{Db, Role, Row, Saved, Setting, SettingChange, Summary, Turn, UnansweredMessage};
 use crate::linq::{LinqClient, Part};
 use crate::media::{File, Kind, Link, Note, Reader};
-use crate::tools::{Remind, Search, Tapback, ToolCall};
+use crate::tools::{Remind, Search, Tapback, ToolCall, ToolResult};
 use jiff::{tz::TimeZone, Timestamp};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::time::Duration;
 use worker::{console_error, Env, Result, SqlStorage};
 
-/// Past messages the model sees with each new message.
-const HISTORY_LIMIT: usize = 40;
+const SYSTEM_PROMPT: &str = include_str!("prompts/system_prompt.md");
+const COMPACT_PROMPT: &str = include_str!("prompts/compact.md");
+const COMPACT_AT_TOKENS: usize = 4_000;
+const KEEP_RECENT: usize = 10;
 
 /// Runs before a message gets `SORRY` instead.
 const MAX_ATTEMPTS: i64 = 3;
@@ -27,11 +30,41 @@ const MAX_STEPS: usize = 6;
 const SEARCH_RESULTS: usize = 10;
 const RRF_K: f32 = 60.0;
 const SNIPPET: usize = 300;
+/// Chat search: the word matches read, the matches scored, and the lines returned.
+const CHAT_MATCHES: i64 = 60;
+const RERANK_CANDIDATES: usize = 20;
+const CHAT_HITS: i64 = 5;
+/// The characters in one passage, and the start of the next. Passages overlap.
+const PASSAGE: usize = 320;
+const PASSAGE_STEP: usize = 200;
+/// A message shorter than this that ends in "?" or starts with one of these words is a question.
+const QUESTION_LENGTH: usize = 120;
+const QUESTION_WORDS: [&str; 19] = [
+    "what", "whats", "where", "wheres", "when", "whens", "who", "whos", "how", "which", "why",
+    "is", "are", "do", "does", "did", "can", "could", "should",
+];
 
-const NOT_PENDING: &str = "error: that reminder already fired or was canceled.";
+/// Sits next to the newest messages. The same rule in the system prompt alone does not make the
+/// model search.
+const SEARCH_FIRST: &str = "Before you say you don't have or don't know something, call `search`.";
+
+const NOT_PENDING: &str = "that reminder already fired or was canceled.";
 
 const GREETING: &str =
     "Hey, I'm Satchel! Text me links, photos, or notes and I'll save them. Ask me anytime to find something.";
+
+/// The model's JSON from the compact prompt.
+#[derive(Deserialize)]
+struct Compaction {
+    summary: String,
+    facts: Vec<Fact>,
+}
+
+#[derive(Deserialize)]
+struct Fact {
+    key: String,
+    value: String,
+}
 
 pub struct Harness {
     db: Db,
@@ -86,9 +119,7 @@ impl Harness {
         Ok(())
     }
 
-    /// Replies to every unanswered message, oldest first. A reply is stored before it is sent,
-    /// so a failed send only resends it. After `MAX_ATTEMPTS` runs, a message gets `SORRY`,
-    /// and it is marked sent even if that send fails. A burst still inside `DEBOUNCE` waits.
+    /// Replies to every unanswered message.
     /// Returns how long until the next reminder or waiting burst, or `None` if none is pending.
     pub async fn inbox(&self, space_id: &str) -> Result<Option<Duration>> {
         // Show the user that Satchel read the chat. A failure here does not stop the replies.
@@ -98,7 +129,29 @@ impl Harness {
 
         self.queue_due_reminders()?;
 
-        let mut waiting = None;
+        let mut burst_due_at = self.reply_all(space_id).await?;
+        if burst_due_at.is_none() {
+            if let Err(error) = self.compact().await {
+                console_error!("compaction failed: {error}");
+            }
+            burst_due_at = self.reply_all(space_id).await?;
+        }
+
+        // Wake for the next reminder or the waiting burst, whichever comes first.
+        let wake_at = match (self.db.next_due()?, burst_due_at) {
+            (Some(reminder), Some(burst)) => reminder.min(burst),
+            (Some(reminder), None) => reminder,
+            (None, Some(burst)) => burst,
+            (None, None) => return Ok(None),
+        };
+        Ok(Some(Self::until(wake_at)))
+    }
+
+    /// Replies to every burst it can. Stops at a burst whose newest text is under `DEBOUNCE`
+    /// seconds old, and returns the time that burst can be answered. Returns `None` when every
+    /// text has its reply.
+    async fn reply_all(&self, space_id: &str) -> Result<Option<i64>> {
+        let mut burst_due_at = None;
         loop {
             let burst = Self::next_turn(self.db.unanswered()?);
             let Some(message) = burst.last() else {
@@ -107,7 +160,7 @@ impl Harness {
             // A text that arrived while this alarm ran waits out its own debounce.
             let debounced = message.created_at + DEBOUNCE;
             if !message.alone() && debounced > Timestamp::now().as_second() {
-                waiting = Some(debounced);
+                burst_due_at = Some(debounced);
                 break;
             }
 
@@ -137,10 +190,7 @@ impl Harness {
             }
             sent?;
         }
-
-        // Read the next reminder after the loop. A `remind` call in this run may have set one.
-        let wake = [self.db.next_due()?, waiting].into_iter().flatten().min();
-        Ok(wake.map(Self::until))
+        Ok(burst_due_at)
     }
 
     /// Typing dots are a nicety. A failure does not stop the reply.
@@ -193,15 +243,28 @@ impl Harness {
         burst: &[UnansweredMessage],
         message: &UnansweredMessage,
     ) -> Result<String> {
-        let history = self.db.load_history(message.id, HISTORY_LIMIT)?;
-        let mut context = Agent::context(&history, &self.prompt_context()?);
+        let summary = self.db.summary()?;
+        let through = summary.as_ref().map(|summary| summary.through);
+        let chat = self.db.chat(through, Some(message.turn()))?;
+        let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
+        let mut context = Self::context(
+            &self.db.settings()?,
+            summary.as_ref(),
+            &chat,
+            &self.prompt_context()?,
+            &zone,
+        )?;
         let saved = self.handle_burst(burst, message, &mut context).await?;
 
         let mut step = 0;
         let text = loop {
             let (text, calls) = self
                 .agent
-                .run_model(&mut context, &message.event_id, step)
+                .run_model(
+                    &mut context,
+                    json!({ "event_id": message.event_id, "step": step }),
+                    None,
+                )
                 .await?;
             step += 1;
             if calls.is_empty() || step == MAX_STEPS {
@@ -213,7 +276,9 @@ impl Harness {
                 results.push(self.run_tool(call, burst, message, saved).await?);
             }
             // A `react` call ends the model's reply. A tapback means it has nothing to say.
-            let failed = results.iter().any(|result| result.starts_with("error"));
+            let failed = results
+                .iter()
+                .any(|result| matches!(result, ToolResult::Error(_)));
             let reacted = calls
                 .iter()
                 .any(|call| matches!(call, Ok(ToolCall::React { .. })));
@@ -223,7 +288,7 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        let first_message = history.len() == burst.len();
+        let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
             .await
     }
@@ -249,7 +314,10 @@ impl Harness {
         let mut result = "Nothing saved.".to_string();
         if saved {
             let note = Self::burst_words(&texts, &links_to_read);
-            result = self.save(message.id, &urls, note.as_deref()).await?;
+            result = self
+                .save(message.id, &urls, note.as_deref())
+                .await?
+                .into_text();
             self.react(burst, Tapback::Like).await?;
         }
         let (read_text, images) = self.read_links(&links_to_read).await;
@@ -328,7 +396,7 @@ impl Harness {
     ) {
         let call = json!({ "name": "save", "arguments": json!({ "urls": urls }).to_string() });
         context.push(json!({ "role": "assistant", "tool_calls": [{ "id": "keep", "type": "function", "function": call }] }));
-        Agent::push_results(context, vec![result]);
+        Agent::push_results(context, vec![ToolResult::Done(result)]);
         if !images.is_empty() {
             let content: Vec<Value> = images
                 .iter()
@@ -344,10 +412,10 @@ impl Harness {
         burst: &[UnansweredMessage],
         message: &UnansweredMessage,
         saved: bool,
-    ) -> Result<String> {
+    ) -> Result<ToolResult> {
         let call = match call {
             Ok(call) => call,
-            Err(error) => return Ok(format!("error: {error}")),
+            Err(error) => return Ok(ToolResult::Error(error.clone())),
         };
         match call {
             ToolCall::Save { urls, note } => self.save(message.id, urls, note.as_deref()).await,
@@ -355,15 +423,12 @@ impl Harness {
                 if !saved && !message.is_reminder() {
                     self.react(burst, *emoji).await?;
                 }
-                Ok("ok".to_string())
+                Ok(ToolResult::Done("ok".to_string()))
             }
             ToolCall::Remind(remind) => self.remind(remind, message.id),
-            ToolCall::Search(search) => self.search(search).await,
+            ToolCall::Search(search) => self.search(search, burst[0].turn()).await,
             ToolCall::Cancel { id } => self.cancel(*id),
-            ToolCall::Settings { key, value } => match key.as_str() {
-                "time_zone" => self.set_time_zone(value),
-                _ => Ok(format!("error: there is no setting named {key}")),
-            },
+            ToolCall::Settings { key, value } => self.settings(key, value),
         }
     }
 
@@ -398,18 +463,23 @@ impl Harness {
 
     /// Adds `note` to each saved URL, then reads and embeds it. Without URLs, saves `note` on its
     /// own. Returns each item's search text for the model to check.
-    async fn save(&self, message_id: i64, urls: &[String], note: Option<&str>) -> Result<String> {
+    async fn save(
+        &self,
+        message_id: i64,
+        urls: &[String],
+        note: Option<&str>,
+    ) -> Result<ToolResult> {
         let mut items = Vec::new();
         for url in urls {
             let Some(link) = Link::find_all(url).pop() else {
-                return Ok(format!("error: {url} is not a URL"));
+                return Ok(ToolResult::Error(format!("{url} is not a URL")));
             };
             match File::parse(link.url.as_str()) {
                 Some(file) => self.db.insert_saved(message_id, &file)?,
                 None => self.db.insert_saved(message_id, &link)?,
             };
             let Some(row) = self.db.add_context(link.url.as_str(), note)? else {
-                return Ok(format!("error: {url} is not saved"));
+                return Ok(ToolResult::Error(format!("{url} is not saved")));
             };
             let (text, mut media) = self.reader.read(&link.url, row.context, &self.agent).await;
             let vector = match self
@@ -441,25 +511,30 @@ impl Harness {
         }
 
         if items.is_empty() {
-            return Ok("error: nothing to save".to_string());
+            return Ok(ToolResult::Error("nothing to save".to_string()));
         }
-        Ok(format!("ok. Search text:\n{}", items.join("\n")))
+        Ok(ToolResult::Done(format!(
+            "ok. Search text:\n{}",
+            items.join("\n")
+        )))
     }
 
-    fn remind(&self, remind: &Remind, message_id: i64) -> Result<String> {
+    fn remind(&self, remind: &Remind, message_id: i64) -> Result<ToolResult> {
         let saved_zone = self.time_zone()?;
+        let now = Timestamp::now().as_second();
         if let (Some(zone), None) = (&remind.at_zone, &saved_zone) {
-            if let Some(name) = zone.iana_name() {
-                self.db.set_time_zone(name)?;
-            }
-            return Ok(format!(
-                "error: the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
+            self.db
+                .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
+            return Ok(ToolResult::Error(format!(
+                "the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
                 Self::now_line(Some(zone))
-            ));
+            )));
         }
 
-        if remind.schedule.due_at <= Timestamp::now().as_second() {
-            return Ok("error: that time has already passed".to_string());
+        if remind.schedule.due_at <= now {
+            return Ok(ToolResult::Error(
+                "that time has already passed".to_string(),
+            ));
         }
 
         let id = match remind.id {
@@ -482,16 +557,18 @@ impl Harness {
                     Self::local_time(remind.schedule.due_at, &zone)?
                 )
             }
-            None if remind.id.is_some() => return Ok(NOT_PENDING.to_string()),
+            None if remind.id.is_some() => {
+                return Ok(ToolResult::Error(NOT_PENDING.to_string()));
+            }
             None => "ok".to_string(),
         };
 
         self.db.set_reminder(id, Some(&remind.schedule))?;
-        if let Some(name) = remind.at_zone.as_ref().and_then(TimeZone::iana_name) {
-            self.db.set_time_zone(name)?;
+        if let Some(zone) = &remind.at_zone {
+            self.db
+                .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
         }
-
-        Ok(reply)
+        Ok(ToolResult::Done(reply))
     }
 
     fn time_zone(&self) -> Result<Option<TimeZone>> {
@@ -503,40 +580,321 @@ impl Harness {
         ))
     }
 
-    fn cancel(&self, id: i64) -> Result<String> {
+    fn cancel(&self, id: i64) -> Result<ToolResult> {
         let Some(reminder) = self.db.reminder(id)? else {
-            return Ok(NOT_PENDING.to_string());
+            return Ok(ToolResult::Error(NOT_PENDING.to_string()));
         };
         self.db.set_reminder(id, None)?;
-        Ok(format!(
+        Ok(ToolResult::Done(format!(
             "ok, canceled the \"{}\" reminder. Tell the user.",
             reminder.content
-        ))
+        )))
     }
 
-    fn set_time_zone(&self, name: &str) -> Result<String> {
-        let zone = match TimeZone::get(name) {
-            Ok(zone) => zone,
-            Err(error) => return Ok(format!("error: {error}")),
+    fn settings(&self, key: &str, value: &str) -> Result<ToolResult> {
+        let change = match SettingChange::parse(key, value) {
+            Ok(change) => change,
+            Err(error) => return Ok(ToolResult::Error(error)),
         };
-        self.db.set_time_zone(zone.iana_name().unwrap_or(name))?;
-        Ok(format!("ok. {}", Self::now_line(Some(&zone))))
+        self.db
+            .change_setting(&change, Timestamp::now().as_second())?;
+        let reply = match &change {
+            SettingChange::TimeZone(zone) => format!("ok. {}", Self::now_line(Some(zone))),
+            SettingChange::Set { .. } => "ok".to_string(),
+            SettingChange::Remove { key } => format!("ok, removed {key}"),
+        };
+        Ok(ToolResult::Done(reply))
     }
 
-    async fn search(&self, search: &Search) -> Result<String> {
+    fn context(
+        settings: &[Setting],
+        summary: Option<&Summary>,
+        chat: &[Row],
+        now: &str,
+        zone: &TimeZone,
+    ) -> Result<Vec<Value>> {
+        let mut system_prompt = format!(
+            "{SYSTEM_PROMPT}\n\n# User settings\n\n{}",
+            Self::settings_text(settings, zone)?
+        );
+        if let Some(summary) = summary {
+            system_prompt.push_str(&format!("\n\n# Earlier in this chat\n\n{}", summary.text));
+        }
+        let mut context = vec![json!({ "role": "system", "content": system_prompt })];
+        for row in chat {
+            context.push(json!({ "role": row.role, "content": row.content }));
+        }
+        context.push(json!({ "role": "system", "content": now }));
+        Ok(context)
+    }
+
+    fn settings_text(settings: &[Setting], zone: &TimeZone) -> Result<String> {
+        let mut lines = Vec::new();
+        for setting in settings {
+            let said = Timestamp::from_second(setting.said_at)
+                .map_err(|error| error.to_string())?
+                .to_zoned_datetime(zone.clone())
+                .strftime("%Y-%m-%d");
+            lines.push(format!(
+                "- {}: {} (said {said})",
+                setting.key, setting.value
+            ));
+        }
+        if lines.is_empty() {
+            return Ok("None yet.".to_string());
+        }
+        Ok(lines.join("\n"))
+    }
+
+    fn transcript_line(row: &Row, zone: &TimeZone, max_chars: Option<usize>) -> Result<String> {
+        let sent = Timestamp::from_second(row.created_at)
+            .map_err(|error| error.to_string())?
+            .to_zoned_datetime(zone.clone())
+            .strftime("%a %b %-d %Y %-I:%M %p")
+            .to_string();
+        let who = match row.role {
+            Role::User => "user",
+            Role::Assistant => "Satchel",
+        };
+        let one_line = row.content.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.is_empty() {
+            return Ok(format!("- {sent}, {who}: (tapback)"));
+        }
+        let text = match max_chars {
+            Some(max_chars) => one_line.chars().take(max_chars).collect(),
+            None => one_line,
+        };
+        Ok(format!("- {sent}, {who}: {text}"))
+    }
+
+    /// When the summary and the chat after it pass `COMPACT_AT_TOKENS`, moves the oldest turns
+    /// into the summary. The newest `KEEP_RECENT` messages stay. Otherwise it does nothing.
+    async fn compact(&self) -> Result<()> {
+        let summary = self.db.summary()?;
+        let chat_after_summary = self
+            .db
+            .chat(summary.as_ref().map(|summary| summary.through), None)?;
+
+        // Size: about 4 characters a token.
+        let mut chars = summary
+            .as_ref()
+            .map_or(0, |summary| summary.text.chars().count());
+        for row in &chat_after_summary {
+            chars += row.content.chars().count();
+        }
+        if chars / 4 < COMPACT_AT_TOKENS || chat_after_summary.len() <= KEEP_RECENT {
+            return Ok(());
+        }
+
+        // The oldest rows, up to the turn of the first kept row. A reply stays with its text.
+        let first_kept = chat_after_summary[chat_after_summary.len() - KEEP_RECENT].turn;
+        let mut messages_before_compaction = Vec::new();
+        for row in chat_after_summary {
+            if row.turn >= first_kept {
+                break;
+            }
+            messages_before_compaction.push(row);
+        }
+        if messages_before_compaction.is_empty() {
+            return Ok(());
+        }
+
+        // One model call with the compact prompt returns the new summary and the facts.
+        let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
+        let mut transcript = Vec::new();
+        for row in &messages_before_compaction {
+            transcript.push(Self::transcript_line(row, &zone, None)?);
+        }
+        let input = format!(
+            "Summary so far:\n{}\n\nUser settings:\n{}\n\nNew messages:\n{}",
+            summary
+                .as_ref()
+                .map_or("(none)", |summary| summary.text.as_str()),
+            Self::settings_text(&self.db.settings()?, &zone)?,
+            transcript.join("\n")
+        );
+        let mut context = vec![
+            json!({ "role": "system", "content": COMPACT_PROMPT }),
+            json!({ "role": "user", "content": input }),
+        ];
+        // summary: the new summary of all chat up to the last compacted message.
+        // facts: the setting changes in the compacted messages, each a key and a value.
+        let response_schema = json!({
+            "type": "object",
+            "required": ["summary", "facts"],
+            "properties": {
+                "summary": { "type": "string" },
+                "facts": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["key", "value"],
+                    "properties": { "key": { "type": "string" }, "value": { "type": "string" } },
+                }},
+            },
+        });
+        let (text, _) = self
+            .agent
+            .run_model(
+                &mut context,
+                json!({ "step": "compact" }),
+                Some(&response_schema),
+            )
+            .await?;
+        let compaction: Compaction = serde_json::from_str(&text)?;
+
+        // A fact that fails to parse is logged and skipped. An empty summary writes nothing.
+        let new_summary = compaction.summary.trim();
+        if new_summary.is_empty() {
+            return Err("the compaction returned an empty summary".into());
+        }
+        let mut facts = Vec::new();
+        for fact in compaction.facts {
+            match SettingChange::parse(&fact.key, &fact.value) {
+                Ok(change) => facts.push(change),
+                Err(error) => console_error!("compaction fact {}: {error}", fact.key),
+            }
+        }
+        if !self
+            .db
+            .save_compaction(&messages_before_compaction, new_summary, &facts)?
+        {
+            console_error!("a reset deleted the chat during compaction");
+        }
+        Ok(())
+    }
+
+    async fn search(&self, search: &Search, before_turn: Turn) -> Result<ToolResult> {
         let zone = self.time_zone()?.unwrap_or(TimeZone::UTC);
         let (after, before) = match search.bounds(&zone) {
             Ok(bounds) => bounds,
-            Err(error) => return Ok(format!("error: {error}")),
+            Err(error) => return Ok(ToolResult::Error(error)),
         };
+        let query = search.query.as_deref().map(str::trim);
+        let query = query.filter(|query| !query.is_empty());
+
+        let mut found = Vec::new();
+        let matching_saved = self.search_saved(query, after, before, &zone).await?;
+        if !matching_saved.is_empty() {
+            found.push(format!("Saved items:\n{}", matching_saved.join("\n")));
+        }
+        let matching_chat = self
+            .search_chat(query, after, before, before_turn, &zone)
+            .await?;
+        if !matching_chat.is_empty() {
+            found.push(format!("Past chat:\n{}", matching_chat.join("\n")));
+        }
+        if found.is_empty() {
+            return Ok(ToolResult::Done("Nothing matches.".to_string()));
+        }
+        Ok(ToolResult::Done(found.join("\n\n")))
+    }
+
+    /// The user's past messages that best answer `query`, one line each. Without a query, the
+    /// newest in the time window.
+    async fn search_chat(
+        &self,
+        query: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+        before_turn: Turn,
+        zone: &TimeZone,
+    ) -> Result<Vec<String>> {
+        let Some(query) = query else {
+            let mut lines = Vec::new();
+            for row in self
+                .db
+                .chat_matches(None, after, before, before_turn, CHAT_HITS)?
+            {
+                lines.push(Self::transcript_line(&row, zone, Some(SNIPPET))?);
+            }
+            return Ok(lines);
+        };
+
+        // Candidates: word matches that state something. A short question, such as the user
+        // asking this same thing before, states no fact. A repeated text adds nothing.
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for row in self
+            .db
+            .chat_matches(Some(query), after, before, before_turn, CHAT_MATCHES)?
+        {
+            let text = row.content.trim().to_lowercase();
+            let first_word: String = text
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '\'')
+                .filter(|c| *c != '\'')
+                .collect();
+            let question = text.chars().count() < QUESTION_LENGTH
+                && (text.ends_with('?') || QUESTION_WORDS.contains(&first_word.as_str()));
+            if question || !seen.insert(text) {
+                continue;
+            }
+            candidates.push(row);
+            if candidates.len() == RERANK_CANDIDATES {
+                break;
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Passages: a long message is split into overlapping parts, so the answer is not lost
+        // to the cut at the end of a line.
+        let mut passages = Vec::new();
+        let mut owners = Vec::new();
+        for (owner, row) in candidates.iter().enumerate() {
+            let chars: Vec<char> = row.content.chars().collect();
+            let mut start = 0;
+            loop {
+                let end = (start + PASSAGE).min(chars.len());
+                passages.push(chars[start..end].iter().collect::<String>());
+                owners.push(owner);
+                if end == chars.len() {
+                    break;
+                }
+                start += PASSAGE_STEP;
+            }
+        }
+
+        // Each message keeps its best passage. The best messages come first.
+        let scores = self.agent.rerank(query, &passages).await?;
+        let mut best: Vec<Option<(f32, usize)>> = vec![None; candidates.len()];
+        for (passage, (&owner, &score)) in owners.iter().zip(&scores).enumerate() {
+            match best[owner] {
+                Some((best_score, _)) if best_score >= score => {}
+                _ => best[owner] = Some((score, passage)),
+            }
+        }
+        let mut ranked = Vec::new();
+        for (owner, best_passage) in best.into_iter().enumerate() {
+            if let Some((score, passage)) = best_passage {
+                ranked.push((score, owner, passage));
+            }
+        }
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        let mut lines = Vec::new();
+        for (_, owner, passage) in ranked.into_iter().take(CHAT_HITS as usize) {
+            let mut row = candidates[owner].clone();
+            row.content = passages[passage].clone();
+            lines.push(Self::transcript_line(&row, zone, None)?);
+        }
+        Ok(lines)
+    }
+
+    async fn search_saved(
+        &self,
+        query: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+        zone: &TimeZone,
+    ) -> Result<Vec<String>> {
         let mut rows = self.db.searchable(after, before)?;
         if rows.is_empty() {
-            return Ok("No saved items match.".to_string());
+            return Ok(Vec::new());
         }
 
         // With no query, the newest saves come first.
-        let query = search.query.as_deref().map(str::trim);
-        if let Some(query) = query.filter(|query| !query.is_empty()) {
+        if let Some(query) = query {
             let vector = self.agent.embed(Agent::SEARCH, query, None).await?;
             rows = Self::rank(query, &vector, rows);
         }
@@ -562,7 +920,7 @@ impl Harness {
                 ));
             }
         }
-        Ok(lines.join("\n"))
+        Ok(lines)
     }
 
     fn rank(query: &str, query_vector: &[u8], rows: Vec<Saved>) -> Vec<Saved> {
@@ -658,6 +1016,8 @@ impl Harness {
                 ));
             }
         }
+        text.push('\n');
+        text.push_str(SEARCH_FIRST);
         Ok(text)
     }
 
