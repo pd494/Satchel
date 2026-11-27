@@ -31,6 +31,10 @@ const SEARCH_RESULTS: usize = 10;
 const RRF_K: f32 = 60.0;
 const SNIPPET: usize = 300;
 
+/// Sits next to the newest messages. The same rule in the system prompt alone does not make the
+/// model search.
+const SEARCH_FIRST: &str = "Before you say you don't have or don't know something, call `search`.";
+
 const NOT_PENDING: &str = "that reminder already fired or was canceled.";
 
 const GREETING: &str =
@@ -911,6 +915,8 @@ impl Harness {
                 ));
             }
         }
+        text.push('\n');
+        text.push_str(SEARCH_FIRST);
         Ok(text)
     }
 
