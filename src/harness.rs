@@ -588,7 +588,7 @@ impl Harness {
         }
 
         // After untrusted text, a change to settings or reminders runs only when the user's own
-        // texts ask for it. A new reminder in the saved time zone is fine.
+        // texts ask for it. A new reminder is fine.
         let change = match call {
             ToolCall::Settings { key, value } if value.trim().is_empty() => {
                 format!("remove the setting {key}")
@@ -598,18 +598,8 @@ impl Harness {
                 Some(reminder) => format!("cancel the reminder \"{}\"", reminder.content),
                 None => return Ok(None),
             },
-            ToolCall::Remind(remind) => {
-                let changes_zone = match &remind.at_zone {
-                    Some(zone) => self.db.time_zone()?.as_deref() != zone.iana_name(),
-                    None => false,
-                };
-                if remind.id.is_some() {
-                    format!("move the reminder \"{}\"", remind.note)
-                } else if changes_zone {
-                    format!("set a reminder in a new time zone for \"{}\"", remind.note)
-                } else {
-                    return Ok(None);
-                }
+            ToolCall::Remind(remind) if remind.id.is_some() => {
+                format!("move the reminder \"{}\"", remind.note)
             }
             _ => return Ok(None),
         };
@@ -826,10 +816,6 @@ impl Harness {
         };
 
         self.db.set_reminder(id, Some(&remind.schedule))?;
-        if let Some(zone) = &remind.at_zone {
-            self.db
-                .change_setting(&SettingChange::TimeZone(zone.clone()), now)?;
-        }
         Ok(ToolResult::Done(reply))
     }
 
