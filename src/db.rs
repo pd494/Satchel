@@ -174,7 +174,8 @@ impl SettingChange {
             return Err("the key is empty".to_string());
         }
         // Each setting is one line of the prompt. A line break would let one value add more settings.
-        if key.chars().any(char::is_control) || value.chars().any(char::is_control) {
+        let breaks_line = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+        if key.chars().any(breaks_line) || value.chars().any(breaks_line) {
             return Err("the key and the value must each be one line".to_string());
         }
         if key == "time_zone" {
@@ -527,12 +528,14 @@ impl Db {
             .pop())
     }
 
-    /// Whether a saved item has `content`, such as a link's URL.
-    pub fn is_saved(&self, content: &str) -> Result<bool> {
-        let select_query = format!("SELECT {SAVED} FROM saved WHERE content = ?");
+    /// Whether a saved link or file has the URL `url`. A note or a reminder is the model's words,
+    /// so its text never counts.
+    pub fn is_saved(&self, url: &str) -> Result<bool> {
+        let select_query =
+            format!("SELECT {SAVED} FROM saved WHERE content = ? AND media != 'note'");
         let rows: Vec<Saved> = self
             .sql
-            .exec(&select_query, Some(vec![content.into()]))?
+            .exec(&select_query, Some(vec![url.into()]))?
             .to_array()?;
         Ok(!rows.is_empty())
     }

