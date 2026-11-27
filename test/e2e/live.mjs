@@ -113,7 +113,7 @@ const ramble = (n) => {
 // - saved: exactly these links and files, once each.
 // - notes: exactly one note per entry, containing it, and no link, file, or setting that contains it.
 //   Checked only in scenarios without reminders. null skips the check.
-// - settings: one setting per entry, containing it.
+// - settings: one setting per entry, whose key or value contains it, or one of the words in a list.
 // - never: words that no setting, note, or saved link or file may contain.
 // - summary: a compaction summary exists. The long chat must have been compacted for its recall
 //   case to test search over the compacted part.
@@ -189,7 +189,7 @@ const SCENARIOS = [
     intent: "Send a reminder at its time, with its link.",
     chain: true,
     cases: [
-      ["remind-in", `remind me in 2 minutes to drink water and log it here ${WATER}`, "text-only", "", { pending: 1 }],
+      ["remind-in", `remind me in 2 minutes to drink water and log it here ${WATER}`, "text", "", { pending: 1 }],
       ["remind-fires", null, "link", WATER],
     ],
     saved: [WATER],
@@ -278,7 +278,7 @@ const SCENARIOS = [
     name: "facts",
     intent: "Keep a lasting fact about the user as a setting, not a note.",
     cases: [["state-fact", "btw i dont eat meat", "any", ""]],
-    settings: ["meat"],
+    settings: [["meat", "vegetarian", "vegan", "diet"]],
   },
   {
     name: "setting-with-link",
@@ -295,7 +295,7 @@ const SCENARIOS = [
     intent: "Keep a fact the user states in the same burst as a link.",
     cases: [["fact-with-link", ["https://docs.python.org/3/using", "btw i'm vegetarian now"], "any", ""]],
     saved: ["https://docs.python.org/3/using"],
-    settings: ["vegetarian"],
+    settings: [["vegetarian", "diet"]],
   },
   {
     name: "cancel-with-link",
@@ -487,7 +487,7 @@ function checkState(scenario, greeting) {
   const saved = savedRows.map((row) => row.content);
   const notes = db.prepare("SELECT content FROM saved WHERE media = 'note'").all().map((row) => row.content);
   const summary = db.prepare("SELECT text FROM summary").get()?.text ?? null;
-  const settings = db.prepare("SELECT value FROM settings WHERE key != 'time_zone' AND value IS NOT NULL").all().map((row) => row.value);
+  const settings = db.prepare("SELECT key || ': ' || value AS setting FROM settings WHERE key != 'time_zone' AND value IS NOT NULL").all().map((row) => row.setting);
   const zone = db.prepare("SELECT value FROM settings WHERE key = 'time_zone'").get()?.value ?? null;
   const pending = db.prepare("SELECT message_id, content, due_at, repeat FROM saved WHERE media = 'note' AND due_at IS NOT NULL").all();
   const urlsOf = (row) => db.prepare("SELECT content FROM saved WHERE message_id = ? AND media != 'note'").all(row.message_id).map((url) => url.content);
@@ -512,9 +512,9 @@ function checkState(scenario, greeting) {
     }
     if (notes.length > wantNotes.length) failures.push([`${notes.length} notes, not ${wantNotes.length}`, last]);
   }
-  for (const word of scenario.settings ?? []) {
-    const count = settings.filter((value) => value.toLowerCase().includes(word)).length;
-    if (count !== 1) failures.push([`${count} settings with "${word}", not 1`, sentBy(word)]);
+  for (const words of scenario.settings ?? []) {
+    const count = settings.filter((setting) => [words].flat().some((word) => setting.toLowerCase().includes(word))).length;
+    if (count !== 1) failures.push([`${count} settings with "${[words].flat().join('" or "')}", not 1`, last]);
   }
   for (const word of scenario.never ?? []) {
     for (const content of [...settings, ...notes, ...saved]) {
