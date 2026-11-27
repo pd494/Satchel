@@ -95,8 +95,16 @@ impl Reader {
             ("text", sub) if sub.contains("vcard") => (Self::vcard(&bytes), None),
             ("text", _) => (String::from_utf8_lossy(&bytes).into(), None),
             ("image", _) => {
+                // A failed reading keeps the image, which is still embedded and found by meaning.
                 let jpeg = self.jpeg(bytes).await?;
-                (agent.read_media(&jpeg).await?, Some(jpeg))
+                let seen = match agent.read_media(&jpeg).await {
+                    Ok(seen) => seen,
+                    Err(error) => {
+                        console_error!("read the image {url} failed: {error}");
+                        String::new()
+                    }
+                };
+                (seen, Some(jpeg))
             }
             ("video", "mp4" | "quicktime") => {
                 // A video's text is what it shows plus what is said. A part that fails, such as a

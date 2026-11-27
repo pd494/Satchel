@@ -25,7 +25,8 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 const DIMENSIONS: u32 = 512;
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
-/// A compaction or a media reading. Each writes a long text, and no one waits on it.
+/// A compaction or a media reading writes a long text. A compaction runs after the replies. A
+/// media reading runs during a save, and a slow reading is better than a lost one.
 const LONG_TEXT_TIMEOUT_MS: u32 = 60_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
@@ -229,7 +230,7 @@ impl Agent {
     }
 
     /// What a saved image or video shows, then every piece of its visible text. Search reads this
-    /// text, so a screenshot's gate or a scoreboard's score can be found and quoted later.
+    /// text. A screenshot's gate or a scoreboard's score can then be found and quoted later.
     pub async fn read_media(&self, (mime, bytes): &(String, Vec<u8>)) -> Result<String> {
         let kind = if mime.starts_with("video/") {
             "video_url"
@@ -244,8 +245,14 @@ impl Agent {
             "max_tokens": 400,
             "chat_template_kwargs": { "enable_thinking": false },
         });
+        // A video is too large for AI Gateway. An image is small enough to log.
         let options = Self::gateway(json!({ "step": "read_media" }), LONG_TEXT_TIMEOUT_MS);
-        let output = self.call(MODEL, &input, Some(&options)).await?;
+        let options = if kind == "video_url" {
+            None
+        } else {
+            Some(&options)
+        };
+        let output = self.call(MODEL, &input, options).await?;
         let text = output["choices"][0]["message"]["content"].as_str();
         Ok(Self::clean(text.ok_or("the media reading is missing")?))
     }
@@ -274,7 +281,6 @@ impl Agent {
             .into())
     }
 
-    /// `options` is `None` for media calls, which are too large for AI Gateway.
     /// Scores how well each of `passages` answers `query`, from 0 to 1, in the same order.
     pub async fn rerank(&self, query: &str, passages: &[String]) -> Result<Vec<f32>> {
         let mut contexts = Vec::new();
@@ -292,6 +298,7 @@ impl Agent {
         Ok(scores)
     }
 
+    /// `options` is `None` for media calls, which are too large for AI Gateway.
     async fn call(&self, model: &str, input: &Value, options: Option<&Value>) -> Result<Value> {
         let options = match options {
             Some(options) => options.serialize(&JSON)?,
@@ -331,18 +338,6 @@ impl Agent {
                 break;
             };
             text.replace_range(start..=start + len, "");
-        }
-        // iMessage shows no HTML. Gemma once wrote a tapback as a `<button>` tag. A tag starts
-        // with a letter or "/", so "<3" stays.
-        let mut from = 0;
-        while let Some(found) = text[from..].find('<') {
-            let start = from + found;
-            let next = text[start + 1..].chars().next();
-            let is_tag = matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '/');
-            match (is_tag, text[start..].find('>')) {
-                (true, Some(len)) => text.replace_range(start..=start + len, ""),
-                _ => from = start + 1,
-            }
         }
         text.trim().to_string()
     }

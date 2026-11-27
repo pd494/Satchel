@@ -7,7 +7,7 @@
 // no answer checks what search returns when nothing fits. Each run tries both query styles.
 //
 // The steps copy `Harness::search_chat` and `Db::chat_matches`. The constants and the schema are
-// read from the Rust source, so a change there shows up here. Only the reranker calls Workers AI,
+// read from the Rust source. A change there then shows up here. Only the reranker calls Workers AI,
 // about 2 neurons a question.
 //
 // Run: node test/bench/chat-search.mjs

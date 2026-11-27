@@ -42,6 +42,9 @@ const PASSAGE: usize = 320;
 const PASSAGE_STEP: usize = 200;
 /// A passage that shares at least this part of its words with one already shown is a lookalike.
 const LOOKALIKE: f32 = 0.5;
+/// The characters of a saved item's search text that search splits into passages. The embedding
+/// reads the same 4,000.
+const SAVED_TEXT_SEARCHED: usize = 4_000;
 
 /// Sits next to the newest messages. The same rule in the system prompt alone does not make the
 /// model search.
@@ -445,6 +448,26 @@ impl Harness {
         if first_message {
             return Ok(GREETING.to_string());
         }
+        // iMessage shows no HTML. Gemma once wrote a tapback as a `<button>` tag. A tag is a name
+        // and then a space, ">" or "/", with no "://" inside. "<3" and "<https://...>" stay.
+        let mut text = text;
+        let mut from = 0;
+        while let Some(found) = text[from..].find('<') {
+            let start = from + found;
+            let rest = &text[start + 1..];
+            let name_end = rest
+                .find(|c: char| !c.is_ascii_alphabetic() && c != '/')
+                .unwrap_or(rest.len());
+            let after_name = rest[name_end..].chars().next();
+            let is_tag = name_end > 0 && matches!(after_name, Some(' ' | '>' | '/'));
+            match (is_tag, rest.find('>')) {
+                (true, Some(len)) if !rest[..len].contains("://") => {
+                    text.replace_range(start..=start + 1 + len, "");
+                }
+                _ => from = start + 1,
+            }
+        }
+        let text = text.trim().to_string();
         let tapback = serde_json::from_value::<Tapback>(text.clone().into());
         let (Ok(emoji), false) = (tapback, message.is_reminder()) else {
             return Ok(text);
@@ -479,14 +502,19 @@ impl Harness {
             Some(_) => self.db.recent_user_texts(burst_start)?,
             None => Vec::new(),
         };
+        let mut recent_links = Vec::new();
+        for row in &recent_user_texts {
+            for link in Link::find_all(&row.content) {
+                recent_links.push(link.url);
+            }
+        }
         let mut urls_to_save = Vec::new();
         let mut older_urls = Vec::new();
         for url in urls {
-            let is_recent = note.is_none()
-                || recent_user_texts
-                    .iter()
-                    .any(|row| row.content.contains(url.as_str()));
-            if is_recent {
+            let Some(link) = Link::find_all(url).pop() else {
+                return Ok(ToolResult::Error(format!("{url} is not a URL")));
+            };
+            if note.is_none() || recent_links.contains(&link.url) {
                 urls_to_save.push(url.as_str());
             } else {
                 older_urls.push(url.as_str());
@@ -863,7 +891,7 @@ impl Harness {
             return Ok(Vec::new());
         }
 
-        // Passages: a long message is split into overlapping parts, so the answer is not lost
+        // Passages: a long message is split into overlapping parts. The answer is then not lost
         // to the cut at the end of a line.
         let mut passages = Vec::new();
         let mut owners = Vec::new();
@@ -914,7 +942,7 @@ impl Harness {
             }
             shown_words.push(passage_words);
 
-            // A match shows its whole turn, so "what did you say about the sandwich" gets
+            // A match shows its whole turn. "what did you say about the sandwich" then gets
             // Satchel's reply next to the user's text. The match shows its best passage.
             let hit = &candidates[owner];
             if shown_turns.contains(&hit.turn) {
@@ -956,7 +984,7 @@ impl Harness {
         rows.truncate(SEARCH_RESULTS);
 
         // Each result shows its search text, or for a long one, the passage that best answers the
-        // query. One reranker call scores every passage, so a long note, file, or transcript
+        // query. One reranker call scores every passage. A long note, file, or transcript then
         // shows the lines that match, not only its start.
         let mut snippets = Vec::new();
         let mut passages = Vec::new();
@@ -971,7 +999,8 @@ impl Harness {
                 .collect();
             snippets.push(one_line.iter().take(SNIPPET).collect::<String>());
             if query.is_some() && one_line.len() > SNIPPET {
-                for passage in Self::split_passages(&one_line) {
+                let searched = &one_line[..one_line.len().min(SAVED_TEXT_SEARCHED)];
+                for passage in Self::split_passages(searched) {
                     passages.push(passage);
                     owners.push(owner);
                 }
