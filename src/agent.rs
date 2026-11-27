@@ -17,6 +17,7 @@ const ASK: &str = "Only answer a question about this link, such as whether it is
 const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
 /// Scores how well each passage answers a query. It writes no text.
 const RERANK_MODEL: &str = "@cf/baai/bge-reranker-base";
+const READ_MEDIA: &str = "Describe what this shows in one or two short lines: the main subjects (people, mascots, animals, food, objects), the place, and any event. Then write every piece of visible text, exactly as written, including scores and numbers, one item per line.";
 /// The most characters one embedding reads. The model reads about 8,000 tokens.
 const MAX_TEXT: usize = 4_000;
 const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
@@ -24,6 +25,9 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 const DIMENSIONS: u32 = 512;
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
+/// A compaction or a media reading writes a long text. A compaction runs after the replies. A
+/// media reading runs during a save, and a slow reading is better than a lost one.
+const LONG_TEXT_TIMEOUT_MS: u32 = 60_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
 
@@ -93,17 +97,21 @@ impl Agent {
         });
         // None: the model gets the tools and answers with text or tool calls.
         // Some: the model gets no tools and answers with JSON in the schema's shape.
-        match response_schema {
+        let timeout_ms = match response_schema {
             Some(response_schema) => {
                 input["response_format"] =
-                    json!({ "type": "json_schema", "json_schema": response_schema })
+                    json!({ "type": "json_schema", "json_schema": response_schema });
+                LONG_TEXT_TIMEOUT_MS
             }
-            None => input["tools"] = self.tools.clone(),
-        }
+            None => {
+                input["tools"] = self.tools.clone();
+                MODEL_TIMEOUT_MS
+            }
+        };
         if let Some(run) = &self.eval_run {
             metadata["eval_run"] = json!(run);
         }
-        let options = Self::gateway(metadata);
+        let options = Self::gateway(metadata, timeout_ms);
         let mut output = self.call(MODEL, &input, Some(&options)).await?;
         let mut response = output["choices"][0]["message"].take();
         let text = match &response["content"] {
@@ -116,11 +124,11 @@ impl Agent {
         Ok((text, calls))
     }
 
-    fn gateway(metadata: Value) -> Value {
+    fn gateway(metadata: Value, timeout_ms: u32) -> Value {
         json!({ "gateway": {
             "id": "satchel",
             "metadata": metadata,
-            "requestTimeoutMs": MODEL_TIMEOUT_MS,
+            "requestTimeoutMs": timeout_ms,
             "retries": { "maxAttempts": 3, "retryDelayMs": 500, "backoff": "exponential" },
         } })
     }
@@ -221,6 +229,34 @@ impl Agent {
         Ok(BASE64.decode(vector).map_err(|error| error.to_string())?)
     }
 
+    /// What a saved image or video shows, then every piece of its visible text. Search reads this
+    /// text. A screenshot's gate or a scoreboard's score can then be found and quoted later.
+    pub async fn read_media(&self, (mime, bytes): &(String, Vec<u8>)) -> Result<String> {
+        let kind = if mime.starts_with("video/") {
+            "video_url"
+        } else {
+            "image_url"
+        };
+        let input = json!({
+            "messages": [{ "role": "user", "content": [
+                { "type": "text", "text": READ_MEDIA },
+                { "type": kind, kind: { "url": Self::data_url(mime, bytes) } },
+            ]}],
+            "max_tokens": 400,
+            "chat_template_kwargs": { "enable_thinking": false },
+        });
+        // A video is too large for AI Gateway. An image is small enough to log.
+        let options = Self::gateway(json!({ "step": "read_media" }), LONG_TEXT_TIMEOUT_MS);
+        let options = if kind == "video_url" {
+            None
+        } else {
+            Some(&options)
+        };
+        let output = self.call(MODEL, &input, options).await?;
+        let text = output["choices"][0]["message"]["content"].as_str();
+        Ok(Self::clean(text.ok_or("the media reading is missing")?))
+    }
+
     pub async fn transcribe(&self, audio: &[u8]) -> Result<String> {
         let input = json!({ "audio": BASE64.encode(audio) });
         let output = self.call(TRANSCRIBE_MODEL, &input, None).await?;
@@ -245,7 +281,6 @@ impl Agent {
             .into())
     }
 
-    /// `options` is `None` for media calls, which are too large for AI Gateway.
     /// Scores how well each of `passages` answers `query`, from 0 to 1, in the same order.
     pub async fn rerank(&self, query: &str, passages: &[String]) -> Result<Vec<f32>> {
         let mut contexts = Vec::new();
@@ -253,7 +288,7 @@ impl Agent {
             contexts.push(json!({ "text": passage }));
         }
         let input = json!({ "query": query, "contexts": contexts });
-        let options = Self::gateway(json!({ "step": "rerank" }));
+        let options = Self::gateway(json!({ "step": "rerank" }), MODEL_TIMEOUT_MS);
         let output = self.call(RERANK_MODEL, &input, Some(&options)).await?;
         let ranked: Vec<Ranked> = serde_json::from_value(output["response"].clone())?;
         let mut scores = vec![0.0; passages.len()];
@@ -263,6 +298,7 @@ impl Agent {
         Ok(scores)
     }
 
+    /// `options` is `None` for media calls, which are too large for AI Gateway.
     async fn call(&self, model: &str, input: &Value, options: Option<&Value>) -> Result<Value> {
         let options = match options {
             Some(options) => options.serialize(&JSON)?,
@@ -290,7 +326,7 @@ impl Agent {
     }
 
     /// Removes what Gemma sometimes leaks into its text: a thinking block before `<channel|>`,
-    /// special tokens like `<|file_separator|>`, and zero-width characters.
+    /// special tokens like `<|file_separator|>`, HTML tags, and zero-width characters.
     fn clean(text: &str) -> String {
         // U+200D stays: it joins emoji such as 🧘‍♀️.
         let mut text = text.replace(['\u{200B}', '\u{200C}', '\u{FEFF}'], "");

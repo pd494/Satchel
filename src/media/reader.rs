@@ -94,8 +94,33 @@ impl Reader {
             ("text", "html") => return self.page(url, &final_url, &bytes).await,
             ("text", sub) if sub.contains("vcard") => (Self::vcard(&bytes), None),
             ("text", _) => (String::from_utf8_lossy(&bytes).into(), None),
-            ("image", _) => (String::new(), Some(self.jpeg(bytes).await?)),
-            ("video", "mp4" | "quicktime") => (String::new(), Some((essence.into(), bytes))),
+            ("image", _) => {
+                // A failed reading keeps the image, which is still embedded and found by meaning.
+                let jpeg = self.jpeg(bytes).await?;
+                let seen = match agent.read_media(&jpeg).await {
+                    Ok(seen) => seen,
+                    Err(error) => {
+                        console_error!("read the image {url} failed: {error}");
+                        String::new()
+                    }
+                };
+                (seen, Some(jpeg))
+            }
+            ("video", "mp4" | "quicktime") => {
+                // A video's text is what it shows plus what is said. A part that fails, such as a
+                // video with no speech, is left out.
+                let video = (essence.to_string(), bytes);
+                let mut video_text = Vec::new();
+                match agent.read_media(&video).await {
+                    Ok(seen) => video_text.push(seen),
+                    Err(error) => console_error!("read the video {url} failed: {error}"),
+                }
+                match agent.transcribe(&video.1).await {
+                    Ok(speech) => video_text.push(speech),
+                    Err(error) => console_error!("transcribe {url} failed: {error}"),
+                }
+                (video_text.join("\n"), Some(video))
+            }
             ("audio", _) => (agent.transcribe(&bytes).await?, None),
             _ => (agent.read_document(name, essence, &bytes).await?, None),
         })

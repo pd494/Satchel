@@ -120,7 +120,7 @@ pub enum Role {
 
 #[derive(Clone, Deserialize)]
 pub struct Row {
-    id: i64,
+    pub id: i64,
     pub turn: Turn,
     pub role: Role,
     pub content: String,
@@ -431,7 +431,26 @@ impl Db {
         self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
-    /// The user's own past messages in the turns before `before_turn`, between `after` and
+    /// The user's texts from `first_id` on, plus the user text just before it.
+    pub fn recent_user_texts(&self, first_id: i64) -> Result<Vec<Row>> {
+        let select_query = format!(
+            "{ROW} WHERE chat.role = 'user' AND chat.id >= \
+            (SELECT COALESCE(MAX(id), 0) FROM messages WHERE role = 'user' AND id < ?1)"
+        );
+        self.sql
+            .exec(&select_query, Some(vec![first_id.into()]))?
+            .to_array()
+    }
+
+    /// The messages of one turn: a user text and the reply to it, oldest first.
+    pub fn turn_messages(&self, turn: Turn) -> Result<Vec<Row>> {
+        let select_query = format!("{ROW} WHERE turn = ? ORDER BY id");
+        self.sql
+            .exec(&select_query, Some(vec![turn.0.into()]))?
+            .to_array()
+    }
+
+    /// Past messages from both sides in the turns before `before_turn`, between `after` and
     /// `before`. With a `query`, the best word matches come first. Without one, the newest.
     pub fn chat_matches(
         &self,
@@ -455,7 +474,7 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let filter = "chat.role = 'user' AND turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
+        let filter = "turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
             AND (?3 IS NULL OR created_at < ?3)";
         let select_query = if words.is_empty() {
             format!("{ROW} WHERE {filter} ORDER BY id DESC LIMIT {limit}")
