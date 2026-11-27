@@ -96,18 +96,22 @@ impl Reader {
             ("text", _) => (String::from_utf8_lossy(&bytes).into(), None),
             ("image", _) => {
                 let jpeg = self.jpeg(bytes).await?;
-                (agent.read_image(&jpeg).await?, Some(jpeg))
+                (agent.read_media(&jpeg).await?, Some(jpeg))
             }
             ("video", "mp4" | "quicktime") => {
-                // A video's speech becomes its text. A video with no speech keeps no text.
-                let speech = match agent.transcribe(&bytes).await {
-                    Ok(speech) => speech,
-                    Err(error) => {
-                        console_error!("transcribe {url} failed: {error}");
-                        String::new()
-                    }
-                };
-                (speech, Some((essence.into(), bytes)))
+                // A video's text is what it shows plus what is said. A part that fails, such as a
+                // video with no speech, is left out.
+                let video = (essence.to_string(), bytes);
+                let mut parts = Vec::new();
+                match agent.read_media(&video).await {
+                    Ok(seen) => parts.push(seen),
+                    Err(error) => console_error!("read the video {url} failed: {error}"),
+                }
+                match agent.transcribe(&video.1).await {
+                    Ok(speech) => parts.push(speech),
+                    Err(error) => console_error!("transcribe {url} failed: {error}"),
+                }
+                (parts.join("\n"), Some(video))
             }
             ("audio", _) => (agent.transcribe(&bytes).await?, None),
             _ => (agent.read_document(name, essence, &bytes).await?, None),

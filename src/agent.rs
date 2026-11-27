@@ -17,7 +17,7 @@ const ASK: &str = "Only answer a question about this link, such as whether it is
 const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
 /// Scores how well each passage answers a query. It writes no text.
 const RERANK_MODEL: &str = "@cf/baai/bge-reranker-base";
-const READ_IMAGE: &str = "Write what this image shows in one short line. Then write every piece of visible text, exactly as written, one item per line. If there is no text, write only the first line.";
+const READ_MEDIA: &str = "Describe what this shows in one or two short lines: the main subjects (people, mascots, animals, food, objects), the place, and any event. Then write every piece of visible text, exactly as written, including scores and numbers, one item per line.";
 /// The most characters one embedding reads. The model reads about 8,000 tokens.
 const MAX_TEXT: usize = 4_000;
 const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
@@ -25,7 +25,7 @@ const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
 const DIMENSIONS: u32 = 512;
 /// A model reply takes about 1 second. The last of the 3 tries has no time limit.
 const MODEL_TIMEOUT_MS: u32 = 15_000;
-/// A JSON reply is a compaction. It writes a long summary, and no one waits on it.
+/// A compaction or a media reading. Each writes a long text, and no one waits on it.
 const COMPACTION_TIMEOUT_MS: u32 = 60_000;
 /// Parsed tool calls. A call that fails to parse holds the error text for the model.
 pub type Calls = Vec<std::result::Result<ToolCall, String>>;
@@ -228,21 +228,26 @@ impl Agent {
         Ok(BASE64.decode(vector).map_err(|error| error.to_string())?)
     }
 
-    /// What a saved image shows, in one line, then every piece of its visible text. Search reads
-    /// this text, so a screenshot's gate, total, or code can be found and quoted later.
-    pub async fn read_image(&self, (mime, bytes): &(String, Vec<u8>)) -> Result<String> {
+    /// What a saved image or video shows, then every piece of its visible text. Search reads this
+    /// text, so a screenshot's gate or a scoreboard's score can be found and quoted later.
+    pub async fn read_media(&self, (mime, bytes): &(String, Vec<u8>)) -> Result<String> {
+        let kind = if mime.starts_with("video/") {
+            "video_url"
+        } else {
+            "image_url"
+        };
         let input = json!({
             "messages": [{ "role": "user", "content": [
-                { "type": "text", "text": READ_IMAGE },
-                { "type": "image_url", "image_url": { "url": Self::data_url(mime, bytes) } },
+                { "type": "text", "text": READ_MEDIA },
+                { "type": kind, kind: { "url": Self::data_url(mime, bytes) } },
             ]}],
             "max_tokens": 400,
             "chat_template_kwargs": { "enable_thinking": false },
         });
-        let options = Self::gateway(json!({ "step": "read_image" }), MODEL_TIMEOUT_MS);
+        let options = Self::gateway(json!({ "step": "read_media" }), COMPACTION_TIMEOUT_MS);
         let output = self.call(MODEL, &input, Some(&options)).await?;
         let text = output["choices"][0]["message"]["content"].as_str();
-        Ok(Self::clean(text.ok_or("the image reading is missing")?))
+        Ok(Self::clean(text.ok_or("the media reading is missing")?))
     }
 
     pub async fn transcribe(&self, audio: &[u8]) -> Result<String> {
@@ -326,6 +331,18 @@ impl Agent {
                 break;
             };
             text.replace_range(start..=start + len, "");
+        }
+        // iMessage shows no HTML. Gemma once wrote a tapback as a `<button>` tag. A tag starts
+        // with a letter or "/", so "<3" stays.
+        let mut from = 0;
+        while let Some(found) = text[from..].find('<') {
+            let start = from + found;
+            let next = text[start + 1..].chars().next();
+            let is_tag = matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '/');
+            match (is_tag, text[start..].find('>')) {
+                (true, Some(len)) => text.replace_range(start..=start + len, ""),
+                _ => from = start + 1,
+            }
         }
         text.trim().to_string()
     }

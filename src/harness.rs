@@ -287,6 +287,13 @@ impl Harness {
             Agent::push_results(&mut context, results);
         };
 
+        // A reply that is only a tapback emoji, such as "👍", goes out as that tapback.
+        let mut text = text;
+        if let Ok(tapback) = serde_json::from_value::<Tapback>(json!(text)) {
+            self.react(burst, tapback).await?;
+            text = String::new();
+        }
+
         let first_message = summary.is_none() && chat.len() == burst.len();
         self.finish(text, burst, message, first_message, saved)
             .await
@@ -969,24 +976,13 @@ impl Harness {
         }
         rows.truncate(SEARCH_RESULTS);
 
-        // A text's words: lowercase, and longer than 2 characters.
-        let words = |text: &str| -> Vec<String> {
-            text.split(|c: char| !c.is_alphanumeric())
-                .filter(|word| word.chars().count() > 2)
-                .map(str::to_lowercase)
-                .collect()
-        };
-
-        // One line per result. A link or file starts with its URL. A note shows its text.
-        let mut lines = Vec::new();
-        for row in &rows {
-            let saved = Timestamp::from_second(row.created_at)
-                .map_err(|error| error.to_string())?
-                .to_zoned_datetime(zone.clone())
-                .strftime("%a %b %-d %Y")
-                .to_string();
-            // The part of the search text with the most query words, so a long note or file
-            // shows the lines that match, not only its start.
+        // Each result shows its search text, or for a long one, the passage that best answers the
+        // query. One reranker call scores every passage, so a long note, file, or transcript
+        // shows the lines that match, not only its start.
+        let mut snippets = Vec::new();
+        let mut passages = Vec::new();
+        let mut owners = Vec::new();
+        for (owner, row) in rows.iter().enumerate() {
             let text = row.description.as_deref().unwrap_or_default();
             let one_line: Vec<char> = text
                 .split_whitespace()
@@ -994,34 +990,40 @@ impl Harness {
                 .join(" ")
                 .chars()
                 .collect();
-            let mut snippet: String = one_line.iter().take(SNIPPET).collect();
-            if let Some(query) = query {
-                let query_words = words(query);
-                let mut best_hits = 0;
-                let mut start = 0;
-                while start < one_line.len() {
-                    let end = (start + SNIPPET).min(one_line.len());
-                    let part: String = one_line[start..end].iter().collect();
-                    let part_words = words(&part);
-                    let mut hits = 0;
-                    for word in &query_words {
-                        for part_word in &part_words {
-                            if part_word.starts_with(word.as_str()) {
-                                hits += 1;
-                                break;
-                            }
-                        }
-                    }
-                    if hits > best_hits {
-                        best_hits = hits;
-                        snippet = part;
-                    }
-                    if end == one_line.len() {
-                        break;
-                    }
-                    start += SNIPPET / 2;
+            snippets.push(one_line.iter().take(SNIPPET).collect::<String>());
+            if query.is_none() || one_line.len() <= SNIPPET {
+                continue;
+            }
+            let mut start = 0;
+            loop {
+                let end = (start + PASSAGE).min(one_line.len());
+                passages.push(one_line[start..end].iter().collect::<String>());
+                owners.push(owner);
+                if end == one_line.len() {
+                    break;
+                }
+                start += PASSAGE_STEP;
+            }
+        }
+        if let (Some(query), false) = (query, passages.is_empty()) {
+            let scores = self.agent.rerank(query, &passages).await?;
+            let mut best = vec![f32::MIN; rows.len()];
+            for ((passage, &owner), &score) in passages.iter().zip(&owners).zip(&scores) {
+                if score > best[owner] {
+                    best[owner] = score;
+                    snippets[owner] = passage.clone();
                 }
             }
+        }
+
+        // One line per result. A link or file starts with its URL. A note shows its text.
+        let mut lines = Vec::new();
+        for (row, snippet) in rows.iter().zip(&snippets) {
+            let saved = Timestamp::from_second(row.created_at)
+                .map_err(|error| error.to_string())?
+                .to_zoned_datetime(zone.clone())
+                .strftime("%a %b %-d %Y")
+                .to_string();
             if row.media == "note" {
                 lines.push(format!("- note, saved {saved}: {snippet}"));
             } else {
