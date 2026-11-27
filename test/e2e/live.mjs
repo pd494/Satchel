@@ -27,6 +27,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { getPlatformProxy } from "wrangler";
 import { describe, eventOf, file, linq, newUser, sleep, startWorker, stop, summarize, userDatabases, webhook } from "./harness.mjs";
 
 const REPLY_TIMEOUT_MS = 180_000;
@@ -35,7 +36,6 @@ const REPEAT_WAIT_MS = 20_000;
 const ONLY = process.env.EVAL_SCENARIOS?.split(",") ?? null;
 // "2/3" runs every third scenario, starting with the second. CI runs three shards side by side.
 const [SHARD, SHARDS] = (process.env.EVAL_SHARD ?? "1/1").split("/").map(Number);
-const TOKEN = process.env.CLOUDFLARE_API_TOKEN ?? JSON.parse(execSync("npx wrangler auth token --json").toString()).token;
 const RUN = process.env.EVAL_RUN ?? `local-${new Date().toISOString()}`;
 const RUN_STARTED = new Date().toISOString();
 const COMMIT = process.env.GITHUB_SHA ?? execSync("git rev-parse HEAD").toString().trim();
@@ -550,6 +550,9 @@ function checkState(scenario, greeting) {
   return failures;
 }
 
+/** The AI binding the judge runs on, started on first use. */
+let judgeAi = null;
+
 /** Asks the model whether `reply`, to the user's `message`, meets `rule`. Returns the reason when it
  * does not, or null. */
 async function judge(rule, message, reply) {
@@ -566,26 +569,27 @@ Does the reply meet the rule? Answer "unknown" if you cannot tell.`;
     properties: { verdict: { type: "string", enum: ["pass", "fail", "unknown"] }, reason: { type: "string", maxLength: 200 } },
     required: ["verdict", "reason"],
   };
-  // Workers AI sometimes times out. Each try is a new request.
+  // The Worker's AI binding, through wrangler and its login. Workers AI sometimes times out. Each
+  // try is a new request.
+  judgeAi ??= (await getPlatformProxy({ configPath: new URL("../../wrangler.jsonc", import.meta.url).pathname })).env.AI;
   let errors = null;
   for (let tries = 0; tries < 5; tries++) {
     if (tries > 0) await sleep(3_000);
-    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/ai/run/${MODEL}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    try {
+      const output = await judgeAi.run(MODEL, {
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_schema", json_schema: schema },
         chat_template_kwargs: { enable_thinking: false },
-      }),
-    });
-    const body = await response.json();
-    const content = body.result?.choices?.[0]?.message?.content;
-    if (body.success && content) {
-      const { verdict, reason } = JSON.parse(content);
-      return verdict === "fail" ? `the judge says: ${reason}` : null;
+      });
+      const content = output.choices?.[0]?.message?.content;
+      if (content) {
+        const { verdict, reason } = JSON.parse(content);
+        return verdict === "fail" ? `the judge says: ${reason}` : null;
+      }
+      errors = "no answer";
+    } catch (error) {
+      errors = error.message;
     }
-    errors = body.errors;
   }
   return `the judge did not answer: ${JSON.stringify(errors)}`;
 }
