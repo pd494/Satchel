@@ -784,7 +784,7 @@ impl Harness {
             if utc_date != local_date {
                 return Ok(ToolResult::Error(format!(
                 "the time zone is saved, but `at` was worked out from UTC. {} Work out `at` again from this time and call remind again.",
-                    Self::now_line(Some(zone))
+                    Self::now_line(Some(zone))?
                 )));
             }
         }
@@ -853,7 +853,7 @@ impl Harness {
         self.db
             .change_setting(&change, Timestamp::now().as_second())?;
         let reply = match &change {
-            SettingChange::TimeZone(zone) => format!("ok. {}", Self::now_line(Some(zone))),
+            SettingChange::TimeZone(zone) => format!("ok. {}", Self::now_line(Some(zone))?),
             SettingChange::Set { .. } => "ok".to_string(),
             SettingChange::Remove { key } => format!("ok, removed {key}"),
         };
@@ -1337,7 +1337,7 @@ impl Harness {
 
     fn prompt_context(&self) -> Result<String> {
         let time_zone = self.time_zone()?;
-        let mut text = Self::now_line(time_zone.as_ref());
+        let mut text = Self::now_line(time_zone.as_ref())?;
         let reminders = self.db.reminders()?;
         if !reminders.is_empty() {
             let zone = time_zone.unwrap_or(TimeZone::UTC);
@@ -1367,13 +1367,21 @@ impl Harness {
         Ok(text)
     }
 
-    fn now_line(time_zone: Option<&TimeZone>) -> String {
+    fn now_line(time_zone: Option<&TimeZone>) -> Result<String> {
         let now = Timestamp::now().to_zoned_datetime(time_zone.cloned().unwrap_or(TimeZone::UTC));
         let mut line = format!("Now: {}.", now.strftime("%A, %Y-%m-%d %H:%M:%S in %Q"));
         if time_zone.is_none() {
             line.push_str(" The user's time zone is unknown.");
         }
-        line
+        // Gemma once worked out "friday" as a Monday. It copies the date from this list.
+        line.push_str(" The next 7 days:");
+        let mut day = now.date();
+        for _ in 0..7 {
+            day = day.tomorrow().map_err(|error| error.to_string())?;
+            line.push_str(&format!(" {}", day.strftime("%a %Y-%m-%d")));
+        }
+        line.push('.');
+        Ok(line)
     }
 
     /// Sends each part of `text` as its own message. Linq requires a link or media part to be
