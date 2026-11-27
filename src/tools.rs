@@ -189,7 +189,7 @@ impl ToolCall {
             }},
             { "type": "function", "function": {
                 "name": "search",
-                "description": "Find saved links, files, and notes, and past chat messages. Returns up to 10 saved items, best first, each with its URL, and up to 5 past messages, each with the messages around it.",
+                "description": "Find saved links, files, and notes, and past chat messages. Returns up to 10 saved items, best first, each with its URL, and up to 5 parts of past messages that best answer it, best first.",
                 "parameters": { "type": "object", "properties": {
                     "query": { "type": "string", "description": "What the user is looking for, in a few words, such as \"hip exercise video\" or \"tokyo trip\". Omit it to list the newest saves, or, with `after` or `before`, everything from that time." },
                     "after": { "type": "string", "description": "Only items saved, or messages sent, at or after this local date and time, such as 2026-11-16T00:00:00. Work it out from the \"Now:\" line. Omit it unless the user names a time." },

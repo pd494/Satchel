@@ -1,7 +1,7 @@
 use crate::media::Link;
 use crate::tools::{ToolCall, ToolResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use worker::js_sys::{Array, Object, Promise, Reflect, Uint8Array};
@@ -15,6 +15,8 @@ const CLEF: &str = "@cf/cloudflare/clef";
 const KEEP: &str = "Keep it. The user sent the link alone, with a comment or note about it, with a message about something else, or asked to save it or be reminded of it, even if they also ask a question about it.";
 const ASK: &str = "Only answer a question about this link, such as whether it is legit, what it says, who is in it, or what is similar to it. The user did not ask to keep it.";
 const EMBED_MODEL: &str = "@cf/google/embeddinggemma-2";
+/// Scores how well each passage answers a query. It writes no text.
+const RERANK_MODEL: &str = "@cf/baai/bge-reranker-base";
 /// The most characters one embedding reads. The model reads about 8,000 tokens.
 const MAX_TEXT: usize = 4_000;
 const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
@@ -46,6 +48,13 @@ extern "C" {
         document: JsValue,
         options: JsValue,
     ) -> std::result::Result<Promise, JsValue>;
+}
+
+/// One reranker score: `id` is the passage's place in the input.
+#[derive(Deserialize)]
+struct Ranked {
+    id: usize,
+    score: f32,
 }
 
 pub struct Agent {
@@ -237,6 +246,23 @@ impl Agent {
     }
 
     /// `options` is `None` for media calls, which are too large for AI Gateway.
+    /// Scores how well each of `passages` answers `query`, from 0 to 1, in the same order.
+    pub async fn rerank(&self, query: &str, passages: &[String]) -> Result<Vec<f32>> {
+        let mut contexts = Vec::new();
+        for passage in passages {
+            contexts.push(json!({ "text": passage }));
+        }
+        let input = json!({ "query": query, "contexts": contexts });
+        let options = Self::gateway(json!({ "step": "rerank" }));
+        let output = self.call(RERANK_MODEL, &input, Some(&options)).await?;
+        let ranked: Vec<Ranked> = serde_json::from_value(output["response"].clone())?;
+        let mut scores = vec![0.0; passages.len()];
+        for item in ranked {
+            scores[item.id] = item.score;
+        }
+        Ok(scores)
+    }
+
     async fn call(&self, model: &str, input: &Value, options: Option<&Value>) -> Result<Value> {
         let options = match options {
             Some(options) => options.serialize(&JSON)?,

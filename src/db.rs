@@ -85,9 +85,6 @@ const SAVED: &str = "id, media, content, context, description, created_at, vecto
 
 const ROW: &str = "SELECT chat.id, chat.turn, chat.role, chat.content, chat.created_at FROM chat";
 
-const CHAT_HITS: i64 = 5;
-const NEIGHBORS: i64 = 3;
-
 #[derive(Deserialize)]
 struct NextDue {
     due_at: Option<i64>,
@@ -121,7 +118,7 @@ pub enum Role {
     Assistant,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Row {
     id: i64,
     pub turn: Turn,
@@ -434,16 +431,16 @@ impl Db {
         self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
-    /// Finds past messages in the turns before `before_turn`. Each match comes with `NEIGHBORS`
-    /// messages on each side. Matches that touch become one excerpt. Returns the excerpts
-    /// oldest first.
-    pub fn search_chat(
+    /// The user's own past messages in the turns before `before_turn`, between `after` and
+    /// `before`. With a `query`, the best word matches come first. Without one, the newest.
+    pub fn chat_matches(
         &self,
         query: Option<&str>,
         after: Option<i64>,
         before: Option<i64>,
         before_turn: Turn,
-    ) -> Result<Vec<Vec<Row>>> {
+        limit: i64,
+    ) -> Result<Vec<Row>> {
         // An FTS5 query: each word, quoted, as a prefix, joined by OR.
         let mut words = Vec::new();
         for word in query
@@ -458,55 +455,21 @@ impl Db {
             return Ok(Vec::new());
         }
 
-        let filter = "turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
+        let filter = "chat.role = 'user' AND turn < ?1 AND (?2 IS NULL OR created_at >= ?2) \
             AND (?3 IS NULL OR created_at < ?3)";
         let select_query = if words.is_empty() {
-            format!("{ROW} WHERE {filter} ORDER BY id DESC LIMIT {CHAT_HITS}")
+            format!("{ROW} WHERE {filter} ORDER BY id DESC LIMIT {limit}")
         } else {
-            // A hit's content is the words around its match. The search result cuts each message
-            // to its start, and a long message would lose the match.
             format!(
-                "SELECT chat.id, chat.turn, chat.role, \
-                snippet(messages_fts, 0, '', '', '...', 32) AS content, chat.created_at \
-                FROM chat JOIN messages_fts AS f ON f.rowid = chat.id \
-                WHERE {filter} AND messages_fts MATCH ?4 ORDER BY f.rank LIMIT {CHAT_HITS}"
+                "{ROW} JOIN messages_fts AS f ON f.rowid = chat.id \
+                WHERE {filter} AND messages_fts MATCH ?4 ORDER BY f.rank LIMIT {limit}"
             )
         };
         let mut values = vec![before_turn.0.into(), after.into(), before.into()];
         if !words.is_empty() {
             values.push(words.join(" OR ").into());
         }
-        let hits: Vec<Row> = self.sql.exec(&select_query, Some(values))?.to_array()?;
-
-        // Each hit and its neighbors, oldest first. Ranges that overlap or touch are joined.
-        let mut hit_ranges: Vec<(i64, i64)> = Vec::new();
-        for hit in &hits {
-            hit_ranges.push((hit.id - NEIGHBORS, hit.id + NEIGHBORS));
-        }
-        hit_ranges.sort();
-        let mut merged_ranges: Vec<(i64, i64)> = Vec::new();
-        for (from, to) in hit_ranges {
-            match merged_ranges.last_mut() {
-                Some(last) if from <= last.1 + 1 => last.1 = last.1.max(to),
-                _ => merged_ranges.push((from, to)),
-            }
-        }
-
-        let excerpt_query = format!("{ROW} WHERE id BETWEEN ? AND ? AND turn < ? ORDER BY id");
-        let mut excerpts = Vec::new();
-        for (from, to) in merged_ranges {
-            let values = vec![from.into(), to.into(), before_turn.0.into()];
-            let mut excerpt: Vec<Row> = self.sql.exec(&excerpt_query, Some(values))?.to_array()?;
-            for row in &mut excerpt {
-                for hit in &hits {
-                    if hit.id == row.id {
-                        row.content = hit.content.clone();
-                    }
-                }
-            }
-            excerpts.push(excerpt);
-        }
-        Ok(excerpts)
+        self.sql.exec(&select_query, Some(values))?.to_array()
     }
 
     /// Counts one run for the user message `event_id`, before the run starts.

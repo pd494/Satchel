@@ -30,6 +30,19 @@ const MAX_STEPS: usize = 6;
 const SEARCH_RESULTS: usize = 10;
 const RRF_K: f32 = 60.0;
 const SNIPPET: usize = 300;
+/// Chat search: the word matches read, the matches scored, and the lines returned.
+const CHAT_MATCHES: i64 = 60;
+const RERANK_CANDIDATES: usize = 20;
+const CHAT_HITS: i64 = 5;
+/// The characters in one passage, and the start of the next. Passages overlap.
+const PASSAGE: usize = 320;
+const PASSAGE_STEP: usize = 200;
+/// A message shorter than this that ends in "?" or starts with one of these words is a question.
+const QUESTION_LENGTH: usize = 120;
+const QUESTION_WORDS: [&str; 19] = [
+    "what", "whats", "where", "wheres", "when", "whens", "who", "whos", "how", "which", "why",
+    "is", "are", "do", "does", "did", "can", "could", "should",
+];
 
 /// Sits next to the newest messages. The same rule in the system prompt alone does not make the
 /// model search.
@@ -763,21 +776,109 @@ impl Harness {
         if !matching_saved.is_empty() {
             found.push(format!("Saved items:\n{}", matching_saved.join("\n")));
         }
-        let mut matching_chat = Vec::new();
-        for excerpt in self.db.search_chat(query, after, before, before_turn)? {
-            let mut lines = Vec::new();
-            for row in &excerpt {
-                lines.push(Self::transcript_line(row, &zone, Some(SNIPPET))?);
-            }
-            matching_chat.push(lines.join("\n"));
-        }
+        let matching_chat = self
+            .search_chat(query, after, before, before_turn, &zone)
+            .await?;
         if !matching_chat.is_empty() {
-            found.push(format!("Past chat:\n{}", matching_chat.join("\n\n")));
+            found.push(format!("Past chat:\n{}", matching_chat.join("\n")));
         }
         if found.is_empty() {
             return Ok(ToolResult::Done("Nothing matches.".to_string()));
         }
         Ok(ToolResult::Done(found.join("\n\n")))
+    }
+
+    /// The user's past messages that best answer `query`, one line each. Without a query, the
+    /// newest in the time window.
+    async fn search_chat(
+        &self,
+        query: Option<&str>,
+        after: Option<i64>,
+        before: Option<i64>,
+        before_turn: Turn,
+        zone: &TimeZone,
+    ) -> Result<Vec<String>> {
+        let Some(query) = query else {
+            let mut lines = Vec::new();
+            for row in self
+                .db
+                .chat_matches(None, after, before, before_turn, CHAT_HITS)?
+            {
+                lines.push(Self::transcript_line(&row, zone, Some(SNIPPET))?);
+            }
+            return Ok(lines);
+        };
+
+        // Candidates: word matches that state something. A short question, such as the user
+        // asking this same thing before, states no fact. A repeated text adds nothing.
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for row in self
+            .db
+            .chat_matches(Some(query), after, before, before_turn, CHAT_MATCHES)?
+        {
+            let text = row.content.trim().to_lowercase();
+            let first_word: String = text
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '\'')
+                .filter(|c| *c != '\'')
+                .collect();
+            let question = text.chars().count() < QUESTION_LENGTH
+                && (text.ends_with('?') || QUESTION_WORDS.contains(&first_word.as_str()));
+            if question || !seen.insert(text) {
+                continue;
+            }
+            candidates.push(row);
+            if candidates.len() == RERANK_CANDIDATES {
+                break;
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Passages: a long message is split into overlapping parts, so the answer is not lost
+        // to the cut at the end of a line.
+        let mut passages = Vec::new();
+        let mut owners = Vec::new();
+        for (owner, row) in candidates.iter().enumerate() {
+            let chars: Vec<char> = row.content.chars().collect();
+            let mut start = 0;
+            loop {
+                let end = (start + PASSAGE).min(chars.len());
+                passages.push(chars[start..end].iter().collect::<String>());
+                owners.push(owner);
+                if end == chars.len() {
+                    break;
+                }
+                start += PASSAGE_STEP;
+            }
+        }
+
+        // Each message keeps its best passage. The best messages come first.
+        let scores = self.agent.rerank(query, &passages).await?;
+        let mut best: Vec<Option<(f32, usize)>> = vec![None; candidates.len()];
+        for (passage, (&owner, &score)) in owners.iter().zip(&scores).enumerate() {
+            match best[owner] {
+                Some((best_score, _)) if best_score >= score => {}
+                _ => best[owner] = Some((score, passage)),
+            }
+        }
+        let mut ranked = Vec::new();
+        for (owner, best_passage) in best.into_iter().enumerate() {
+            if let Some((score, passage)) = best_passage {
+                ranked.push((score, owner, passage));
+            }
+        }
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        let mut lines = Vec::new();
+        for (_, owner, passage) in ranked.into_iter().take(CHAT_HITS as usize) {
+            let mut row = candidates[owner].clone();
+            row.content = passages[passage].clone();
+            lines.push(Self::transcript_line(&row, zone, None)?);
+        }
+        Ok(lines)
     }
 
     async fn search_saved(
